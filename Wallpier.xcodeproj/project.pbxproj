@@ -1,0 +1,614 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B2AE91513041EC3C004BF2F2 /* WallpierApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91503041EC3C004BF2F2 /* WallpierApp.swift */; };
+		B2AE91533041EC3C004BF2F2 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91523041EC3C004BF2F2 /* ContentView.swift */; };
+		B2AE91553041EC40004BF2F2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91543041EC40004BF2F2 /* Assets.xcassets */; };
+		B2AE91593041EC40004BF2F2 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91583041EC40004BF2F2 /* Preview Assets.xcassets */; };
+		B2AE91633041EC41004BF2F2 /* WallpierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91623041EC41004BF2F2 /* WallpierTests.swift */; };
+		B2AE916D3041EC41004BF2F2 /* WallpierUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE916C3041EC41004BF2F2 /* WallpierUITests.swift */; };
+		B2AE916F3041EC41004BF2F2 /* WallpierUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE916E3041EC41004BF2F2 /* WallpierUITestsLaunchTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		B2AE915F3041EC41004BF2F2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B2AE91453041EC3C004BF2F2 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B2AE914C3041EC3C004BF2F2;
+			remoteInfo = Wallpier;
+		};
+		B2AE91693041EC41004BF2F2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B2AE91453041EC3C004BF2F2 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B2AE914C3041EC3C004BF2F2;
+			remoteInfo = Wallpier;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		B2AE914D3041EC3C004BF2F2 /* Wallpier.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Wallpier.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B2AE91503041EC3C004BF2F2 /* WallpierApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpierApp.swift; sourceTree = "<group>"; };
+		B2AE91523041EC3C004BF2F2 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B2AE91543041EC40004BF2F2 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B2AE91563041EC40004BF2F2 /* Wallpier.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Wallpier.entitlements; sourceTree = "<group>"; };
+		B2AE91583041EC40004BF2F2 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		B2AE915E3041EC41004BF2F2 /* WallpierTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WallpierTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B2AE91623041EC41004BF2F2 /* WallpierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpierTests.swift; sourceTree = "<group>"; };
+		B2AE91683041EC41004BF2F2 /* WallpierUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WallpierUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B2AE916C3041EC41004BF2F2 /* WallpierUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpierUITests.swift; sourceTree = "<group>"; };
+		B2AE916E3041EC41004BF2F2 /* WallpierUITestsLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpierUITestsLaunchTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		B2AE914A3041EC3C004BF2F2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2AE915B3041EC41004BF2F2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2AE91653041EC41004BF2F2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		B2AE91443041EC3C004BF2F2 = {
+			isa = PBXGroup;
+			children = (
+				B2AE914F3041EC3C004BF2F2 /* Wallpier */,
+				B2AE91613041EC41004BF2F2 /* WallpierTests */,
+				B2AE916B3041EC41004BF2F2 /* WallpierUITests */,
+				B2AE914E3041EC3C004BF2F2 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		B2AE914E3041EC3C004BF2F2 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B2AE914D3041EC3C004BF2F2 /* Wallpier.app */,
+				B2AE915E3041EC41004BF2F2 /* WallpierTests.xctest */,
+				B2AE91683041EC41004BF2F2 /* WallpierUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		B2AE914F3041EC3C004BF2F2 /* Wallpier */ = {
+			isa = PBXGroup;
+			children = (
+				B2AE91503041EC3C004BF2F2 /* WallpierApp.swift */,
+				B2AE91523041EC3C004BF2F2 /* ContentView.swift */,
+				B2AE91543041EC40004BF2F2 /* Assets.xcassets */,
+				B2AE91563041EC40004BF2F2 /* Wallpier.entitlements */,
+				B2AE91573041EC40004BF2F2 /* Preview Content */,
+			);
+			path = Wallpier;
+			sourceTree = "<group>";
+		};
+		B2AE91573041EC40004BF2F2 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				B2AE91583041EC40004BF2F2 /* Preview Assets.xcassets */,
+			);
+			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		B2AE91613041EC41004BF2F2 /* WallpierTests */ = {
+			isa = PBXGroup;
+			children = (
+				B2AE91623041EC41004BF2F2 /* WallpierTests.swift */,
+			);
+			path = WallpierTests;
+			sourceTree = "<group>";
+		};
+		B2AE916B3041EC41004BF2F2 /* WallpierUITests */ = {
+			isa = PBXGroup;
+			children = (
+				B2AE916C3041EC41004BF2F2 /* WallpierUITests.swift */,
+				B2AE916E3041EC41004BF2F2 /* WallpierUITestsLaunchTests.swift */,
+			);
+			path = WallpierUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		B2AE914C3041EC3C004BF2F2 /* Wallpier */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B2AE91723041EC41004BF2F2 /* Build configuration list for PBXNativeTarget "Wallpier" */;
+			buildPhases = (
+				B2AE91493041EC3C004BF2F2 /* Sources */,
+				B2AE914A3041EC3C004BF2F2 /* Frameworks */,
+				B2AE914B3041EC3C004BF2F2 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Wallpier;
+			productName = Wallpier;
+			productReference = B2AE914D3041EC3C004BF2F2 /* Wallpier.app */;
+			productType = "com.apple.product-type.application";
+		};
+		B2AE915D3041EC41004BF2F2 /* WallpierTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B2AE91753041EC41004BF2F2 /* Build configuration list for PBXNativeTarget "WallpierTests" */;
+			buildPhases = (
+				B2AE915A3041EC41004BF2F2 /* Sources */,
+				B2AE915B3041EC41004BF2F2 /* Frameworks */,
+				B2AE915C3041EC41004BF2F2 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B2AE91603041EC41004BF2F2 /* PBXTargetDependency */,
+			);
+			name = WallpierTests;
+			productName = WallpierTests;
+			productReference = B2AE915E3041EC41004BF2F2 /* WallpierTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		B2AE91673041EC41004BF2F2 /* WallpierUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B2AE91783041EC41004BF2F2 /* Build configuration list for PBXNativeTarget "WallpierUITests" */;
+			buildPhases = (
+				B2AE91643041EC41004BF2F2 /* Sources */,
+				B2AE91653041EC41004BF2F2 /* Frameworks */,
+				B2AE91663041EC41004BF2F2 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B2AE916A3041EC41004BF2F2 /* PBXTargetDependency */,
+			);
+			name = WallpierUITests;
+			productName = WallpierUITests;
+			productReference = B2AE91683041EC41004BF2F2 /* WallpierUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B2AE91453041EC3C004BF2F2 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1520;
+				LastUpgradeCheck = 1520;
+				TargetAttributes = {
+					B2AE914C3041EC3C004BF2F2 = {
+						CreatedOnToolsVersion = 15.2;
+					};
+					B2AE915D3041EC41004BF2F2 = {
+						CreatedOnToolsVersion = 15.2;
+						TestTargetID = B2AE914C3041EC3C004BF2F2;
+					};
+					B2AE91673041EC41004BF2F2 = {
+						CreatedOnToolsVersion = 15.2;
+						TestTargetID = B2AE914C3041EC3C004BF2F2;
+					};
+				};
+			};
+			buildConfigurationList = B2AE91483041EC3C004BF2F2 /* Build configuration list for PBXProject "Wallpier" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = B2AE91443041EC3C004BF2F2;
+			productRefGroup = B2AE914E3041EC3C004BF2F2 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B2AE914C3041EC3C004BF2F2 /* Wallpier */,
+				B2AE915D3041EC41004BF2F2 /* WallpierTests */,
+				B2AE91673041EC41004BF2F2 /* WallpierUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B2AE914B3041EC3C004BF2F2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B2AE91593041EC40004BF2F2 /* Preview Assets.xcassets in Resources */,
+				B2AE91553041EC40004BF2F2 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2AE915C3041EC41004BF2F2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2AE91663041EC41004BF2F2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		B2AE91493041EC3C004BF2F2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B2AE91533041EC3C004BF2F2 /* ContentView.swift in Sources */,
+				B2AE91513041EC3C004BF2F2 /* WallpierApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2AE915A3041EC41004BF2F2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B2AE91633041EC41004BF2F2 /* WallpierTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2AE91643041EC41004BF2F2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B2AE916F3041EC41004BF2F2 /* WallpierUITestsLaunchTests.swift in Sources */,
+				B2AE916D3041EC41004BF2F2 /* WallpierUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B2AE91603041EC41004BF2F2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B2AE914C3041EC3C004BF2F2 /* Wallpier */;
+			targetProxy = B2AE915F3041EC41004BF2F2 /* PBXContainerItemProxy */;
+		};
+		B2AE916A3041EC41004BF2F2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B2AE914C3041EC3C004BF2F2 /* Wallpier */;
+			targetProxy = B2AE91693041EC41004BF2F2 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		B2AE91703041EC41004BF2F2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		B2AE91713041EC41004BF2F2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		B2AE91733041EC41004BF2F2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Wallpier/Wallpier.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"Wallpier/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.parth.Wallpier;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B2AE91743041EC41004BF2F2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Wallpier/Wallpier.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"Wallpier/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.parth.Wallpier;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		B2AE91763041EC41004BF2F2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
+				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.parth.WallpierTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Wallpier.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Wallpier";
+			};
+			name = Debug;
+		};
+		B2AE91773041EC41004BF2F2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
+				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.parth.WallpierTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Wallpier.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Wallpier";
+			};
+			name = Release;
+		};
+		B2AE91793041EC41004BF2F2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
+				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.parth.WallpierUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Wallpier;
+			};
+			name = Debug;
+		};
+		B2AE917A3041EC41004BF2F2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
+				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.parth.WallpierUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Wallpier;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		B2AE91483041EC3C004BF2F2 /* Build configuration list for PBXProject "Wallpier" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B2AE91703041EC41004BF2F2 /* Debug */,
+				B2AE91713041EC41004BF2F2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B2AE91723041EC41004BF2F2 /* Build configuration list for PBXNativeTarget "Wallpier" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B2AE91733041EC41004BF2F2 /* Debug */,
+				B2AE91743041EC41004BF2F2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B2AE91753041EC41004BF2F2 /* Build configuration list for PBXNativeTarget "WallpierTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B2AE91763041EC41004BF2F2 /* Debug */,
+				B2AE91773041EC41004BF2F2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B2AE91783041EC41004BF2F2 /* Build configuration list for PBXNativeTarget "WallpierUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B2AE91793041EC41004BF2F2 /* Debug */,
+				B2AE917A3041EC41004BF2F2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = B2AE91453041EC3C004BF2F2 /* Project object */;
+}
