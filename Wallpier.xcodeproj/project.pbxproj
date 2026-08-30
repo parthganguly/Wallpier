@@ -7,10 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		B2AE91513041EC3C004BF2F2 /* WallpierApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91503041EC3C004BF2F2 /* WallpierApp.swift */; };
-		B2AE91533041EC3C004BF2F2 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91523041EC3C004BF2F2 /* ContentView.swift */; };
+		B2AE91513041EC3C004BF2F2 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91503041EC3C004BF2F2 /* AppDelegate.swift */; };
+		B2AE91533041EC3C004BF2F2 /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91523041EC3C004BF2F2 /* MainWindowController.swift */; };
+		B2AE91803041EC41004BF2F2 /* WallpaperService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91813041EC41004BF2F2 /* WallpaperService.swift */; };
+		B2AE91833041EC41004BF2F2 /* WallpaperModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91823041EC41004BF2F2 /* WallpaperModels.swift */; };
+		B2AE91853041EC41004BF2F2 /* WallpaperStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91843041EC41004BF2F2 /* WallpaperStateStore.swift */; };
+		B2AE91873041EC41004BF2F2 /* ThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91863041EC41004BF2F2 /* ThumbnailProvider.swift */; };
+		B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */; };
 		B2AE91553041EC40004BF2F2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91543041EC40004BF2F2 /* Assets.xcassets */; };
-		B2AE91593041EC40004BF2F2 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91583041EC40004BF2F2 /* Preview Assets.xcassets */; };
 		B2AE91633041EC41004BF2F2 /* WallpierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91623041EC41004BF2F2 /* WallpierTests.swift */; };
 		B2AE916D3041EC41004BF2F2 /* WallpierUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE916C3041EC41004BF2F2 /* WallpierUITests.swift */; };
 		B2AE916F3041EC41004BF2F2 /* WallpierUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE916E3041EC41004BF2F2 /* WallpierUITestsLaunchTests.swift */; };
@@ -35,11 +39,15 @@
 
 /* Begin PBXFileReference section */
 		B2AE914D3041EC3C004BF2F2 /* Wallpier.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Wallpier.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B2AE91503041EC3C004BF2F2 /* WallpierApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpierApp.swift; sourceTree = "<group>"; };
-		B2AE91523041EC3C004BF2F2 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B2AE91503041EC3C004BF2F2 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		B2AE91523041EC3C004BF2F2 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
+		B2AE91813041EC41004BF2F2 /* WallpaperService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperService.swift; sourceTree = "<group>"; };
+		B2AE91823041EC41004BF2F2 /* WallpaperModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperModels.swift; sourceTree = "<group>"; };
+		B2AE91843041EC41004BF2F2 /* WallpaperStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperStateStore.swift; sourceTree = "<group>"; };
+		B2AE91863041EC41004BF2F2 /* ThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailProvider.swift; sourceTree = "<group>"; };
+		B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperCollectionViewItem.swift; sourceTree = "<group>"; };
 		B2AE91543041EC40004BF2F2 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B2AE91563041EC40004BF2F2 /* Wallpier.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Wallpier.entitlements; sourceTree = "<group>"; };
-		B2AE91583041EC40004BF2F2 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		B2AE915E3041EC41004BF2F2 /* WallpierTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WallpierTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2AE91623041EC41004BF2F2 /* WallpierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpierTests.swift; sourceTree = "<group>"; };
 		B2AE91683041EC41004BF2F2 /* WallpierUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WallpierUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -95,21 +103,17 @@
 		B2AE914F3041EC3C004BF2F2 /* Wallpier */ = {
 			isa = PBXGroup;
 			children = (
-				B2AE91503041EC3C004BF2F2 /* WallpierApp.swift */,
-				B2AE91523041EC3C004BF2F2 /* ContentView.swift */,
+				B2AE91503041EC3C004BF2F2 /* AppDelegate.swift */,
+				B2AE91523041EC3C004BF2F2 /* MainWindowController.swift */,
+				B2AE91813041EC41004BF2F2 /* WallpaperService.swift */,
+				B2AE91823041EC41004BF2F2 /* WallpaperModels.swift */,
+				B2AE91843041EC41004BF2F2 /* WallpaperStateStore.swift */,
+				B2AE91863041EC41004BF2F2 /* ThumbnailProvider.swift */,
+				B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */,
 				B2AE91543041EC40004BF2F2 /* Assets.xcassets */,
 				B2AE91563041EC40004BF2F2 /* Wallpier.entitlements */,
-				B2AE91573041EC40004BF2F2 /* Preview Content */,
 			);
 			path = Wallpier;
-			sourceTree = "<group>";
-		};
-		B2AE91573041EC40004BF2F2 /* Preview Content */ = {
-			isa = PBXGroup;
-			children = (
-				B2AE91583041EC40004BF2F2 /* Preview Assets.xcassets */,
-			);
-			path = "Preview Content";
 			sourceTree = "<group>";
 		};
 		B2AE91613041EC41004BF2F2 /* WallpierTests */ = {
@@ -233,7 +237,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B2AE91593041EC40004BF2F2 /* Preview Assets.xcassets in Resources */,
 				B2AE91553041EC40004BF2F2 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -259,8 +262,13 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B2AE91533041EC3C004BF2F2 /* ContentView.swift in Sources */,
-				B2AE91513041EC3C004BF2F2 /* WallpierApp.swift in Sources */,
+				B2AE91513041EC3C004BF2F2 /* AppDelegate.swift in Sources */,
+				B2AE91533041EC3C004BF2F2 /* MainWindowController.swift in Sources */,
+				B2AE91803041EC41004BF2F2 /* WallpaperService.swift in Sources */,
+				B2AE91833041EC41004BF2F2 /* WallpaperModels.swift in Sources */,
+				B2AE91853041EC41004BF2F2 /* WallpaperStateStore.swift in Sources */,
+				B2AE91873041EC41004BF2F2 /* ThumbnailProvider.swift in Sources */,
+				B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -419,31 +427,17 @@
 				CODE_SIGN_ENTITLEMENTS = Wallpier/Wallpier.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_ASSET_PATHS = "\"Wallpier/Preview Content\"";
-				ENABLE_PREVIEWS = YES;
+				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
-				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
-				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
-				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.parth.Wallpier;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
@@ -455,31 +449,17 @@
 				CODE_SIGN_ENTITLEMENTS = Wallpier/Wallpier.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_ASSET_PATHS = "\"Wallpier/Preview Content\"";
-				ENABLE_PREVIEWS = YES;
+				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
-				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
-				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
-				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
-				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.parth.Wallpier;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -491,16 +471,14 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
-				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.parth.WallpierTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Wallpier.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Wallpier";
 			};
 			name = Debug;
@@ -513,16 +491,14 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
-				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.parth.WallpierTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Wallpier.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Wallpier";
 			};
 			name = Release;
@@ -534,16 +510,14 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
-				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.parth.WallpierUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = Wallpier;
 			};
 			name = Debug;
@@ -555,16 +529,14 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.2;
-				MACOSX_DEPLOYMENT_TARGET = 13.7;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.parth.WallpierUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = Wallpier;
 			};
 			name = Release;
