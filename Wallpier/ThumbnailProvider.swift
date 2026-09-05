@@ -3,7 +3,7 @@ import ImageIO
 import os.log
 
 final class ThumbnailProvider {
-    private let cache = NSCache<NSURL, NSImage>()
+    private let cache = NSCache<NSString, NSImage>()
     private let queue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "com.parth.Wallpier.thumbnails"
@@ -30,7 +30,7 @@ final class ThumbnailProvider {
         maximumPixelSize: Int = 360,
         completion: @escaping (NSImage?) -> Void
     ) {
-        let key = url as NSURL
+        let key = "\(url.path)#\(maximumPixelSize)" as NSString
         if let cached = cache.object(forKey: key) {
             completion(cached)
             return
@@ -43,15 +43,16 @@ final class ThumbnailProvider {
                 Self.makeThumbnail(for: url, maximumPixelSize: maximumPixelSize)
             }
 
-            if let image {
-                let cost = Int(image.size.width * image.size.height * 4)
-                self.cache.setObject(image, forKey: key, cost: cost)
-            } else {
+            if image == nil {
                 self.logger.error("Could not create thumbnail for \(url.lastPathComponent, privacy: .public)")
             }
 
             OperationQueue.main.addOperation { [weak self] in
                 guard self?.generation == requestGeneration else { return }
+                if let image {
+                    let cost = Int(image.size.width * image.size.height * 4)
+                    self?.cache.setObject(image, forKey: key, cost: cost)
+                }
                 completion(image)
             }
         }

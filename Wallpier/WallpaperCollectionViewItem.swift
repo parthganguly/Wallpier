@@ -44,12 +44,12 @@ final class WallpaperCollectionViewItem: NSCollectionViewItem {
         updateSelectionAppearance()
     }
 
-    func configure(url: URL, placeholder: NSImage?) {
-        representedObject = url
-        textField?.stringValue = url.deletingPathExtension().lastPathComponent
+    func configure(identifier: String, title: String, toolTip: String, placeholder: NSImage?) {
+        representedObject = identifier
+        textField?.stringValue = title
         imageView?.image = placeholder
-        view.toolTip = url.path
-        view.setAccessibilityLabel("Wallpaper \(url.lastPathComponent)")
+        view.toolTip = toolTip
+        view.setAccessibilityLabel("Wallpaper \(title)")
     }
 
     func setThumbnail(_ image: NSImage?) {

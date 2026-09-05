@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        C20000000000000000000001 /* WallpaperHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000002 /* WallpaperHistoryStore.swift */; };
 		B2AE91513041EC3C004BF2F2 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91503041EC3C004BF2F2 /* AppDelegate.swift */; };
 		B2AE91533041EC3C004BF2F2 /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91523041EC3C004BF2F2 /* MainWindowController.swift */; };
 		B2AE91803041EC41004BF2F2 /* WallpaperService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91813041EC41004BF2F2 /* WallpaperService.swift */; };
@@ -14,6 +15,12 @@
 		B2AE91853041EC41004BF2F2 /* WallpaperStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91843041EC41004BF2F2 /* WallpaperStateStore.swift */; };
 		B2AE91873041EC41004BF2F2 /* ThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91863041EC41004BF2F2 /* ThumbnailProvider.swift */; };
 		B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */; };
+		B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */; };
+		B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */; };
+		B2AE91943041EC41004BF2F2 /* RemoteWallpaperCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */; };
+		B2AE91963041EC41004BF2F2 /* RemoteThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */; };
+		B2AE91983041EC41004BF2F2 /* wallhaven-search.json in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91993041EC41004BF2F2 /* wallhaven-search.json */; };
+		B2AE919A3041EC41004BF2F2 /* wallhaven-detail.json in Resources */ = {isa = PBXBuildFile; fileRef = B2AE919B3041EC41004BF2F2 /* wallhaven-detail.json */; };
 		B2AE91553041EC40004BF2F2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91543041EC40004BF2F2 /* Assets.xcassets */; };
 		B2AE91633041EC41004BF2F2 /* WallpierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91623041EC41004BF2F2 /* WallpierTests.swift */; };
 		B2AE916D3041EC41004BF2F2 /* WallpierUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE916C3041EC41004BF2F2 /* WallpierUITests.swift */; };
@@ -38,6 +45,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+        C20000000000000000000002 /* WallpaperHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperHistoryStore.swift; sourceTree = "<group>"; };
 		B2AE914D3041EC3C004BF2F2 /* Wallpier.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Wallpier.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2AE91503041EC3C004BF2F2 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		B2AE91523041EC3C004BF2F2 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
@@ -46,6 +54,12 @@
 		B2AE91843041EC41004BF2F2 /* WallpaperStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperStateStore.swift; sourceTree = "<group>"; };
 		B2AE91863041EC41004BF2F2 /* ThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailProvider.swift; sourceTree = "<group>"; };
 		B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperCollectionViewItem.swift; sourceTree = "<group>"; };
+		B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWallpaperProvider.swift; sourceTree = "<group>"; };
+		B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallhavenProvider.swift; sourceTree = "<group>"; };
+		B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWallpaperCache.swift; sourceTree = "<group>"; };
+		B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteThumbnailProvider.swift; sourceTree = "<group>"; };
+		B2AE91993041EC41004BF2F2 /* wallhaven-search.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "wallhaven-search.json"; sourceTree = "<group>"; };
+		B2AE919B3041EC41004BF2F2 /* wallhaven-detail.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "wallhaven-detail.json"; sourceTree = "<group>"; };
 		B2AE91543041EC40004BF2F2 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B2AE91563041EC40004BF2F2 /* Wallpier.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Wallpier.entitlements; sourceTree = "<group>"; };
 		B2AE915E3041EC41004BF2F2 /* WallpierTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WallpierTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -108,8 +122,13 @@
 				B2AE91813041EC41004BF2F2 /* WallpaperService.swift */,
 				B2AE91823041EC41004BF2F2 /* WallpaperModels.swift */,
 				B2AE91843041EC41004BF2F2 /* WallpaperStateStore.swift */,
+                C20000000000000000000002 /* WallpaperHistoryStore.swift */,
 				B2AE91863041EC41004BF2F2 /* ThumbnailProvider.swift */,
 				B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */,
+				B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */,
+				B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */,
+				B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */,
+				B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */,
 				B2AE91543041EC40004BF2F2 /* Assets.xcassets */,
 				B2AE91563041EC40004BF2F2 /* Wallpier.entitlements */,
 			);
@@ -120,8 +139,18 @@
 			isa = PBXGroup;
 			children = (
 				B2AE91623041EC41004BF2F2 /* WallpierTests.swift */,
+				B2AE919C3041EC41004BF2F2 /* Fixtures */,
 			);
 			path = WallpierTests;
+			sourceTree = "<group>";
+		};
+		B2AE919C3041EC41004BF2F2 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				B2AE91993041EC41004BF2F2 /* wallhaven-search.json */,
+				B2AE919B3041EC41004BF2F2 /* wallhaven-detail.json */,
+			);
+			path = Fixtures;
 			sourceTree = "<group>";
 		};
 		B2AE916B3041EC41004BF2F2 /* WallpierUITests */ = {
@@ -245,6 +274,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B2AE91983041EC41004BF2F2 /* wallhaven-search.json in Resources */,
+				B2AE919A3041EC41004BF2F2 /* wallhaven-detail.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -267,8 +298,13 @@
 				B2AE91803041EC41004BF2F2 /* WallpaperService.swift in Sources */,
 				B2AE91833041EC41004BF2F2 /* WallpaperModels.swift in Sources */,
 				B2AE91853041EC41004BF2F2 /* WallpaperStateStore.swift in Sources */,
+                C20000000000000000000001 /* WallpaperHistoryStore.swift in Sources */,
 				B2AE91873041EC41004BF2F2 /* ThumbnailProvider.swift in Sources */,
 				B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */,
+				B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */,
+				B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */,
+				B2AE91943041EC41004BF2F2 /* RemoteWallpaperCache.swift in Sources */,
+				B2AE91963041EC41004BF2F2 /* RemoteThumbnailProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

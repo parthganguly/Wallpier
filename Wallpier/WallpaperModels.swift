@@ -39,6 +39,170 @@ enum RotationInterval: String, Codable, CaseIterable {
     }
 }
 
+enum LibrarySource: String, Codable, CaseIterable {
+    case discover
+    case local
+    case favorites
+    case collections
+
+    var displayName: String {
+        switch self {
+        case .discover: return "Discover"
+        case .local: return "Local"
+        case .favorites: return "Favorites"
+        case .collections: return "Collections"
+        }
+    }
+}
+
+enum WallhavenCategory: String, Codable, CaseIterable {
+    case all = "111"
+    case general = "100"
+    case anime = "010"
+    case people = "001"
+
+    var displayName: String {
+        switch self {
+        case .all: return "All Categories"
+        case .general: return "General"
+        case .anime: return "Anime"
+        case .people: return "People"
+        }
+    }
+}
+
+enum WallhavenAspectRatio: String, Codable, CaseIterable {
+    case any = ""
+    case standard = "16x10"
+    case widescreen = "16x9"
+    case ultrawide = "21x9"
+
+    var displayName: String {
+        switch self {
+        case .any: return "Any Ratio"
+        case .standard: return "16:10"
+        case .widescreen: return "16:9"
+        case .ultrawide: return "21:9"
+        }
+    }
+}
+
+enum WallhavenSorting: String, Codable, CaseIterable {
+    case relevance
+    case dateAdded = "date_added"
+    case toplist
+    case views
+    case favorites
+
+    var displayName: String {
+        switch self {
+        case .relevance: return "Relevance"
+        case .dateAdded: return "Newest"
+        case .toplist: return "Top This Month"
+        case .views: return "Most Viewed"
+        case .favorites: return "Most Favorited"
+        }
+    }
+}
+
+struct WallhavenSearchOptions: Codable, Equatable {
+    var query = ""
+    var category: WallhavenCategory = .all
+    var minimumWidth: Int?
+    var minimumHeight: Int?
+    var usesDisplayMinimum = true
+    var aspectRatio: WallhavenAspectRatio = .any
+    var sorting: WallhavenSorting = .relevance
+
+    var minimumResolution: String? {
+        guard let minimumWidth, let minimumHeight else { return nil }
+        return "\(minimumWidth)x\(minimumHeight)"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case query, category, minimumWidth, minimumHeight, usesDisplayMinimum
+        case aspectRatio, sorting
+    }
+
+    init(
+        query: String = "",
+        category: WallhavenCategory = .all,
+        minimumWidth: Int? = nil,
+        minimumHeight: Int? = nil,
+        usesDisplayMinimum: Bool = true,
+        aspectRatio: WallhavenAspectRatio = .any,
+        sorting: WallhavenSorting = .relevance
+    ) {
+        self.query = query
+        self.category = category
+        self.minimumWidth = minimumWidth
+        self.minimumHeight = minimumHeight
+        self.usesDisplayMinimum = usesDisplayMinimum
+        self.aspectRatio = aspectRatio
+        self.sorting = sorting
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        query = try container.decodeIfPresent(String.self, forKey: .query) ?? ""
+        category = try container.decodeIfPresent(WallhavenCategory.self, forKey: .category) ?? .all
+        minimumWidth = try container.decodeIfPresent(Int.self, forKey: .minimumWidth)
+        minimumHeight = try container.decodeIfPresent(Int.self, forKey: .minimumHeight)
+        usesDisplayMinimum = try container.decodeIfPresent(Bool.self, forKey: .usesDisplayMinimum) ?? true
+        aspectRatio = try container.decodeIfPresent(WallhavenAspectRatio.self, forKey: .aspectRatio) ?? .any
+        sorting = try container.decodeIfPresent(WallhavenSorting.self, forKey: .sorting) ?? .relevance
+    }
+}
+
+struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
+    let providerIdentifier: String
+    let wallpaperID: String
+    let sourcePageURL: URL
+    let originalURL: URL
+    let previewURL: URL
+    let thumbnailURL: URL
+    let width: Int
+    let height: Int
+    var uploader: String?
+    var tags: [String]
+    var cachedLocalPath: String?
+
+    var id: String { identityKey }
+    var identityKey: String { "\(providerIdentifier):\(wallpaperID)" }
+    var resolution: String { "\(width)×\(height)" }
+}
+
+struct WallpaperCollection: Codable, Equatable, Identifiable {
+    let id: UUID
+    private(set) var name: String
+    private(set) var wallpapers: [WallpaperReference]
+
+    init(id: UUID = UUID(), name: String, wallpapers: [WallpaperReference] = []) {
+        self.id = id
+        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.wallpapers = wallpapers
+    }
+
+    mutating func rename(to newName: String) {
+        name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    mutating func add(_ reference: WallpaperReference) {
+        guard !wallpapers.contains(where: { $0.identityKey == reference.identityKey }) else { return }
+        wallpapers.append(reference)
+    }
+
+    mutating func remove(identityKey: String) {
+        wallpapers.removeAll { $0.identityKey == identityKey }
+    }
+
+    mutating func updateCachedPath(identityKey: String, path: String) {
+        for index in wallpapers.indices where wallpapers[index].identityKey == identityKey {
+            wallpapers[index].cachedLocalPath = path
+        }
+    }
+}
+
 struct DisplayAssignment: Codable, Equatable {
     let displayID: String
     let displayName: String
@@ -50,12 +214,22 @@ struct HistoryEntry: Codable, Equatable {
     let previous: DisplayAssignment
     let replacement: DisplayAssignment
     let timestamp: Date
+    // Optional fields keep existing M1/M2 JSON readable without rewriting its assignments.
+    var rollbackPath: String? = nil
+    var undoUnavailableReason: UndoUnavailableReason? = nil
+}
+
+enum UndoUnavailableReason: String, Codable {
+    case previousFileUnavailable
+    case preservationFailed
+    case restoreFileUnavailable
 }
 
 struct WallpaperState: Codable, Equatable {
+    static let currentVersion = 2
     static let historyLimit = 20
 
-    var version = 1
+    var version = Self.currentVersion
     var folderPath: String?
     var selectedImagePath: String?
     var selectedDisplayID: String?
@@ -64,6 +238,16 @@ struct WallpaperState: Codable, Equatable {
     var shuffleEnabled = false
     var displayAssignments: [DisplayAssignment] = []
     var history: [HistoryEntry] = []
+
+    var currentSource: LibrarySource = .discover
+    var selectedRemoteIdentity: String?
+    var wallhavenSearch = WallhavenSearchOptions()
+    var favorites: [WallpaperReference] = []
+    var collections: [WallpaperCollection] = []
+    var selectedCollectionID: UUID?
+    var activeRotationCollectionID: UUID?
+
+    init() {}
 
     func assignment(for displayID: String) -> DisplayAssignment? {
         displayAssignments.first { $0.displayID == displayID }
@@ -83,6 +267,72 @@ struct WallpaperState: Codable, Equatable {
 
     mutating func popHistory() -> HistoryEntry? {
         history.popLast()
+    }
+
+    func isFavorite(_ reference: WallpaperReference) -> Bool {
+        favorites.contains { $0.identityKey == reference.identityKey }
+    }
+
+    mutating func toggleFavorite(_ reference: WallpaperReference) {
+        if isFavorite(reference) {
+            favorites.removeAll { $0.identityKey == reference.identityKey }
+        } else {
+            favorites.append(reference)
+        }
+    }
+
+    mutating func updateCachedPath(for reference: WallpaperReference, path: String) {
+        for index in favorites.indices where favorites[index].identityKey == reference.identityKey {
+            favorites[index].cachedLocalPath = path
+        }
+        for index in collections.indices {
+            collections[index].updateCachedPath(identityKey: reference.identityKey, path: path)
+        }
+    }
+
+    var protectedCachePaths: Set<String> {
+        var paths = Set(displayAssignments.map(\.imagePath))
+        for entry in history {
+            paths.insert(entry.previous.imagePath)
+            paths.insert(entry.replacement.imagePath)
+            if let rollbackPath = entry.rollbackPath { paths.insert(rollbackPath) }
+        }
+        paths.formUnion(favorites.compactMap(\.cachedLocalPath))
+        for collection in collections {
+            paths.formUnion(collection.wallpapers.compactMap(\.cachedLocalPath))
+        }
+        return paths
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, folderPath, selectedImagePath, selectedDisplayID
+        case scalingMode, rotationInterval, shuffleEnabled, displayAssignments, history
+        case currentSource, selectedRemoteIdentity, wallhavenSearch, favorites, collections
+        case selectedCollectionID, activeRotationCollectionID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedFolderPath = try container.decodeIfPresent(String.self, forKey: .folderPath)
+
+        version = Self.currentVersion
+        folderPath = decodedFolderPath
+        selectedImagePath = try container.decodeIfPresent(String.self, forKey: .selectedImagePath)
+        selectedDisplayID = try container.decodeIfPresent(String.self, forKey: .selectedDisplayID)
+        scalingMode = try container.decodeIfPresent(ScalingMode.self, forKey: .scalingMode) ?? .fill
+        rotationInterval = try container.decodeIfPresent(RotationInterval.self, forKey: .rotationInterval) ?? .off
+        shuffleEnabled = try container.decodeIfPresent(Bool.self, forKey: .shuffleEnabled) ?? false
+        displayAssignments = try container.decodeIfPresent([DisplayAssignment].self, forKey: .displayAssignments) ?? []
+        history = Array((try container.decodeIfPresent([HistoryEntry].self, forKey: .history) ?? []).suffix(Self.historyLimit))
+        currentSource = try container.decodeIfPresent(LibrarySource.self, forKey: .currentSource)
+            ?? (decodedFolderPath == nil ? .discover : .local)
+        selectedRemoteIdentity = try container.decodeIfPresent(String.self, forKey: .selectedRemoteIdentity)
+        wallhavenSearch = try container.decodeIfPresent(WallhavenSearchOptions.self, forKey: .wallhavenSearch)
+            ?? WallhavenSearchOptions()
+        favorites = try container.decodeIfPresent([WallpaperReference].self, forKey: .favorites) ?? []
+        collections = try container.decodeIfPresent([WallpaperCollection].self, forKey: .collections) ?? []
+        selectedCollectionID = try container.decodeIfPresent(UUID.self, forKey: .selectedCollectionID)
+        activeRotationCollectionID = try container.decodeIfPresent(UUID.self, forKey: .activeRotationCollectionID)
     }
 }
 

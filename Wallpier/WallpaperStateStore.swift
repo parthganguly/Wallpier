@@ -37,7 +37,8 @@ final class WallpaperStateStore {
         }
     }
 
-    func save(_ state: WallpaperState) {
+    @discardableResult
+    func save(_ state: WallpaperState) -> Bool {
         do {
             let directoryURL = stateURL.deletingLastPathComponent()
             try fileManager.createDirectory(
@@ -48,8 +49,10 @@ final class WallpaperStateStore {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             try encoder.encode(state).write(to: stateURL, options: .atomic)
+            return true
         } catch {
             logger.error("State save failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 }

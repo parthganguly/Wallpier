@@ -4,6 +4,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindowController: MainWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hosted unit tests exercise injected providers without launching live discovery.
+        guard NSClassFromString("XCTestCase") == nil,
+              ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
         NSApp.setActivationPolicy(.regular)
 
         let windowController = MainWindowController()
@@ -57,6 +60,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: "o"
         )
         chooseFolder.target = controller
+        let newCollection = fileMenu.addItem(
+            withTitle: "New Collection…",
+            action: #selector(MainWindowController.createCollection(_:)),
+            keyEquivalent: "n"
+        )
+        newCollection.keyEquivalentModifierMask = [.command, .shift]
+        newCollection.target = controller
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 
@@ -75,6 +85,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        let viewMenu = NSMenu(title: "View")
+        let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+        let search = viewMenu.addItem(
+            withTitle: "Search Wallhaven",
+            action: #selector(MainWindowController.focusSearch(_:)),
+            keyEquivalent: "f"
+        )
+        search.target = controller
+        viewMenu.addItem(.separator())
+        let sources: [(String, Selector, String)] = [
+            ("Discover", #selector(MainWindowController.showDiscover(_:)), "1"),
+            ("Local", #selector(MainWindowController.showLocal(_:)), "2"),
+            ("Favorites", #selector(MainWindowController.showFavorites(_:)), "3"),
+            ("Collections", #selector(MainWindowController.showCollections(_:)), "4")
+        ]
+        for (title, action, key) in sources {
+            let item = viewMenu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.target = controller
+        }
 
         let wallpaperMenu = NSMenu(title: "Wallpaper")
         let wallpaperMenuItem = NSMenuItem(title: "Wallpaper", action: nil, keyEquivalent: "")
@@ -100,6 +132,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         setWallpaper.keyEquivalentModifierMask = [.command]
         setWallpaper.target = controller
+        wallpaperMenu.addItem(.separator())
+        let favorite = wallpaperMenu.addItem(
+            withTitle: "Add or Remove Favorite",
+            action: #selector(MainWindowController.toggleFavorite(_:)),
+            keyEquivalent: "d"
+        )
+        favorite.target = controller
+        let openSource = wallpaperMenu.addItem(
+            withTitle: "Open on Wallhaven",
+            action: #selector(MainWindowController.openSourcePage(_:)),
+            keyEquivalent: "o"
+        )
+        openSource.keyEquivalentModifierMask = [.command, .shift]
+        openSource.target = controller
 
         let windowMenu = NSMenu(title: "Window")
         let windowMenuItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
