@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import CoreGraphics
 import ImageIO
 import XCTest
@@ -652,5 +653,410 @@ private final class SequencedNetworkClient: NetworkClient {
 
     func download(for request: URLRequest) async throws -> (URL, HTTPURLResponse) {
         throw RemoteProviderError.originalUnavailable
+    }
+}
+
+// These tests instantiate the production controller without a window or restoreState().
+// AppDelegate's XCTest guard runs before live startup; every external dependency is isolated.
+@MainActor
+private final class SetAuditScreen: NSScreen {
+    let number: Int
+    init(_ number: Int) { self.number = number; super.init() }
+    required init?(coder: NSCoder) { fatalError("unused") }
+    override var localizedName: String { "Display \(number)" }
+    override var deviceDescription: [NSDeviceDescriptionKey: Any] {
+        [NSDeviceDescriptionKey("NSScreenNumber"): NSNumber(value: number)]
+    }
+}
+
+private final class SetAuditWallpaperService: WallpaperService {
+    struct Call: Equatable {
+        let image: URL
+        let display: String
+        let scaling: ScalingMode
+    }
+    var calls: [Call] = []
+    var current: URL?
+    var failure: Error?
+    var afterApply: (() -> Void)?
+    override func currentWallpaper(on screen: NSScreen) -> (imageURL: URL, scaling: ScalingMode)? {
+        current.map { ($0, .center) }
+    }
+    override func setWallpaper(imageURL: URL, on screen: NSScreen, scaling: ScalingMode) throws -> WallpaperSetResult {
+        calls.append(Call(image: imageURL, display: String((screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as! NSNumber).intValue), scaling: scaling))
+        if let failure { throw failure }
+        current = imageURL
+        afterApply?()
+        return WallpaperSetResult(elapsedTime: 0.012)
+    }
+}
+
+private final class SetAuditThumbnails: RemoteThumbnailProvider {
+    var callbacks: [(NSImage?) -> Void] = []
+    override func requestThumbnail(for url: URL, maximumPixelSize: Int = 420, completion: @escaping (NSImage?) -> Void) {
+        callbacks.append(completion)
+    }
+}
+
+// Continuations control order. The deadline only fails a stuck test; it never creates a race.
+@MainActor
+private final class SetAuditGate<Value> {
+    let started = XCTestExpectation(description: "dependency reached")
+    private var pending: CheckedContinuation<Value, Error>?
+    func value() async throws -> Value {
+        try await withCheckedThrowingContinuation { continuation in
+            pending = continuation
+            started.fulfill()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.release(.failure(URLError(.timedOut)))
+            }
+        }
+    }
+    func release(_ result: Result<Value, Error>) {
+        let continuation = pending
+        pending = nil
+        continuation?.resume(with: result)
+    }
+}
+
+@MainActor
+private final class SetAuditNetwork: NetworkClient {
+    var downloadGate = SetAuditGate<URL>()
+    var dataGates: [SetAuditGate<Data>] = []
+    var pendingDataGates: [SetAuditGate<Data>] = []
+    var downloads: [URL] = []
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        guard !dataGates.isEmpty else { throw RemoteProviderError.originalUnavailable }
+        let gate = dataGates.removeFirst()
+        pendingDataGates.append(gate)
+        return (try await gate.value(), response(request))
+    }
+    func download(for request: URLRequest) async throws -> (URL, HTTPURLResponse) {
+        downloads.append(request.url!)
+        return (try await downloadGate.value(), response(request))
+    }
+    private func response(_ request: URLRequest) -> HTTPURLResponse {
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+    }
+}
+
+@MainActor
+private final class SetAuditHarness {
+    let controller: MainWindowController
+    let network = SetAuditNetwork()
+    let desktop = SetAuditWallpaperService()
+    let thumbnails = SetAuditThumbnails()
+    let store: WallpaperStateStore
+    let root: URL
+    let incoming: URL
+    let prior: URL
+    let x = SetAuditScreen(101)
+    let y = SetAuditScreen(202)
+
+    init(root: URL, references: [WallpaperReference]) {
+        self.root = root
+        incoming = root.appendingPathComponent("incoming.png")
+        prior = root.appendingPathComponent("prior.png")
+        store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = WallpaperState()
+        state.currentSource = .favorites
+        state.favorites = references
+        state.selectedRemoteIdentity = references.first?.identityKey
+        state.selectedDisplayID = "101"
+        state.collections = [WallpaperCollection(name: "Rotation", wallpapers: references)]
+        state.selectedCollectionID = state.collections[0].id
+        state.activeRotationCollectionID = state.collections[0].id
+        state.rotationInterval = .oneHour
+        store.save(state)
+        let originals = root.appendingPathComponent("Originals")
+        // Capture a separate box so all dependencies exist before constructing the controller.
+        let displayList = DisplayList()
+        displayList.screens = [x, y]
+        controller = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
+            provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            remoteThumbnailProvider: thumbnails, availableScreens: { displayList.screens })
+        self.displayList = displayList
+        desktop.current = prior
+        controller.scalingPopUp.addItems(withTitles: ScalingMode.allCases.map(\.displayName))
+        controller.scalingPopUp.selectItem(at: 0)
+        controller.refreshDisplays()
+        controller.showFavorites(nil)
+    }
+    private let displayList: DisplayList
+    private final class DisplayList { var screens: [NSScreen] = [] }
+    func removeX() { displayList.screens = [y]; controller.refreshDisplays() }
+    func cached(_ reference: WallpaperReference) -> URL { root.appendingPathComponent("Originals").appendingPathComponent(RemoteWallpaperCache.filename(for: reference)) }
+}
+
+extension WallpierTests {
+    @MainActor
+    private func setAuditHarness() throws -> SetAuditHarness {
+        let root = try historyTestFolder()
+        let harness = SetAuditHarness(root: root, references: [remoteReference(id: "aaaaaa"), remoteReference(id: "bbbbbb")])
+        try writeTestImage(to: harness.incoming)
+        try writeTestImage(to: harness.prior, width: 3)
+        addTeardownBlock {
+            let tasks = await MainActor.run {
+                let tasks = [harness.controller.downloadTask, harness.controller.rotationTask,
+                             harness.controller.searchTask, harness.controller.detailTask,
+                             harness.controller.undoValidationTask].compactMap { $0 }
+                tasks.forEach { $0.cancel() }
+                harness.network.downloadGate.release(.failure(CancellationError()))
+                harness.network.pendingDataGates.forEach { $0.release(.failure(CancellationError())) }
+                return tasks
+            }
+            for task in tasks { await task.value }
+            try FileManager.default.removeItem(at: root)
+        }
+        return harness
+    }
+
+    @MainActor
+    private func finishAuditTask(_ task: Task<Void, Never>?) async throws {
+        let task = try XCTUnwrap(task)
+        let done = expectation(description: "production task finished")
+        Task { await task.value; done.fulfill() }
+        await fulfillment(of: [done], timeout: 6)
+    }
+
+    @MainActor
+    func testInFlightSetCapturesImageDisplayAndScaling() async throws {
+        let h = try setAuditHarness()
+        let a = h.controller.state.favorites[0]
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.controller.nextWallpaper(nil)
+        h.controller.displayPopUp.selectItem(at: 1)
+        h.controller.displaySelectionChanged()
+        h.controller.scalingPopUp.selectItem(at: 1)
+        h.controller.scalingSelectionChanged()
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(h.desktop.calls, [.init(image: h.cached(a), display: "101", scaling: .fill)])
+        XCTAssertEqual(h.controller.state.selectedRemoteIdentity, h.controller.state.favorites[1].identityKey)
+        let entry = try XCTUnwrap(h.store.load().history.last)
+        XCTAssertEqual(entry.replacement.imagePath, h.cached(a).path)
+        XCTAssertEqual(entry.replacement.displayID, "101")
+        XCTAssertEqual(entry.replacement.scaling, .fill)
+        XCTAssertEqual(entry.previous.imagePath, h.prior.path)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: XCTUnwrap(entry.rollbackPath))), try Data(contentsOf: h.prior))
+        XCTAssertTrue(h.controller.statusLabel.stringValue.contains("on Display 101 in 12.0 ms."))
+        XCTAssertTrue(h.controller.statusLabel.stringValue.contains(h.cached(a).lastPathComponent))
+    }
+
+    @MainActor
+    func testInFlightSetRejectsUnavailableCapturedDisplay() async throws {
+        let h = try setAuditHarness()
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.removeX()
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertTrue(h.desktop.calls.isEmpty, "An unavailable captured display must never reach the wallpaper boundary")
+        XCTAssertTrue(h.store.load().history.isEmpty)
+        XCTAssertTrue(h.controller.statusLabel.stringValue.contains("not currently available"))
+    }
+}
+
+extension WallpierTests {
+    @MainActor
+    func testInFlightSetRejectsCompetingMutationsThenAcceptsNextSet() async throws {
+        let h = try setAuditHarness()
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        try await finishAuditTask(h.controller.undoValidationTask)
+        XCTAssertTrue(h.controller.undoButton.isEnabled)
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        h.controller.nextWallpaper(nil)
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.controller.previousWallpaper(nil)
+        h.controller.setWallpaper(nil)
+        let rejectedStatus = "Wait for the current download to finish."
+        XCTAssertEqual(h.controller.statusLabel.stringValue, rejectedStatus)
+        h.controller.undoWallpaperChange(nil)
+        h.controller.rotateWallpaper()
+        XCTAssertEqual(h.controller.statusLabel.stringValue, rejectedStatus)
+        XCTAssertFalse(h.controller.setWallpaperButton.isEnabled)
+        XCTAssertFalse(h.controller.undoButton.isEnabled)
+        XCTAssertNil(h.controller.rotationTask)
+        XCTAssertEqual(h.network.downloads.count, 2)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(h.desktop.calls.map(\.image), h.controller.state.favorites.map(h.cached))
+        XCTAssertEqual(h.store.load().history.count, 2)
+        XCTAssertEqual(h.store.load().history.last?.previous.imagePath, h.desktop.calls[0].image.path)
+        // The previously rejected A request is accepted now, using its cached original.
+        h.controller.setWallpaper(nil)
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(h.controller.state.favorites[0]), h.cached(h.controller.state.favorites[1]), h.cached(h.controller.state.favorites[0])])
+        XCTAssertEqual(h.network.downloads.count, 2)
+        XCTAssertEqual(h.store.load().history.count, 3)
+    }
+
+    @MainActor
+    func testInFlightPreparationFailureAndCancellationAllowRecovery() async throws {
+        for cancel in [false, true] {
+            let h = try setAuditHarness()
+            h.controller.setWallpaper(nil)
+            await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+            if cancel {
+                h.controller.downloadTask?.cancel()
+                // Dependency deliberately completes despite cancellation.
+                h.network.downloadGate.release(.success(h.incoming))
+            } else {
+                h.network.downloadGate.release(.failure(URLError(.notConnectedToInternet)))
+            }
+            try await finishAuditTask(h.controller.downloadTask)
+            XCTAssertTrue(h.desktop.calls.isEmpty)
+            XCTAssertTrue(h.store.load().history.isEmpty)
+            XCTAssertNil(h.store.load().assignment(for: "101"))
+            XCTAssertFalse(h.controller.statusLabel.stringValue.hasPrefix("Set "))
+            XCTAssertTrue(h.controller.setWallpaperButton.isEnabled)
+            h.network.downloadGate = SetAuditGate<URL>()
+            try writeTestImage(to: h.incoming)
+            h.controller.setWallpaper(nil)
+            await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+            h.network.downloadGate.release(.success(h.incoming))
+            try await finishAuditTask(h.controller.downloadTask)
+            XCTAssertEqual(h.desktop.calls.count, 1)
+            XCTAssertEqual(h.store.load().history.count, 1)
+        }
+    }
+
+    @MainActor
+    func testInFlightSetCapturesPriorAtApplicationAndUndoRestoresIt() async throws {
+        let h = try setAuditHarness()
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        let changedPrior = h.root.appendingPathComponent("external-change.png")
+        try writeTestImage(to: changedPrior, width: 6)
+        h.desktop.current = changedPrior
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        let entry = try XCTUnwrap(h.store.load().history.last)
+        XCTAssertEqual(entry.previous.imagePath, changedPrior.path)
+        try FileManager.default.removeItem(at: changedPrior)
+        try await finishAuditTask(h.controller.undoValidationTask)
+        XCTAssertTrue(h.controller.undoButton.isEnabled)
+        h.controller.undoWallpaperChange(nil)
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(h.desktop.calls.last?.image.path, entry.rollbackPath)
+        XCTAssertEqual(h.desktop.calls.last?.display, "101")
+        XCTAssertEqual(h.desktop.calls.last?.scaling, .center)
+        XCTAssertTrue(h.store.load().history.isEmpty)
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, entry.rollbackPath)
+        XCTAssertTrue(h.controller.statusLabel.stringValue.hasPrefix("Restored "))
+    }
+
+    @MainActor
+    func testInFlightSetReportsUndoUnavailable() async throws {
+        let h = try setAuditHarness()
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        try FileManager.default.removeItem(at: h.prior)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        XCTAssertEqual(h.store.load().history.last?.undoUnavailableReason, .previousFileUnavailable)
+        XCTAssertEqual(h.store.load().history.last?.replacement.imagePath, h.desktop.calls[0].image.path)
+        XCTAssertTrue(h.controller.statusLabel.stringValue.hasSuffix("Undo unavailable for this change."))
+        XCTAssertFalse(h.controller.undoButton.isEnabled)
+    }
+
+    @MainActor
+    func testInFlightWallpaperFailureDoesNotCommitAndCleansPreparedRollback() async throws {
+        let h = try setAuditHarness()
+        h.desktop.failure = CocoaError(.fileReadUnknown)
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        XCTAssertEqual(h.desktop.current, h.prior)
+        XCTAssertTrue(h.store.load().history.isEmpty)
+        XCTAssertNil(h.store.load().assignment(for: "101"))
+        XCTAssertTrue(h.controller.statusLabel.stringValue.hasPrefix("Could Not Set Wallpaper:"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: h.root.appendingPathComponent("Rollback").path), [])
+    }
+
+    @MainActor
+    func testInFlightCancellationAfterMutationStillCommitsSuccess() async throws {
+        let h = try setAuditHarness()
+        h.desktop.afterApply = { [weak controller = h.controller] in controller?.downloadTask?.cancel() }
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        XCTAssertEqual(h.store.load().history.count, 1)
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.desktop.current?.path)
+        XCTAssertTrue(h.controller.statusLabel.stringValue.hasPrefix("Set "))
+    }
+
+    @MainActor
+    func testInFlightNavigationDiscardsObsoleteSearchDetailAndPreview() async throws {
+        let h = try setAuditHarness()
+        let detail = SetAuditGate<Data>()
+        h.network.dataGates = [detail]
+        await fulfillment(of: [detail.started], timeout: 2)
+        let oldDetailTask = h.controller.detailTask
+        let oldPreview = try XCTUnwrap(h.thumbnails.callbacks.first)
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        let search = SetAuditGate<Data>()
+        h.network.dataGates = [search]
+        h.controller.search(nil)
+        await fulfillment(of: [search.started], timeout: 2)
+        let oldSearchTask = h.controller.searchTask
+        h.controller.searchField.stringValue = "new query"
+        h.controller.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: h.controller.searchField))
+        h.controller.showCollections(nil)
+        h.controller.nextWallpaper(nil)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        let success = h.controller.statusLabel.stringValue
+        let metadata = h.controller.previewMetadataLabel.stringValue
+        detail.release(.success(try fixtureData(named: "wallhaven-detail")))
+        search.release(.success(try fixtureData(named: "wallhaven-search")))
+        let obsoleteImage = NSImage(size: NSSize(width: 1, height: 1))
+        oldPreview(obsoleteImage)
+        try await finishAuditTask(oldDetailTask)
+        try await finishAuditTask(oldSearchTask)
+        XCTAssertEqual(h.controller.state.currentSource, .collections)
+        XCTAssertEqual(h.controller.state.wallhavenSearch.query, "new query")
+        XCTAssertEqual(h.controller.previewTitleLabel.stringValue, "bbbbbb")
+        XCTAssertEqual(h.controller.previewMetadataLabel.stringValue, metadata)
+        XCTAssertFalse(h.controller.previewImageView.image === obsoleteImage)
+        XCTAssertTrue(h.controller.remoteResults.isEmpty)
+        XCTAssertEqual(h.controller.statusLabel.stringValue, success)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(h.controller.state.favorites[0])])
+        XCTAssertEqual(h.store.load().history.count, 1)
+    }
+}
+
+extension WallpierTests {
+    @MainActor
+    func testInFlightUndoRechecksCapturedDisplayBeforeMutation() async throws {
+        let h = try setAuditHarness()
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        try await finishAuditTask(h.controller.undoValidationTask)
+        XCTAssertTrue(h.controller.undoButton.isEnabled)
+        h.controller.undoWallpaperChange(nil)
+        // Undo has captured X, but its async restore-file validation has not completed.
+        h.removeX()
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        XCTAssertEqual(h.store.load().history.count, 1)
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.desktop.current?.path)
+        XCTAssertTrue(h.controller.statusLabel.stringValue.contains("not currently available"))
     }
 }

@@ -4,7 +4,7 @@ struct WallpaperSetResult {
     let elapsedTime: TimeInterval
 }
 
-final class WallpaperService {
+class WallpaperService {
     func setWallpaper(
         imageURL: URL,
         on screen: NSScreen,

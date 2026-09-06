@@ -34,36 +34,37 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         }
     }
 
-    private let wallpaperService = WallpaperService()
-    private let stateStore = WallpaperStateStore()
+    private let wallpaperService: WallpaperService
+    private let stateStore: WallpaperStateStore
     private let thumbnailProvider = ThumbnailProvider()
-    private let remoteThumbnailProvider = RemoteThumbnailProvider()
-    private let provider = WallhavenProvider()
-    private let originalCache = RemoteWallpaperCache()
-    private let historyStore = WallpaperHistoryStore()
+    private let remoteThumbnailProvider: RemoteThumbnailProvider
+    private let provider: WallhavenProvider
+    private let originalCache: RemoteWallpaperCache
+    private let historyStore: WallpaperHistoryStore
+    private let availableScreens: () -> [NSScreen]
     private var validatedUndoEntry: HistoryEntry?
-    private var undoValidationTask: Task<Void, Never>?
+    private(set) var undoValidationTask: Task<Void, Never>?
     private let logger = Logger(subsystem: "com.parth.Wallpier", category: "MainWindow")
-    private lazy var state = stateStore.load()
+    private(set) lazy var state = stateStore.load()
 
     private var localURLs: [URL] = []
-    private var remoteResults: [WallpaperReference] = []
+    private(set) var remoteResults: [WallpaperReference] = []
     private var currentPage = 0
     private var lastPage = 0
     private var totalResults = 0
     private var screens: [NSScreen] = []
     private var folderLoadID = UUID()
     private var rotationTimer: Timer?
-    private var searchTask: Task<Void, Never>?
-    private var detailTask: Task<Void, Never>?
-    private var downloadTask: Task<Void, Never>?
-    private var rotationTask: Task<Void, Never>?
+    private(set) var searchTask: Task<Void, Never>?
+    private(set) var detailTask: Task<Void, Never>?
+    private(set) var downloadTask: Task<Void, Never>?
+    private(set) var rotationTask: Task<Void, Never>?
     private var isSearching = false
     private var searchGeneration = UUID()
     private var resultOptions: WallhavenSearchOptions?
 
     private let sourcePicker = NSSegmentedControl(labels: LibrarySource.allCases.map(\.displayName), trackingMode: .selectOne, target: nil, action: nil)
-    private let searchField = NSSearchField()
+    let searchField = NSSearchField()
     private let categoryPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let resolutionPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let aspectPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -86,24 +87,24 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private let progressIndicator = NSProgressIndicator()
     private let loadMoreButton = NSButton(title: "Load More", target: nil, action: nil)
     private let resultCountLabel = NSTextField(labelWithString: "")
-    private let previewImageView = NSImageView()
-    private let previewTitleLabel = NSTextField(labelWithString: "No wallpaper selected")
-    private let previewMetadataLabel = NSTextField(wrappingLabelWithString: "Select a wallpaper to preview it.")
+    let previewImageView = NSImageView()
+    let previewTitleLabel = NSTextField(labelWithString: "No wallpaper selected")
+    let previewMetadataLabel = NSTextField(wrappingLabelWithString: "Select a wallpaper to preview it.")
     private let previewTagsLabel = NSTextField(wrappingLabelWithString: "")
     private let favoriteButton = NSButton(title: "Add to Favorites", target: nil, action: nil)
     private let addToCollectionPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let removeFromCollectionButton = NSButton(title: "Remove from Collection", target: nil, action: nil)
     private let openSourceButton = NSButton(title: "Open on Wallhaven", target: nil, action: nil)
-    private let displayPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let scalingPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let setWallpaperButton = NSButton(title: "Set Wallpaper", target: nil, action: nil)
+    let displayPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    let scalingPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    let setWallpaperButton = NSButton(title: "Set Wallpaper", target: nil, action: nil)
     private let rotationSourcePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let rotationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let shuffleButton = NSButton(checkboxWithTitle: "Shuffle", target: nil, action: nil)
     private let previousButton = NSButton(title: "Previous", target: nil, action: nil)
     private let nextButton = NSButton(title: "Next", target: nil, action: nil)
-    private let undoButton = NSButton(title: "Undo", target: nil, action: nil)
-    private let statusLabel = NSTextField(wrappingLabelWithString: "Ready.")
+    let undoButton = NSButton(title: "Undo", target: nil, action: nil)
+    let statusLabel = NSTextField(wrappingLabelWithString: "Ready.")
 
     private lazy var collectionView: NSCollectionView = {
         let layout = NSCollectionViewFlowLayout()
@@ -123,13 +124,33 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         return view
     }()
 
+    // Inject before any state restoration, search, or rotation can start.
+    init(window: NSWindow?, wallpaperService: WallpaperService, stateStore: WallpaperStateStore,
+         provider: WallhavenProvider, originalCache: RemoteWallpaperCache,
+         historyStore: WallpaperHistoryStore, remoteThumbnailProvider: RemoteThumbnailProvider,
+         availableScreens: @escaping () -> [NSScreen]) {
+        self.wallpaperService = wallpaperService
+        self.stateStore = stateStore
+        self.provider = provider
+        self.originalCache = originalCache
+        self.historyStore = historyStore
+        self.remoteThumbnailProvider = remoteThumbnailProvider
+        self.availableScreens = availableScreens
+        super.init(window: window)
+    }
+
+    required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
+
     convenience init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Wallpier"
         window.minSize = NSSize(width: 860, height: 560)
         if !window.setFrameUsingName("WallpierMainWindow") { window.center() }
         window.setFrameAutosaveName("WallpierMainWindow")
-        self.init(window: window)
+        self.init(window: window, wallpaperService: WallpaperService(), stateStore: WallpaperStateStore(),
+                  provider: WallhavenProvider(), originalCache: RemoteWallpaperCache(),
+                  historyStore: WallpaperHistoryStore(), remoteThumbnailProvider: RemoteThumbnailProvider(),
+                  availableScreens: { NSScreen.screens })
         configureUI()
         restoreState()
         NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -639,7 +660,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         else { entry = nil }
         do {
             try Task.checkCancellation()
-            let result = try wallpaperService.setWallpaper(imageURL: imageURL, on: screen, scaling: scaling)
+            let result = try wallpaperService.setWallpaper(imageURL: imageURL, on: try availableScreen(matching: screen), scaling: scaling)
             if let entry { state.appendHistory(entry) }
             // With no known prior assignment, older entries cannot undo this new change.
             else if prior == nil { state.history.removeAll() }
@@ -659,6 +680,14 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             }
             if stateStore.save(state) { await cleanupRollbackFiles() }
         }
+    }
+
+    private func availableScreen(matching captured: NSScreen) throws -> NSScreen {
+        guard let screen = availableScreens().first(where: { identifier(for: $0) == identifier(for: captured) }) else {
+            throw NSError(domain: "Wallpier", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                "The display selected for this wallpaper change is not currently available. Reconnect it and try again."])
+        }
+        return screen
     }
 
     private func systemAssignment(for screen: NSScreen, displayID: String, displayName: String) -> DisplayAssignment? {
@@ -877,7 +906,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     @objc private func rotationTimerFired(_ timer: Timer) { rotateWallpaper() }
 
-    private func rotateWallpaper() {
+    func rotateWallpaper() {
         guard rotationTask == nil, downloadTask == nil, let screen = selectedScreen else { return }
         if let id = state.activeRotationCollectionID {
             guard let collection = state.collections.first(where: { $0.id == id }), !collection.wallpapers.isEmpty else { return }
@@ -938,7 +967,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             let url = URL(fileURLWithPath: assignment.imagePath)
             do {
                 try Task.checkCancellation()
-                let result = try wallpaperService.setWallpaper(imageURL: url, on: screen, scaling: assignment.scaling)
+                let result = try wallpaperService.setWallpaper(imageURL: url, on: try availableScreen(matching: screen), scaling: assignment.scaling)
                 _ = state.popHistory(); state.setAssignment(assignment); state.selectedDisplayID = assignment.displayID; state.scalingMode = assignment.scaling
                 let saved = stateStore.save(state)
                 refreshDisplays(); scalingPopUp.selectItem(at: ScalingMode.allCases.firstIndex(of: assignment.scaling) ?? 0)
@@ -990,17 +1019,17 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         return protected
     }
 
-    @objc private func displaySelectionChanged() {
+    @objc func displaySelectionChanged() {
         guard let screen = selectedScreen else { return }
         state.selectedDisplayID = identifier(for: screen); updateDisplayMinimum(); stateStore.save(state)
         invalidateSearch()
         displayPopUp.toolTip = description(for: screen)
     }
-    @objc private func scalingSelectionChanged() { state.scalingMode = selectedScalingMode; stateStore.save(state) }
+    @objc func scalingSelectionChanged() { state.scalingMode = selectedScalingMode; stateStore.save(state) }
     @objc private func screenParametersChanged(_ notification: Notification) { refreshDisplays() }
 
-    private func refreshDisplays() {
-        let desired = state.selectedDisplayID; screens = NSScreen.screens
+    func refreshDisplays() {
+        let desired = state.selectedDisplayID; screens = availableScreens()
         displayPopUp.removeAllItems(); displayPopUp.addItems(withTitles: screens.map(description(for:)))
         if let desired, let index = screens.firstIndex(where: { identifier(for: $0) == desired }) { displayPopUp.selectItem(at: index) }
         else { displayPopUp.selectItem(at: screens.isEmpty ? -1 : 0) }

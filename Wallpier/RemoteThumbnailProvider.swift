@@ -2,7 +2,7 @@ import AppKit
 import ImageIO
 import os.log
 
-final class RemoteThumbnailProvider {
+class RemoteThumbnailProvider {
     private let cache = NSCache<NSString, NSImage>()
     private let session: URLSession
     private let decodeQueue: OperationQueue = {
