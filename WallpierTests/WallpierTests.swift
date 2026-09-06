@@ -791,6 +791,72 @@ private final class SetAuditHarness {
 
 extension WallpierTests {
     @MainActor
+    func testInspectorActionsStayVisibleWhilePreviewScrolls() throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var reference = remoteReference(id: "layout")
+        reference.uploader = "alexander_landscape_studies"
+        reference.tags = ["abstract landscape", "geometric composition", "muted colors", "wide format", "digital illustration"]
+        let store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = WallpaperState()
+        state.currentSource = .collections
+        state.wallhavenSearch.usesDisplayMinimum = false
+        state.collections = [WallpaperCollection(name: "Synthetic Studies", wallpapers: [reference])]
+        state.selectedCollectionID = state.collections[0].id
+        XCTAssertTrue(store.save(state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let desktop = SetAuditWallpaperService()
+        let originals = root.appendingPathComponent("Originals")
+        let controller = MainWindowController(window: window, wallpaperService: desktop, stateStore: store,
+            provider: WallhavenProvider(client: SetAuditNetwork()), originalCache: RemoteWallpaperCache(rootURL: originals),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            remoteThumbnailProvider: SetAuditThumbnails(), availableScreens: { [SetAuditScreen(101)] })
+        controller.prepareForVisualCapture(discoverPage: RemoteSearchPage(wallpapers: [reference], currentPage: 1, lastPage: 1, total: 1,
+            rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil)))
+        let content = try XCTUnwrap(window.contentView)
+        let scroll = try XCTUnwrap(controller.previewImageView.enclosingScrollView)
+        let document = try XCTUnwrap(scroll.documentView)
+        let actions: [NSView] = [controller.displayPopUp, controller.scalingPopUp, controller.setWallpaperButton]
+        let normalSize = window.frame.size
+        for size in [normalSize, NSSize(width: 860, height: 560)] {
+            window.setFrame(NSRect(origin: window.frame.origin, size: size), display: false)
+            for source in [LibrarySource.discover, .collections] {
+                if source == .discover { controller.showDiscover(nil) } else { controller.showCollections(nil) }
+                content.layoutSubtreeIfNeeded()
+                XCTAssertEqual(window.frame.size, size)
+                XCTAssertTrue(controller.setWallpaperButton.isEnabled)
+                for action in actions {
+                    XCTAssertNil(action.enclosingScrollView)
+                    XCTAssertFalse(action.isHiddenOrHasHiddenAncestor)
+                    XCTAssertEqual(action.visibleRect, action.bounds)
+                    XCTAssertGreaterThan(action.bounds.width, 200)
+                    XCTAssertTrue(content.bounds.contains(action.convert(action.bounds, to: content)))
+                    XCTAssertFalse(scroll.convert(scroll.bounds, to: content).intersects(action.convert(action.bounds, to: content)))
+                }
+                let frames = actions.map { $0.convert($0.bounds, to: content) }
+                if size.width == 860 {
+                    XCTAssertGreaterThan(document.bounds.height, scroll.contentView.bounds.height)
+                    XCTAssertTrue(controller.previewMetadataLabel.enclosingScrollView === scroll)
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: document.bounds.height - scroll.contentView.bounds.height))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                    content.layoutSubtreeIfNeeded()
+                    XCTAssertGreaterThan(scroll.contentView.bounds.minY, 0)
+                    XCTAssertEqual(actions.map { $0.convert($0.bounds, to: content) }, frames)
+                    XCTAssertTrue(actions.allSatisfy { $0.visibleRect == $0.bounds })
+                    scroll.contentView.scroll(to: .zero)
+                }
+            }
+        }
+        XCTAssertEqual(controller.setWallpaperButton.keyEquivalent, "\r")
+        XCTAssertNil(controller.searchTask)
+        XCTAssertNil(controller.detailTask)
+        XCTAssertTrue(desktop.calls.isEmpty)
+    }
+
+    @MainActor
     private func setAuditHarness() throws -> SetAuditHarness {
         let root = try historyTestFolder()
         let harness = SetAuditHarness(root: root, references: [remoteReference(id: "aaaaaa"), remoteReference(id: "bbbbbb")])

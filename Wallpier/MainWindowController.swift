@@ -141,6 +141,21 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
 
+#if DEBUG
+    // Development captures use the injected initializer before restoring isolated state.
+    func prepareForVisualCapture(discoverPage: RemoteSearchPage) {
+        precondition(window?.contentView?.subviews.isEmpty == true)
+        precondition(state.currentSource != .discover && state.rotationInterval == .off)
+        remoteResults = discoverPage.wallpapers
+        currentPage = discoverPage.currentPage
+        lastPage = discoverPage.lastPage
+        totalResults = discoverPage.total
+        resultOptions = state.wallhavenSearch
+        configureUI()
+        restoreState()
+    }
+#endif
+
     convenience init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Wallpier"
@@ -303,21 +318,37 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let displayLabel = NSTextField(labelWithString: "Display")
         let scalingLabel = NSTextField(labelWithString: "Scaling")
         displayLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize); scalingLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        let views: [NSView] = [previewImageView, previewTitleLabel, previewMetadataLabel, previewTagsLabel, favoriteButton, addToCollectionPopUp, removeFromCollectionButton, openSourceButton, displayLabel, displayPopUp, scalingLabel, scalingPopUp, setWallpaperButton]
+        let views: [NSView] = [previewImageView, previewTitleLabel, previewMetadataLabel, previewTagsLabel, favoriteButton, addToCollectionPopUp, removeFromCollectionButton, openSourceButton]
         let stack = NSStackView(views: views)
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 7
         panel.addSubview(stack)
-        [previewImageView, previewTitleLabel, previewMetadataLabel, previewTagsLabel, favoriteButton, addToCollectionPopUp, removeFromCollectionButton, openSourceButton, displayPopUp, scalingPopUp, setWallpaperButton].forEach {
+        views.forEach {
             $0.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
+        let separator = NSBox(); separator.boxType = .separator
+        let actions = NSStackView(views: [separator, displayLabel, displayPopUp, scalingLabel, scalingPopUp, setWallpaperButton])
+        actions.translatesAutoresizingMaskIntoConstraints = false
+        actions.orientation = .vertical; actions.alignment = .leading; actions.spacing = 7
+        actions.setHuggingPriority(.required, for: .vertical)
+        [separator, displayPopUp, scalingPopUp, setWallpaperButton].forEach {
+            $0.widthAnchor.constraint(equalTo: actions.widthAnchor).isActive = true
+        }
+        let inspector = NSView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        inspector.addSubview(scroll)
+        inspector.addSubview(actions)
         NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: inspector.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: inspector.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: inspector.topAnchor), scroll.bottomAnchor.constraint(equalTo: actions.topAnchor, constant: -8),
+            actions.leadingAnchor.constraint(equalTo: inspector.leadingAnchor, constant: 14), actions.trailingAnchor.constraint(equalTo: inspector.trailingAnchor, constant: -8),
+            actions.bottomAnchor.constraint(equalTo: inspector.bottomAnchor, constant: -8),
             stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 14), stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -4),
             stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 4), stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -8),
             panel.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             previewImageView.heightAnchor.constraint(equalToConstant: 210)
         ])
-        return scroll
+        return inspector
     }
 
     private func makeFooter() -> NSView {
