@@ -791,6 +791,28 @@ private final class SetAuditHarness {
 
 extension WallpierTests {
     @MainActor
+    func testThumbnailWellContainsMixedAspectImagesAndOwnsSelection() {
+        let item = WallpaperCollectionViewItem()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 184, height: 144),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentView!.addSubview(item.view)
+        item.view.frame = NSRect(x: 0, y: 0, width: 184, height: 144)
+
+        let wellBounds = [NSSize(width: 1080, height: 1920), NSSize(width: 2400, height: 1000)].map { size in
+            item.setThumbnail(NSImage(size: size))
+            window.contentView!.layoutSubtreeIfNeeded()
+            XCTAssertTrue(item.thumbnailWell.bounds.contains(item.imageView!.frame))
+            XCTAssertFalse(item.thumbnailWell.frame.intersects(item.textField!.frame))
+            return item.thumbnailWell.bounds
+        }
+
+        XCTAssertEqual(wellBounds[0], wellBounds[1])
+        item.isSelected = true
+        XCTAssertEqual(item.thumbnailWell.layer?.borderWidth, 2)
+        XCTAssertEqual(item.view.layer?.borderWidth ?? 0, 0)
+    }
+
+    @MainActor
     func testInspectorActionsStayVisibleWhilePreviewScrolls() throws {
         let root = try historyTestFolder()
         defer { try? FileManager.default.removeItem(at: root) }

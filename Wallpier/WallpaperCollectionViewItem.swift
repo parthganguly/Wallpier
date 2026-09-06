@@ -2,6 +2,7 @@ import AppKit
 
 final class WallpaperCollectionViewItem: NSCollectionViewItem {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("WallpaperCollectionViewItem")
+    private(set) var thumbnailWell = NSView()
 
     override var isSelected: Bool {
         didSet { updateSelectionAppearance() }
@@ -9,8 +10,13 @@ final class WallpaperCollectionViewItem: NSCollectionViewItem {
 
     override func loadView() {
         let container = NSView()
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 6
+
+        let thumbnailWell = NSView()
+        thumbnailWell.translatesAutoresizingMaskIntoConstraints = false
+        thumbnailWell.wantsLayer = true
+        thumbnailWell.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.18).cgColor
+        thumbnailWell.layer?.cornerRadius = 4
+        thumbnailWell.layer?.masksToBounds = true
 
         let imageView = NSImageView()
         imageView.translatesAutoresizingMaskIntoConstraints = false
@@ -23,20 +29,26 @@ final class WallpaperCollectionViewItem: NSCollectionViewItem {
         label.lineBreakMode = .byTruncatingMiddle
         label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
 
-        container.addSubview(imageView)
+        thumbnailWell.addSubview(imageView)
+        container.addSubview(thumbnailWell)
         container.addSubview(label)
         NSLayoutConstraint.activate([
-            imageView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
-            imageView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
-            imageView.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
-            imageView.heightAnchor.constraint(equalTo: container.heightAnchor, constant: -30),
+            thumbnailWell.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            thumbnailWell.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
+            thumbnailWell.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+            thumbnailWell.heightAnchor.constraint(equalTo: container.heightAnchor, constant: -30),
+            imageView.leadingAnchor.constraint(equalTo: thumbnailWell.leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: thumbnailWell.trailingAnchor),
+            imageView.topAnchor.constraint(equalTo: thumbnailWell.topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: thumbnailWell.bottomAnchor),
             label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
             label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
-            label.topAnchor.constraint(equalTo: imageView.bottomAnchor, constant: 4),
+            label.topAnchor.constraint(equalTo: thumbnailWell.bottomAnchor, constant: 4),
             label.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -5)
         ])
 
         view = container
+        self.thumbnailWell = thumbnailWell
         self.imageView = imageView
         textField = label
         view.setAccessibilityElement(true)
@@ -64,13 +76,10 @@ final class WallpaperCollectionViewItem: NSCollectionViewItem {
     private func updateSelectionAppearance() {
         guard isViewLoaded else { return }
         if isSelected {
-            view.layer?.backgroundColor = NSColor.selectedContentBackgroundColor
-                .withAlphaComponent(0.28).cgColor
-            view.layer?.borderColor = NSColor.keyboardFocusIndicatorColor.cgColor
-            view.layer?.borderWidth = 2
+            thumbnailWell.layer?.borderColor = NSColor.keyboardFocusIndicatorColor.cgColor
+            thumbnailWell.layer?.borderWidth = 2
         } else {
-            view.layer?.backgroundColor = NSColor.clear.cgColor
-            view.layer?.borderWidth = 0
+            thumbnailWell.layer?.borderWidth = 0
         }
     }
 }
