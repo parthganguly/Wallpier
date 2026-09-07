@@ -107,6 +107,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let item = viewMenu.addItem(withTitle: title, action: action, keyEquivalent: key)
             item.target = controller
         }
+        viewMenu.addItem(.separator())
+        let inspector = viewMenu.addItem(
+            withTitle: "Hide Inspector",
+            action: #selector(MainWindowController.toggleInspector(_:)),
+            keyEquivalent: "0"
+        )
+        inspector.keyEquivalentModifierMask = [.command, .option]
+        inspector.target = controller
 
         let wallpaperMenu = NSMenu(title: "Wallpaper")
         let wallpaperMenuItem = NSMenuItem(title: "Wallpaper", action: nil, keyEquivalent: "")

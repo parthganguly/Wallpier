@@ -62,6 +62,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private var isSearching = false
     private var searchGeneration = UUID()
     private var resultOptions: WallhavenSearchOptions?
+    private var splitView: NSSplitView?
+    private var inspectorView: NSView?
 
     private let sourcePicker = NSSegmentedControl(labels: LibrarySource.allCases.map(\.displayName), trackingMode: .selectOne, target: nil, action: nil)
     let searchField = NSSearchField()
@@ -143,6 +145,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
 #if DEBUG
     // Development captures use the injected initializer before restoring isolated state.
+    var browserWidthForTesting: CGFloat { splitView?.arrangedSubviews.first?.frame.width ?? 0 }
+    var inspectorWidthForTesting: CGFloat { inspectorView?.frame.width ?? 0 }
+
     func prepareForVisualCapture(discoverPage: RemoteSearchPage) {
         precondition(window?.contentView?.subviews.isEmpty == true)
         precondition(state.currentSource != .discover && state.rotationInterval == .off)
@@ -238,6 +243,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         split.addArrangedSubview(browserColumn); split.addArrangedSubview(previewPanel)
         previewPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 270).isActive = true
         previewPanel.widthAnchor.constraint(lessThanOrEqualToConstant: 340).isActive = true
+        splitView = split
+        inspectorView = previewPanel
         let footer = makeFooter()
         let separator = NSBox(); separator.boxType = .separator
         statusLabel.isSelectable = true; statusLabel.textColor = .secondaryLabelColor; statusLabel.maximumNumberOfLines = 2
@@ -447,6 +454,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     @objc func showLocal(_ sender: Any?) { selectSource(.local) }
     @objc func showFavorites(_ sender: Any?) { selectSource(.favorites) }
     @objc func showCollections(_ sender: Any?) { selectSource(.collections) }
+
+    var isInspectorVisible: Bool { inspectorView?.isHidden == false }
+
+    @objc func toggleInspector(_ sender: Any?) {
+        inspectorView?.isHidden.toggle()
+    }
 
     private func selectSource(_ source: LibrarySource) {
         sourcePicker.selectedSegment = LibrarySource.allCases.firstIndex(of: source) ?? 0
@@ -1162,6 +1175,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
+        case #selector(toggleInspector(_:)):
+            menuItem.title = isInspectorVisible ? "Hide Inspector" : "Show Inspector"
+            menuItem.state = isInspectorVisible ? .on : .off
+            return true
         case #selector(setWallpaper(_:)): return selectedItem != nil && selectedScreen != nil && downloadTask == nil && rotationTask == nil
         case #selector(previousWallpaper(_:)), #selector(nextWallpaper(_:)): return !currentItems.isEmpty
         case #selector(undoWallpaperChange(_:)): return canUndoWallpaper && downloadTask == nil && rotationTask == nil

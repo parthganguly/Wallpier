@@ -879,6 +879,102 @@ extension WallpierTests {
     }
 
     @MainActor
+    func testInspectorToggleReclaimsBrowserSpaceAndPreservesSelectionAndControls() throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let references = (1...10).map { index in
+            var reference = remoteReference(id: "fixture-\(index)")
+            reference.uploader = "Synthetic Fixture"
+            reference.tags = ["deterministic", "offline"]
+            return reference
+        }
+        let store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = WallpaperState()
+        state.currentSource = .favorites
+        state.favorites = references
+        state.selectedRemoteIdentity = references[3].identityKey
+        state.wallhavenSearch.usesDisplayMinimum = false
+        XCTAssertTrue(store.save(state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .aqua)
+        defer { window.close() }
+        let thumbnails = SetAuditThumbnails()
+        let originals = root.appendingPathComponent("Originals")
+        let controller = MainWindowController(window: window, wallpaperService: SetAuditWallpaperService(), stateStore: store,
+            provider: WallhavenProvider(client: SetAuditNetwork()), originalCache: RemoteWallpaperCache(rootURL: originals),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            remoteThumbnailProvider: thumbnails, availableScreens: { [SetAuditScreen(101)] })
+        let page = RemoteSearchPage(wallpapers: references, currentPage: 1, lastPage: 1, total: references.count,
+            rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil))
+        controller.prepareForVisualCapture(discoverPage: page)
+        controller.showDiscover(nil)
+        let content = try XCTUnwrap(window.contentView)
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor(calibratedWhite: 0.94, alpha: 1).cgColor
+        content.layoutSubtreeIfNeeded()
+        let initialBrowserWidth = controller.browserWidthForTesting
+        let initialInspectorWidth = controller.inspectorWidthForTesting
+        let selectedTitle = controller.previewTitleLabel.stringValue
+        let menuItem = NSMenuItem(title: "", action: #selector(MainWindowController.toggleInspector(_:)), keyEquivalent: "")
+
+        XCTAssertTrue(controller.isInspectorVisible)
+        XCTAssertTrue(controller.validateMenuItem(menuItem))
+        XCTAssertEqual(menuItem.title, "Hide Inspector")
+        XCTAssertEqual(menuItem.state, .on)
+        capture(content, named: "A-discover-inspector-visible")
+
+        controller.toggleInspector(nil)
+        content.layoutSubtreeIfNeeded()
+        XCTAssertFalse(controller.isInspectorVisible)
+        XCTAssertGreaterThan(controller.browserWidthForTesting, initialBrowserWidth + 250)
+        XCTAssertEqual(controller.previewTitleLabel.stringValue, selectedTitle)
+        XCTAssertTrue(controller.validateMenuItem(menuItem))
+        XCTAssertEqual(menuItem.title, "Show Inspector")
+        XCTAssertEqual(menuItem.state, .off)
+        capture(content, named: "B-discover-inspector-collapsed")
+
+        controller.toggleInspector(nil)
+        content.layoutSubtreeIfNeeded()
+        XCTAssertTrue(controller.isInspectorVisible)
+        XCTAssertEqual(controller.inspectorWidthForTesting, initialInspectorWidth, accuracy: 1)
+        XCTAssertEqual(controller.previewTitleLabel.stringValue, selectedTitle)
+        for control in [controller.displayPopUp, controller.scalingPopUp, controller.setWallpaperButton] {
+            XCTAssertFalse(control.isHiddenOrHasHiddenAncestor)
+            XCTAssertTrue(content.bounds.contains(control.convert(control.bounds, to: content)))
+        }
+
+        let preview = NSImage(size: NSSize(width: 1600, height: 900))
+        preview.lockFocus(); NSColor.systemTeal.setFill(); NSRect(origin: .zero, size: preview.size).fill(); preview.unlockFocus()
+        thumbnails.callbacks.forEach { $0(preview) }
+        content.layoutSubtreeIfNeeded()
+        capture(content, named: "C-selected-preview-inspector-visible")
+        controller.toggleInspector(nil); content.layoutSubtreeIfNeeded()
+        capture(content, named: "D-selected-preview-inspector-collapsed")
+        controller.toggleInspector(nil)
+
+        window.setFrame(NSRect(origin: window.frame.origin, size: NSSize(width: 860, height: 560)), display: false)
+        content.layoutSubtreeIfNeeded()
+        capture(content, named: "E-minimum-window-inspector-visible")
+        let minimumBrowserWidth = controller.browserWidthForTesting
+        controller.toggleInspector(nil); content.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(controller.browserWidthForTesting, minimumBrowserWidth + 250)
+        capture(content, named: "F-minimum-window-inspector-collapsed")
+        XCTAssertEqual(controller.state.selectedRemoteIdentity, references[3].identityKey)
+        XCTAssertNil(controller.searchTask)
+        XCTAssertNil(controller.detailTask)
+    }
+
+    private func capture(_ view: NSView, named name: String) {
+        guard let directory = ProcessInfo.processInfo.environment["WALLPIER_CAPTURE_DIR"],
+              let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
+    }
+
+    @MainActor
     private func setAuditHarness() throws -> SetAuditHarness {
         let root = try historyTestFolder()
         let harness = SetAuditHarness(root: root, references: [remoteReference(id: "aaaaaa"), remoteReference(id: "bbbbbb")])
