@@ -14,6 +14,9 @@
 		B2AE91833041EC41004BF2F2 /* WallpaperModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91823041EC41004BF2F2 /* WallpaperModels.swift */; };
 		B2AE91853041EC41004BF2F2 /* WallpaperStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91843041EC41004BF2F2 /* WallpaperStateStore.swift */; };
 		B2AE91873041EC41004BF2F2 /* ThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91863041EC41004BF2F2 /* ThumbnailProvider.swift */; };
+		D0E5A1063041EC50004BF2F2 /* SidebarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0E5A1053041EC50004BF2F2 /* SidebarController.swift */; };
+		D0E5A1043041EC50004BF2F2 /* PreviewViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0E5A1033041EC50004BF2F2 /* PreviewViews.swift */; };
+		D0E5A1023041EC50004BF2F2 /* GalleryViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0E5A1013041EC50004BF2F2 /* GalleryViews.swift */; };
 		B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */; };
 		B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */; };
 		B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */; };
@@ -53,6 +56,9 @@
 		B2AE91823041EC41004BF2F2 /* WallpaperModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperModels.swift; sourceTree = "<group>"; };
 		B2AE91843041EC41004BF2F2 /* WallpaperStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperStateStore.swift; sourceTree = "<group>"; };
 		B2AE91863041EC41004BF2F2 /* ThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailProvider.swift; sourceTree = "<group>"; };
+		D0E5A1053041EC50004BF2F2 /* SidebarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarController.swift; sourceTree = "<group>"; };
+		D0E5A1033041EC50004BF2F2 /* PreviewViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewViews.swift; sourceTree = "<group>"; };
+		D0E5A1013041EC50004BF2F2 /* GalleryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryViews.swift; sourceTree = "<group>"; };
 		B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperCollectionViewItem.swift; sourceTree = "<group>"; };
 		B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWallpaperProvider.swift; sourceTree = "<group>"; };
 		B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallhavenProvider.swift; sourceTree = "<group>"; };
@@ -124,6 +130,9 @@
 				B2AE91843041EC41004BF2F2 /* WallpaperStateStore.swift */,
                 C20000000000000000000002 /* WallpaperHistoryStore.swift */,
 				B2AE91863041EC41004BF2F2 /* ThumbnailProvider.swift */,
+				D0E5A1053041EC50004BF2F2 /* SidebarController.swift */,
+				D0E5A1033041EC50004BF2F2 /* PreviewViews.swift */,
+				D0E5A1013041EC50004BF2F2 /* GalleryViews.swift */,
 				B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */,
 				B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */,
 				B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */,
@@ -300,6 +309,9 @@
 				B2AE91853041EC41004BF2F2 /* WallpaperStateStore.swift in Sources */,
                 C20000000000000000000001 /* WallpaperHistoryStore.swift in Sources */,
 				B2AE91873041EC41004BF2F2 /* ThumbnailProvider.swift in Sources */,
+				D0E5A1063041EC50004BF2F2 /* SidebarController.swift in Sources */,
+				D0E5A1043041EC50004BF2F2 /* PreviewViews.swift in Sources */,
+				D0E5A1023041EC50004BF2F2 /* GalleryViews.swift in Sources */,
 				B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */,
 				B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */,
 				B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */,

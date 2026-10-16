@@ -16,11 +16,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    // Hosted tests open their own windows; only closing the real main window quits.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        mainWindowController != nil
     }
 
-    private func configureMainMenu(for controller: MainWindowController) {
+    // Internal so activated-app tests dispatch keys through the production menu bar.
+    func configureMainMenu(for controller: MainWindowController) {
         let mainMenu = NSMenu()
 
         let appMenu = NSMenu()
@@ -50,110 +52,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Wallpier", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
-        let fileMenu = NSMenu(title: "File")
-        let fileMenuItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
-        fileMenuItem.submenu = fileMenu
-        mainMenu.addItem(fileMenuItem)
-        let chooseFolder = fileMenu.addItem(
-            withTitle: "Choose Folder…",
-            action: #selector(MainWindowController.chooseFolder(_:)),
-            keyEquivalent: "o"
-        )
-        chooseFolder.target = controller
-        let newCollection = fileMenu.addItem(
-            withTitle: "New Collection…",
-            action: #selector(MainWindowController.createCollection(_:)),
-            keyEquivalent: "n"
-        )
-        newCollection.keyEquivalentModifierMask = [.command, .shift]
-        newCollection.target = controller
+        func submenu(_ title: String) -> NSMenu {
+            let menu = NSMenu(title: title)
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.submenu = menu
+            mainMenu.addItem(item)
+            return menu
+        }
+        @discardableResult
+        func add(_ menu: NSMenu, _ title: String, _ action: Selector, _ key: String = "",
+                 _ modifiers: NSEvent.ModifierFlags = .command, tag: Int = 0) -> NSMenuItem {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            item.target = controller
+            item.tag = tag
+            return item
+        }
+
+        let fileMenu = submenu("File")
+        add(fileMenu, "Choose Folder…", #selector(MainWindowController.chooseFolder(_:)), "o")
+        add(fileMenu, "New Collection…", #selector(MainWindowController.createCollection(_:)), "n", [.command, .shift])
+        add(fileMenu, "Rename Collection…", #selector(MainWindowController.renameCollection(_:)))
+        add(fileMenu, "Delete Collection…", #selector(MainWindowController.deleteCollection(_:)))
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 
-        let editMenu = NSMenu(title: "Edit")
-        let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
-        editMenuItem.submenu = editMenu
-        mainMenu.addItem(editMenuItem)
-        let undo = editMenu.addItem(
-            withTitle: "Undo Wallpaper Change",
-            action: #selector(MainWindowController.undoWallpaperChange(_:)),
-            keyEquivalent: "z"
-        )
-        undo.target = controller
+        let editMenu = submenu("Edit")
+        // Nil-targeted, so the focused text field or the window's library Undo answers first.
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z").keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
-        let viewMenu = NSMenu(title: "View")
-        let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
-        viewMenuItem.submenu = viewMenu
-        mainMenu.addItem(viewMenuItem)
-        let search = viewMenu.addItem(
-            withTitle: "Search Wallhaven",
-            action: #selector(MainWindowController.focusSearch(_:)),
-            keyEquivalent: "f"
-        )
-        search.target = controller
+        let viewMenu = submenu("View")
+        add(viewMenu, "Hide Sidebar", #selector(MainWindowController.toggleSidebar(_:)), "s", [.command, .control])
         viewMenu.addItem(.separator())
-        let sources: [(String, Selector, String)] = [
-            ("Discover", #selector(MainWindowController.showDiscover(_:)), "1"),
-            ("Local", #selector(MainWindowController.showLocal(_:)), "2"),
-            ("Favorites", #selector(MainWindowController.showFavorites(_:)), "3"),
-            ("Collections", #selector(MainWindowController.showCollections(_:)), "4")
-        ]
-        for (title, action, key) in sources {
-            let item = viewMenu.addItem(withTitle: title, action: action, keyEquivalent: key)
-            item.target = controller
-        }
+        add(viewMenu, "Discover", #selector(MainWindowController.showDiscover(_:)), "1")
+        add(viewMenu, "Folder", #selector(MainWindowController.showLocal(_:)), "2")
+        add(viewMenu, "Favorites", #selector(MainWindowController.showFavorites(_:)), "3")
+        add(viewMenu, "Collections", #selector(MainWindowController.showCollections(_:)), "4")
         viewMenu.addItem(.separator())
-        let inspector = viewMenu.addItem(
-            withTitle: "Hide Inspector",
-            action: #selector(MainWindowController.toggleInspector(_:)),
-            keyEquivalent: "0"
-        )
-        inspector.keyEquivalentModifierMask = [.command, .option]
-        inspector.target = controller
+        add(viewMenu, "Preview on Desktop", #selector(MainWindowController.toggleViewer(_:)), "y")
+        add(viewMenu, "Larger Thumbnails", #selector(MainWindowController.makeThumbnailsLarger(_:)), "+")
+        add(viewMenu, "Smaller Thumbnails", #selector(MainWindowController.makeThumbnailsSmaller(_:)), "-")
+        viewMenu.addItem(.separator())
+        add(viewMenu, "Search Wallhaven", #selector(MainWindowController.focusSearch(_:)), "f")
 
-        let wallpaperMenu = NSMenu(title: "Wallpaper")
-        let wallpaperMenuItem = NSMenuItem(title: "Wallpaper", action: nil, keyEquivalent: "")
-        wallpaperMenuItem.submenu = wallpaperMenu
-        mainMenu.addItem(wallpaperMenuItem)
-        let previous = wallpaperMenu.addItem(
-            withTitle: "Previous Wallpaper",
-            action: #selector(MainWindowController.previousWallpaper(_:)),
-            keyEquivalent: "["
-        )
-        previous.target = controller
-        let next = wallpaperMenu.addItem(
-            withTitle: "Next Wallpaper",
-            action: #selector(MainWindowController.nextWallpaper(_:)),
-            keyEquivalent: "]"
-        )
-        next.target = controller
+        let wallpaperMenu = submenu("Wallpaper")
+        add(wallpaperMenu, "Set Wallpaper", #selector(MainWindowController.setWallpaper(_:)), "\r")
+        add(wallpaperMenu, "Undo Wallpaper Change", #selector(MainWindowController.undoWallpaperChange(_:)))
         wallpaperMenu.addItem(.separator())
-        let setWallpaper = wallpaperMenu.addItem(
-            withTitle: "Set Wallpaper",
-            action: #selector(MainWindowController.setWallpaper(_:)),
-            keyEquivalent: "\r"
-        )
-        setWallpaper.keyEquivalentModifierMask = [.command]
-        setWallpaper.target = controller
+        add(wallpaperMenu, "Previous Wallpaper", #selector(MainWindowController.previousWallpaper(_:)), "[")
+        add(wallpaperMenu, "Next Wallpaper", #selector(MainWindowController.nextWallpaper(_:)), "]")
         wallpaperMenu.addItem(.separator())
-        let favorite = wallpaperMenu.addItem(
-            withTitle: "Add or Remove Favorite",
-            action: #selector(MainWindowController.toggleFavorite(_:)),
-            keyEquivalent: "d"
-        )
-        favorite.target = controller
-        let openSource = wallpaperMenu.addItem(
-            withTitle: "Open on Wallhaven",
-            action: #selector(MainWindowController.openSourcePage(_:)),
-            keyEquivalent: "o"
-        )
-        openSource.keyEquivalentModifierMask = [.command, .shift]
-        openSource.target = controller
+        add(wallpaperMenu, "Add to Favorites", #selector(MainWindowController.toggleFavorite(_:)), "d")
+        let collections = wallpaperMenu.addItem(withTitle: "Add to Collection", action: nil, keyEquivalent: "")
+        collections.submenu = NSMenu(title: "Add to Collection")
+        collections.submenu?.delegate = controller
+        add(wallpaperMenu, "Remove from Collection", #selector(MainWindowController.removeSelected(_:)), "\u{8}")
+        add(wallpaperMenu, "Open on Wallhaven", #selector(MainWindowController.openSourcePage(_:)), "o", [.command, .shift])
+        wallpaperMenu.addItem(.separator())
+        let rotation = wallpaperMenu.addItem(withTitle: "Automatic Rotation", action: nil, keyEquivalent: "")
+        let rotationMenu = NSMenu(title: "Automatic Rotation")
+        rotation.submenu = rotationMenu
+        for (index, title) in ["Never", "Every 15 Minutes", "Every Hour", "Every Day"].enumerated() {
+            add(rotationMenu, title, #selector(MainWindowController.setRotationInterval(_:)), tag: index)
+        }
+        rotationMenu.addItem(.separator())
+        add(rotationMenu, "Shuffle", #selector(MainWindowController.toggleShuffle(_:)))
+        rotationMenu.addItem(.separator())
+        add(rotationMenu, "Rotation Settings…", #selector(MainWindowController.showRotationSettings(_:)), "r", [.command, .option])
 
         let windowMenu = NSMenu(title: "Window")
         let windowMenuItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")

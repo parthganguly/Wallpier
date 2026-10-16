@@ -15,9 +15,11 @@ enum WallhavenEndpoint {
         }
         items.append(URLQueryItem(name: "categories", value: options.category.rawValue))
         items.append(URLQueryItem(name: "purity", value: "100"))
-        items.append(URLQueryItem(name: "sorting", value: options.sorting.rawValue))
+        // Wallhaven returns an empty page for relevance without a query; show this month's top wallpapers.
+        let sorting = query.isEmpty && options.sorting == .relevance ? WallhavenSorting.toplist : options.sorting
+        items.append(URLQueryItem(name: "sorting", value: sorting.rawValue))
         items.append(URLQueryItem(name: "order", value: "desc"))
-        if options.sorting == .toplist {
+        if sorting == .toplist {
             items.append(URLQueryItem(name: "topRange", value: "1M"))
         }
         if let minimumResolution = options.minimumResolution {

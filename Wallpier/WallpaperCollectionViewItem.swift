@@ -1,85 +1,85 @@
 import AppKit
 
+/// A display-shaped thumbnail. The image fills the cell (like *Fill Screen* on a Mac display);
+/// selection draws an accent ring outside the image so the picture itself is never covered.
 final class WallpaperCollectionViewItem: NSCollectionViewItem {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("WallpaperCollectionViewItem")
-    private(set) var thumbnailWell = NSView()
+    static let ringInset: CGFloat = 4
+
+    private var cell: ThumbnailCellView { view as! ThumbnailCellView }
 
     override var isSelected: Bool {
-        didSet { updateSelectionAppearance() }
+        didSet { if isViewLoaded { cell.isSelected = isSelected } }
     }
 
     override func loadView() {
-        let container = NSView()
-
-        let thumbnailWell = NSView()
-        thumbnailWell.translatesAutoresizingMaskIntoConstraints = false
-        thumbnailWell.wantsLayer = true
-        thumbnailWell.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.18).cgColor
-        thumbnailWell.layer?.cornerRadius = 4
-        thumbnailWell.layer?.masksToBounds = true
-
-        let imageView = NSImageView()
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.imageAlignment = .alignCenter
-
-        let label = NSTextField(labelWithString: "")
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.alignment = .center
-        label.lineBreakMode = .byTruncatingMiddle
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-
-        thumbnailWell.addSubview(imageView)
-        container.addSubview(thumbnailWell)
-        container.addSubview(label)
-        NSLayoutConstraint.activate([
-            thumbnailWell.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
-            thumbnailWell.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
-            thumbnailWell.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
-            thumbnailWell.heightAnchor.constraint(equalTo: container.heightAnchor, constant: -30),
-            imageView.leadingAnchor.constraint(equalTo: thumbnailWell.leadingAnchor),
-            imageView.trailingAnchor.constraint(equalTo: thumbnailWell.trailingAnchor),
-            imageView.topAnchor.constraint(equalTo: thumbnailWell.topAnchor),
-            imageView.bottomAnchor.constraint(equalTo: thumbnailWell.bottomAnchor),
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
-            label.topAnchor.constraint(equalTo: thumbnailWell.bottomAnchor, constant: 4),
-            label.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor, constant: -5)
-        ])
-
-        view = container
-        self.thumbnailWell = thumbnailWell
-        self.imageView = imageView
-        textField = label
+        view = ThumbnailCellView()
         view.setAccessibilityElement(true)
-        view.setAccessibilityRole(.button)
-        updateSelectionAppearance()
+        view.setAccessibilityRole(.image)
     }
 
-    func configure(identifier: String, title: String, toolTip: String, placeholder: NSImage?) {
+    var thumbnailFrame: NSRect { cell.imageHost.frame }
+    var hasThumbnail: Bool { cell.imageHost.layer?.contents != nil }
+    var showsSelectionRing: Bool { cell.isSelected }
+
+    func configure(identifier: String, title: String, toolTip: String) {
         representedObject = identifier
-        textField?.stringValue = title
-        imageView?.image = placeholder
+        setThumbnail(nil, failed: false)
         view.toolTip = toolTip
-        view.setAccessibilityLabel("Wallpaper \(title)")
+        view.setAccessibilityLabel(title)
+        cell.isSelected = isSelected
     }
 
-    func setThumbnail(_ image: NSImage?) {
-        imageView?.image = image
+    func setThumbnail(_ image: NSImage?, failed: Bool = true) {
+        let scale = view.window?.backingScaleFactor ?? 2
+        cell.imageHost.layer?.contents = image?.layerContents(forContentsScale: scale)
+        cell.placeholder.isHidden = image != nil || !failed
+    }
+}
+
+final class ThumbnailCellView: NSView {
+    let imageHost = NSView()
+    let ring = CALayer()
+    let placeholder = NSImageView(image: NSImage(systemSymbolName: "photo", accessibilityDescription: nil) ?? NSImage())
+    var isSelected = false { didSet { needsDisplay = true } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.addSublayer(ring)
+        ring.cornerRadius = 8
+        imageHost.wantsLayer = true
+        imageHost.layer?.cornerRadius = 5
+        imageHost.layer?.masksToBounds = true
+        imageHost.layer?.contentsGravity = .resizeAspectFill
+        placeholder.contentTintColor = .tertiaryLabelColor
+        placeholder.symbolConfiguration = .init(pointSize: 20, weight: .light)
+        placeholder.isHidden = true
+        addSubview(imageHost)
+        addSubview(placeholder)
     }
 
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        updateSelectionAppearance()
+    required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func layout() {
+        super.layout()
+        let inset = WallpaperCollectionViewItem.ringInset
+        imageHost.frame = bounds.insetBy(dx: inset, dy: inset)
+        placeholder.frame = imageHost.frame
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        ring.frame = bounds
+        CATransaction.commit()
     }
 
-    private func updateSelectionAppearance() {
-        guard isViewLoaded else { return }
-        if isSelected {
-            thumbnailWell.layer?.borderColor = NSColor.keyboardFocusIndicatorColor.cgColor
-            thumbnailWell.layer?.borderWidth = 2
-        } else {
-            thumbnailWell.layer?.borderWidth = 0
-        }
+    // Colors are resolved here so they follow light/dark and accent-color changes.
+    // Selection is immediate on the Mac, so the ring's implicit layer animation is disabled.
+    override func updateLayer() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        imageHost.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        ring.borderColor = NSColor.controlAccentColor.cgColor
+        ring.borderWidth = isSelected ? 3 : 0
+        CATransaction.commit()
     }
 }

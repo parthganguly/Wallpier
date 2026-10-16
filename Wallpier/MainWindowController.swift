@@ -1,15 +1,35 @@
 import AppKit
 import os.log
 
-private final class PreviewDocumentView: NSView {
-    override var isFlipped: Bool { true }
+/// Neutral backdrop the wallpapers sit on, following appearance changes.
+private final class BackdropView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.controlBackgroundColor.setFill()
+        dirtyRect.fill()
+    }
+}
+
+private extension NSToolbarItem.Identifier {
+    static let viewMode = Self("com.parth.Wallpier.viewMode")
+    static let rotation = Self("com.parth.Wallpier.rotation")
+    static let undoWallpaper = Self("com.parth.Wallpier.undo")
+    static let search = Self("com.parth.Wallpier.search")
+    static let sidebarSeparator = Self("com.parth.Wallpier.sidebarSeparator")
+}
+
+/// Keeps its own text Undo history, so ⌘Z and ⇧⌘Z while typing never reach library removals.
+private final class SearchField: NSSearchField {
+    private let textUndoManager = UndoManager()
+    override var undoManager: UndoManager? { textUndoManager }
 }
 
 @MainActor
-final class MainWindowController: NSWindowController, NSCollectionViewDataSource,
-    NSCollectionViewDelegate, NSMenuItemValidation, NSSearchFieldDelegate {
+final class MainWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout,
+    NSMenuItemValidation, NSSearchFieldDelegate, NSToolbarDelegate, NSMenuDelegate {
 
     private enum SetSource { case user, rotation }
+    /// Favorites, or one collection: the lists whose removals can be undone.
+    private enum MemberList: Equatable { case favorites, collection(UUID) }
     private enum BrowserItem {
         case local(URL)
         case remote(WallpaperReference)
@@ -54,6 +74,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private var totalResults = 0
     private var screens: [NSScreen] = []
     private var folderLoadID = UUID()
+    private var isLoadingFolder = false
     private var rotationTimer: Timer?
     private(set) var searchTask: Task<Void, Never>?
     private(set) var detailTask: Task<Void, Never>?
@@ -62,67 +83,79 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private var isSearching = false
     private var searchGeneration = UUID()
     private var resultOptions: WallhavenSearchOptions?
-    private var splitView: NSSplitView?
-    private var inspectorView: NSView?
+    private var searchErrorText: String?
+    private var lastAppendFailure: Date?
+    private(set) var isViewerVisible = false
 
-    private let sourcePicker = NSSegmentedControl(labels: LibrarySource.allCases.map(\.displayName), trackingMode: .selectOne, target: nil, action: nil)
-    let searchField = NSSearchField()
+    // Window structure
+    private var splitViewController: NSSplitViewController?
+    private let sidebar = SidebarController()
+    private let newCollectionButton = NSButton(title: "New Collection", target: nil, action: nil)
+
+    // Search and filters
+    let searchField: NSSearchField = SearchField()
+    private var searchToolbarItem: NSSearchToolbarItem?
     private let categoryPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let resolutionPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let aspectPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let sortingPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let searchButton = NSButton(title: "Search", target: nil, action: nil)
-    private let chooseFolderButton = NSButton(title: "Choose Folder…", target: nil, action: nil)
-    private let folderPathLabel = NSTextField(labelWithString: "No folder selected")
-    private let imageCountLabel = NSTextField(labelWithString: "")
-    private let collectionPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let newCollectionButton = NSButton(title: "New…", target: nil, action: nil)
-    private let renameCollectionButton = NSButton(title: "Rename…", target: nil, action: nil)
-    private let deleteCollectionButton = NSButton(title: "Delete", target: nil, action: nil)
-    private let sourceSummaryLabel = NSTextField(labelWithString: "")
-    private let discoverControls = NSStackView()
-    private let localControls = NSStackView()
-    private let favoritesControls = NSStackView()
-    private let collectionsControls = NSStackView()
+    private let scopeBar = NSStackView()
+    private lazy var scopeBarCollapsed = scopeBar.heightAnchor.constraint(equalToConstant: 0)
+    private var statusClearTask: Task<Void, Never>?
+    private let discoverBar = NSStackView()
+    private let localBar = NSStackView()
+    private let folderPathLabel = NSTextField(labelWithString: "")
 
-    private let emptyStateLabel = NSTextField(wrappingLabelWithString: "Search Wallhaven to discover wallpapers.")
-    private let progressIndicator = NSProgressIndicator()
-    private let loadMoreButton = NSButton(title: "Load More", target: nil, action: nil)
-    private let resultCountLabel = NSTextField(labelWithString: "")
-    let previewImageView = NSImageView()
-    let previewTitleLabel = NSTextField(labelWithString: "No wallpaper selected")
-    let previewMetadataLabel = NSTextField(wrappingLabelWithString: "Select a wallpaper to preview it.")
-    private let previewTagsLabel = NSTextField(wrappingLabelWithString: "")
-    private let favoriteButton = NSButton(title: "Add to Favorites", target: nil, action: nil)
-    private let addToCollectionPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let removeFromCollectionButton = NSButton(title: "Remove from Collection", target: nil, action: nil)
-    private let openSourceButton = NSButton(title: "Open on Wallhaven", target: nil, action: nil)
+    // Gallery and preview
+    private let galleryLayout = GalleryLayout()
+    private let galleryScroll = NSScrollView()
+    let emptyStateView = EmptyStateView()
+    let viewerView = ViewerView()
+    let stageView = DesktopPreviewView()
+    let previewTitleLabel = NSTextField(labelWithString: "No Wallpaper Selected")
+    let previewMetadataLabel = NSTextField(labelWithString: "")
+    private let previewTagsLabel = NSTextField(labelWithString: "")
+    /// Shown while the stage draws Wallhaven's 3:2 cropped thumbnail instead of the original's pixels.
+    let approximatePreviewNotice = NSStackView()
+
+    // Apply bar
+    let applyBar = NSStackView()
+    private let busyIndicator = NSProgressIndicator()
+    let selectionLabel = NSTextField(labelWithString: "")
+    let statusLabel = NSTextField(labelWithString: "")
+    let favoriteButton = NSButton()
+    private let moreButton = NSButton()
     let displayPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     let scalingPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     let setWallpaperButton = NSButton(title: "Set Wallpaper", target: nil, action: nil)
-    private let rotationSourcePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let rotationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let shuffleButton = NSButton(checkboxWithTitle: "Shuffle", target: nil, action: nil)
-    private let previousButton = NSButton(title: "Previous", target: nil, action: nil)
-    private let nextButton = NSButton(title: "Next", target: nil, action: nil)
-    let undoButton = NSButton(title: "Undo", target: nil, action: nil)
-    let statusLabel = NSTextField(wrappingLabelWithString: "Ready.")
 
-    private lazy var collectionView: NSCollectionView = {
-        let layout = NSCollectionViewFlowLayout()
-        layout.itemSize = NSSize(width: 184, height: 144)
-        layout.sectionInset = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
-        layout.minimumInteritemSpacing = 10
-        layout.minimumLineSpacing = 12
-        let view = NSCollectionView()
-        view.collectionViewLayout = layout
+    // Toolbar, rotation and undo
+    let viewModeControl = NSSegmentedControl()
+    let rotationButton = NSButton()
+    let undoButton = NSButton()
+    private let rotationSourcePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    let rotationPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let shuffleButton = NSButton(checkboxWithTitle: "Shuffle", target: nil, action: nil)
+    let rotationSummaryLabel = NSTextField(wrappingLabelWithString: "")
+    private(set) lazy var rotationPopover = makeRotationPopover()
+
+    private(set) lazy var collectionView: GalleryCollectionView = {
+        let view = GalleryCollectionView()
+        view.collectionViewLayout = galleryLayout
         view.dataSource = self
         view.delegate = self
         view.isSelectable = true
         view.allowsMultipleSelection = false
-        view.allowsEmptySelection = true
+        // A nonempty gallery always shows its Set target: clicking blank space keeps the selection.
+        view.allowsEmptySelection = false
+        view.backgroundColors = [.clear]
         view.register(WallpaperCollectionViewItem.self, forItemWithIdentifier: WallpaperCollectionViewItem.reuseIdentifier)
-        view.setAccessibilityLabel("Wallpaper browser")
+        view.setDraggingSourceOperationMask(.copy, forLocal: true)
+        view.setDraggingSourceOperationMask(.copy, forLocal: false)
+        view.setAccessibilityLabel("Wallpapers")
+        view.onActivate = { [weak self] in self?.setViewerVisible(true) }
+        view.onDelete = { [weak self] in self?.removeSelected(nil) }
+        view.contextMenu = { [weak self] in self?.itemMenu() }
         return view
     }()
 
@@ -145,9 +178,6 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
 #if DEBUG
     // Development captures use the injected initializer before restoring isolated state.
-    var browserWidthForTesting: CGFloat { splitView?.arrangedSubviews.first?.frame.width ?? 0 }
-    var inspectorWidthForTesting: CGFloat { inspectorView?.frame.width ?? 0 }
-
     func prepareForVisualCapture(discoverPage: RemoteSearchPage) {
         precondition(window?.contentView?.subviews.isEmpty == true)
         precondition(state.currentSource != .discover && state.rotationInterval == .off)
@@ -159,19 +189,25 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         configureUI()
         restoreState()
     }
+
+    var sidebarForTesting: SidebarController { sidebar }
+    var galleryScrollForTesting: NSScrollView { galleryScroll }
+    var galleryLayoutForTesting: GalleryLayout { galleryLayout }
 #endif
 
     convenience init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Wallpier"
-        window.minSize = NSSize(width: 860, height: 560)
-        if !window.setFrameUsingName("WallpierMainWindow") { window.center() }
-        window.setFrameAutosaveName("WallpierMainWindow")
         self.init(window: window, wallpaperService: WallpaperService(), stateStore: WallpaperStateStore(),
                   provider: WallhavenProvider(), originalCache: RemoteWallpaperCache(),
                   historyStore: WallpaperHistoryStore(), remoteThumbnailProvider: RemoteThumbnailProvider(),
                   availableScreens: { NSScreen.screens })
         configureUI()
+        // Only the real window remembers its frame and sidebar width; test windows never write defaults.
+        if !window.setFrameUsingName("WallpierMainWindow") { window.center() }
+        window.setFrameAutosaveName("WallpierMainWindow")
+        splitViewController?.splitView.autosaveName = "WallpierSidebar"
         restoreState()
         NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(refreshUndoAvailability), name: NSWindow.didBecomeKeyNotification, object: window)
@@ -185,201 +221,344 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         downloadTask?.cancel()
         rotationTask?.cancel()
         undoValidationTask?.cancel()
+        statusClearTask?.cancel()
         NotificationCenter.default.removeObserver(self)
     }
 
+    // MARK: - Building the window
+
     private func configureUI() {
-        guard let contentView = window?.contentView else { return }
-        sourcePicker.target = self
-        sourcePicker.action = #selector(sourceChanged)
-        sourcePicker.setAccessibilityLabel("Wallpaper source")
-        configureSourceControls()
+        guard let window else { return }
+        configureControls()
+        window.styleMask.insert(.fullSizeContentView)
+        window.toolbarStyle = .unified
+        window.tabbingMode = .disallowed
+        window.minSize = NSSize(width: 820, height: 540)
 
-        let controlHost = NSStackView(views: [discoverControls, localControls, favoritesControls, collectionsControls])
-        controlHost.orientation = .vertical
-        controlHost.spacing = 0
-        controlHost.detachesHiddenViews = true
+        let sidebarController = NSViewController()
+        sidebarController.view = makeSidebarView()
+        let contentController = NSViewController()
+        contentController.view = makeContentView()
+        let split = NSSplitViewController()
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarController)
+        sidebarItem.minimumThickness = 180
+        sidebarItem.maximumThickness = 280
+        sidebarItem.canCollapse = true
+        let contentItem = NSSplitViewItem(viewController: contentController)
+        contentItem.minimumThickness = 620
+        split.addSplitViewItem(sidebarItem)
+        split.addSplitViewItem(contentItem)
+        split.view.frame = NSRect(origin: .zero, size: window.contentRect(forFrameRect: window.frame).size)
+        splitViewController = split
+        let frame = window.frame
+        window.contentViewController = split
+        window.setFrame(frame, display: false)
 
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.drawsBackground = true
-        scroll.backgroundColor = .controlBackgroundColor
-        scroll.documentView = collectionView
-        let browserContainer = NSView()
-        browserContainer.addSubview(scroll)
-        emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
-        emptyStateLabel.alignment = .center
-        emptyStateLabel.textColor = .secondaryLabelColor
-        emptyStateLabel.font = .systemFont(ofSize: 15)
-        browserContainer.addSubview(emptyStateLabel)
-        progressIndicator.translatesAutoresizingMaskIntoConstraints = false
-        progressIndicator.style = .spinning
-        progressIndicator.isDisplayedWhenStopped = false
-        browserContainer.addSubview(progressIndicator)
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: browserContainer.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: browserContainer.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: browserContainer.topAnchor), scroll.bottomAnchor.constraint(equalTo: browserContainer.bottomAnchor),
-            emptyStateLabel.centerXAnchor.constraint(equalTo: browserContainer.centerXAnchor), emptyStateLabel.centerYAnchor.constraint(equalTo: browserContainer.centerYAnchor, constant: 12),
-            emptyStateLabel.leadingAnchor.constraint(greaterThanOrEqualTo: browserContainer.leadingAnchor, constant: 30), emptyStateLabel.trailingAnchor.constraint(lessThanOrEqualTo: browserContainer.trailingAnchor, constant: -30),
-            progressIndicator.centerXAnchor.constraint(equalTo: browserContainer.centerXAnchor), progressIndicator.bottomAnchor.constraint(equalTo: emptyStateLabel.topAnchor, constant: -12)
-        ])
-        loadMoreButton.target = self
-        loadMoreButton.action = #selector(loadMore(_:))
-        resultCountLabel.textColor = .secondaryLabelColor
-        let pageSpacer = NSView(); pageSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let pageRow = NSStackView(views: [resultCountLabel, pageSpacer, loadMoreButton])
-        pageRow.orientation = .horizontal; pageRow.alignment = .centerY
-        let browserColumn = NSStackView(views: [browserContainer, pageRow])
-        browserColumn.orientation = .vertical; browserColumn.alignment = .leading; browserColumn.spacing = 8
-        browserContainer.widthAnchor.constraint(equalTo: browserColumn.widthAnchor).isActive = true
-        pageRow.widthAnchor.constraint(equalTo: browserColumn.widthAnchor).isActive = true
-        browserContainer.setContentHuggingPriority(.defaultLow, for: .vertical)
-
-        let previewPanel = makePreviewPanel()
-        let split = NSSplitView()
-        split.isVertical = true; split.dividerStyle = .thin
-        split.addArrangedSubview(browserColumn); split.addArrangedSubview(previewPanel)
-        previewPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 270).isActive = true
-        previewPanel.widthAnchor.constraint(lessThanOrEqualToConstant: 340).isActive = true
-        splitView = split
-        inspectorView = previewPanel
-        let footer = makeFooter()
-        let separator = NSBox(); separator.boxType = .separator
-        statusLabel.isSelectable = true; statusLabel.textColor = .secondaryLabelColor; statusLabel.maximumNumberOfLines = 2
-        let root = NSStackView(views: [sourcePicker, controlHost, split, separator, footer, statusLabel])
-        root.translatesAutoresizingMaskIntoConstraints = false
-        root.orientation = .vertical; root.alignment = .leading; root.spacing = 10
-        contentView.addSubview(root)
-        [sourcePicker, controlHost, split, separator, footer, statusLabel].forEach { $0.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true }
-        split.setContentHuggingPriority(.defaultLow, for: .vertical)
-        NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16), root.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            root.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 14), root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -12),
-            split.heightAnchor.constraint(greaterThanOrEqualToConstant: 360)
-        ])
+        let toolbar = NSToolbar(identifier: "WallpierMainToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        window.toolbar = toolbar
+        window.initialFirstResponder = collectionView
+        galleryScroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(galleryDidScroll), name: NSView.boundsDidChangeNotification, object: galleryScroll.contentView)
     }
 
-    private func configureSourceControls() {
+    private func configureControls() {
         searchField.placeholderString = "Search Wallhaven"
         searchField.target = self; searchField.action = #selector(search(_:))
         searchField.delegate = self
         searchField.sendsWholeSearchString = true
         searchField.setAccessibilityHelp("Searches safe-for-work wallpapers on Wallhaven")
         categoryPopUp.addItems(withTitles: WallhavenCategory.allCases.map(\.displayName))
+        resolutionPopUp.addItems(withTitles: ["At Least Display Size", "Any Resolution", "1080p or Larger", "1440p or Larger", "4K or Larger"])
         aspectPopUp.addItems(withTitles: WallhavenAspectRatio.allCases.map(\.displayName))
         sortingPopUp.addItems(withTitles: WallhavenSorting.allCases.map(\.displayName))
-        resolutionPopUp.addItems(withTitles: ["Selected Display", "Any Resolution", "1920×1080+", "2560×1440+", "3840×2160+"])
-        for popup in [categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp] {
+        let filterNames = ["Category", "Minimum resolution", "Aspect ratio", "Sort order"]
+        for (popup, name) in zip([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp], filterNames) {
             popup.target = self; popup.action = #selector(searchOptionChanged(_:))
+            popup.controlSize = .small
+            popup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            popup.setAccessibilityLabel(name)
         }
-        searchButton.target = self; searchButton.action = #selector(search(_:))
-        discoverControls.setViews([searchField, categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp, searchButton], in: .leading)
-        discoverControls.orientation = .horizontal; discoverControls.alignment = .centerY; discoverControls.spacing = 8
-        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
-        chooseFolderButton.target = self; chooseFolderButton.action = #selector(chooseFolder(_:))
-        chooseFolderButton.setAccessibilityHelp("Choose a folder containing JPEG, PNG, or HEIC wallpapers")
-        folderPathLabel.lineBreakMode = .byTruncatingMiddle; folderPathLabel.isSelectable = true; folderPathLabel.textColor = .secondaryLabelColor
-        folderPathLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        imageCountLabel.textColor = .secondaryLabelColor
-        localControls.setViews([chooseFolderButton, folderPathLabel, imageCountLabel], in: .leading)
-        localControls.orientation = .horizontal; localControls.alignment = .centerY; localControls.spacing = 10
-        sourceSummaryLabel.textColor = .secondaryLabelColor
-        favoritesControls.setViews([sourceSummaryLabel], in: .leading); favoritesControls.orientation = .horizontal
-
-        collectionPopUp.target = self; collectionPopUp.action = #selector(collectionSelectionChanged)
-        newCollectionButton.target = self; newCollectionButton.action = #selector(createCollection(_:))
-        renameCollectionButton.target = self; renameCollectionButton.action = #selector(renameCollection(_:))
-        deleteCollectionButton.target = self; deleteCollectionButton.action = #selector(deleteCollection(_:))
-        collectionsControls.setViews([collectionPopUp, newCollectionButton, renameCollectionButton, deleteCollectionButton], in: .leading)
-        collectionsControls.orientation = .horizontal; collectionsControls.alignment = .centerY; collectionsControls.spacing = 8
-    }
-
-    private func makePreviewPanel() -> NSView {
-        let panel = PreviewDocumentView()
-        panel.translatesAutoresizingMaskIntoConstraints = false
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.drawsBackground = false
-        scroll.documentView = panel
-        previewImageView.imageScaling = .scaleProportionallyUpOrDown
-        previewImageView.imageAlignment = .alignCenter
-        previewImageView.imageFrameStyle = .grayBezel
-        previewImageView.setAccessibilityLabel("Wallpaper preview")
-        previewTitleLabel.font = .boldSystemFont(ofSize: 15); previewTitleLabel.lineBreakMode = .byTruncatingMiddle
-        previewMetadataLabel.textColor = .secondaryLabelColor; previewMetadataLabel.maximumNumberOfLines = 3
-        previewTagsLabel.textColor = .tertiaryLabelColor; previewTagsLabel.maximumNumberOfLines = 3
-        favoriteButton.target = self; favoriteButton.action = #selector(toggleFavorite(_:))
-        addToCollectionPopUp.target = self; addToCollectionPopUp.action = #selector(addToCollection(_:))
-        removeFromCollectionButton.target = self; removeFromCollectionButton.action = #selector(removeFromCollection(_:))
-        openSourceButton.target = self; openSourceButton.action = #selector(openSourcePage(_:))
         displayPopUp.target = self; displayPopUp.action = #selector(displaySelectionChanged); displayPopUp.setAccessibilityLabel("Display")
-        scalingPopUp.addItems(withTitles: ScalingMode.allCases.map(\.displayName))
+        displayPopUp.toolTip = "The display the wallpaper is set on"
+        scalingPopUp.addItems(withTitles: ScalingMode.allCases.map(scalingTitle))
         scalingPopUp.target = self; scalingPopUp.action = #selector(scalingSelectionChanged); scalingPopUp.setAccessibilityLabel("Scaling")
+        scalingPopUp.toolTip = "How the wallpaper is sized to the display"
         setWallpaperButton.target = self; setWallpaperButton.action = #selector(setWallpaper(_:)); setWallpaperButton.keyEquivalent = "\r"
         setWallpaperButton.setAccessibilityHelp("Downloads the original if needed and sets it on the selected display")
-        let displayLabel = NSTextField(labelWithString: "Display")
-        let scalingLabel = NSTextField(labelWithString: "Scaling")
-        displayLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize); scalingLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        let views: [NSView] = [previewImageView, previewTitleLabel, previewMetadataLabel, previewTagsLabel, favoriteButton, addToCollectionPopUp, removeFromCollectionButton, openSourceButton]
-        let stack = NSStackView(views: views)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 7
-        panel.addSubview(stack)
-        views.forEach {
-            $0.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        }
-        let separator = NSBox(); separator.boxType = .separator
-        let actions = NSStackView(views: [separator, displayLabel, displayPopUp, scalingLabel, scalingPopUp, setWallpaperButton])
-        actions.translatesAutoresizingMaskIntoConstraints = false
-        actions.orientation = .vertical; actions.alignment = .leading; actions.spacing = 7
-        actions.setHuggingPriority(.required, for: .vertical)
-        [separator, displayPopUp, scalingPopUp, setWallpaperButton].forEach {
-            $0.widthAnchor.constraint(equalTo: actions.widthAnchor).isActive = true
-        }
-        let inspector = NSView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        inspector.addSubview(scroll)
-        inspector.addSubview(actions)
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: inspector.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: inspector.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: inspector.topAnchor), scroll.bottomAnchor.constraint(equalTo: actions.topAnchor, constant: -8),
-            actions.leadingAnchor.constraint(equalTo: inspector.leadingAnchor, constant: 14), actions.trailingAnchor.constraint(equalTo: inspector.trailingAnchor, constant: -8),
-            actions.bottomAnchor.constraint(equalTo: inspector.bottomAnchor, constant: -8),
-            stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 14), stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -4),
-            stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 4), stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -8),
-            panel.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            previewImageView.heightAnchor.constraint(equalToConstant: 210)
-        ])
-        return inspector
-    }
+        configureSymbolButton(favoriteButton, symbol: "heart", label: "Favorite", action: #selector(toggleFavorite(_:)))
+        configureSymbolButton(moreButton, symbol: "ellipsis.circle", label: "More Actions", action: #selector(showMoreMenu(_:)))
 
-    private func makeFooter() -> NSView {
-        previousButton.target = self; previousButton.action = #selector(previousWallpaper(_:))
-        nextButton.target = self; nextButton.action = #selector(nextWallpaper(_:))
-        rotationSourcePopUp.target = self; rotationSourcePopUp.action = #selector(rotationSourceChanged)
-        rotationPopUp.addItems(withTitles: RotationInterval.allCases.map(\.displayName))
+        rotationPopUp.addItems(withTitles: RotationInterval.allCases.map(rotationTitle))
         rotationPopUp.target = self; rotationPopUp.action = #selector(rotationSelectionChanged)
+        rotationPopUp.setAccessibilityLabel("Rotation interval")
+        rotationSourcePopUp.target = self; rotationSourcePopUp.action = #selector(rotationSourceChanged)
+        rotationSourcePopUp.setAccessibilityLabel("Rotation source")
         shuffleButton.target = self; shuffleButton.action = #selector(shuffleChanged)
-        undoButton.target = self; undoButton.action = #selector(undoWallpaperChange(_:))
-        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [previousButton, nextButton, NSTextField(labelWithString: "Rotate"), rotationSourcePopUp, rotationPopUp, shuffleButton, spacer, undoButton])
-        stack.orientation = .horizontal; stack.alignment = .centerY; stack.spacing = 8
-        return stack
+
+        viewModeControl.segmentCount = 2
+        viewModeControl.trackingMode = .selectOne
+        for (index, (symbol, label)) in [("square.grid.2x2", "Gallery"), ("display", "Desktop Preview")].enumerated() {
+            viewModeControl.setImage(NSImage(systemSymbolName: symbol, accessibilityDescription: label), forSegment: index)
+            viewModeControl.setToolTip(label, forSegment: index)
+        }
+        viewModeControl.selectedSegment = 0
+        viewModeControl.target = self; viewModeControl.action = #selector(viewModeChanged(_:))
+        configureToolbarButton(rotationButton, symbol: "arrow.triangle.2.circlepath", label: "Automatic Rotation", action: #selector(showRotationSettings(_:)))
+        configureToolbarButton(undoButton, symbol: "arrow.uturn.backward", label: "Undo Wallpaper Change", action: #selector(undoWallpaperChange(_:)))
+        undoButton.isEnabled = false
+
+        let width = UserDefaults.standard.object(forKey: "GalleryThumbnailSize") as? Int ?? 1
+        galleryLayout.targetWidth = GalleryLayout.thumbnailWidths[GalleryLayout.thumbnailWidths.indices.contains(width) ? width : 1]
     }
 
-    private func restoreState() {
-        sourcePicker.selectedSegment = LibrarySource.allCases.firstIndex(of: state.currentSource) ?? 0
+    private func configureSymbolButton(_ button: NSButton, symbol: String, label: String, action: Selector) {
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.symbolConfiguration = .init(pointSize: 15, weight: .regular)
+        button.contentTintColor = .secondaryLabelColor
+        button.target = self; button.action = action
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+    }
+
+    private func configureToolbarButton(_ button: NSButton, symbol: String, label: String, action: Selector) {
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        button.bezelStyle = .texturedRounded
+        button.imagePosition = .imageOnly
+        button.target = self; button.action = action
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+    }
+
+    private func makeSidebarView() -> NSView {
+        sidebar.onSelect = { [weak self] item in self?.activate(item) }
+        sidebar.onDrop = { [weak self] target, identities in self?.collect(identities, into: target) ?? false }
+        sidebar.outlineView.menuProvider = { [weak self] item in self?.sidebarMenu(for: item) }
+        newCollectionButton.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)
+        newCollectionButton.imagePosition = .imageLeading
+        newCollectionButton.isBordered = false
+        newCollectionButton.contentTintColor = .secondaryLabelColor
+        newCollectionButton.font = .systemFont(ofSize: NSFont.systemFontSize)
+        newCollectionButton.target = self; newCollectionButton.action = #selector(createCollection(_:))
+        let view = NSView()
+        for subview in [sidebar.scrollView, newCollectionButton] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(subview)
+        }
+        NSLayoutConstraint.activate([
+            sidebar.scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            sidebar.scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            sidebar.scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            sidebar.scrollView.bottomAnchor.constraint(equalTo: newCollectionButton.topAnchor, constant: -8),
+            newCollectionButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
+            newCollectionButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14)
+        ])
+        return view
+    }
+
+    private func makeContentView() -> NSView {
+        // Scope bar: Discover filters or the current folder, only where relevant.
+        discoverBar.setViews([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp], in: .leading)
+        discoverBar.spacing = 8
+        let folderIcon = NSImageView(image: NSImage(systemSymbolName: "folder", accessibilityDescription: nil) ?? NSImage())
+        folderIcon.contentTintColor = .secondaryLabelColor
+        folderPathLabel.lineBreakMode = .byTruncatingMiddle
+        folderPathLabel.textColor = .secondaryLabelColor
+        folderPathLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        folderPathLabel.isSelectable = true
+        folderPathLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let changeFolder = NSButton(title: "Change Folder…", target: self, action: #selector(chooseFolder(_:)))
+        changeFolder.controlSize = .small
+        changeFolder.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        localBar.setViews([folderIcon, folderPathLabel], in: .leading)
+        localBar.setViews([changeFolder], in: .trailing)
+        localBar.spacing = 6
+        let scopeSeparator = NSBox(); scopeSeparator.boxType = .separator
+        let scopeRows = NSStackView(views: [discoverBar, localBar])
+        scopeRows.orientation = .vertical
+        scopeRows.edgeInsets = NSEdgeInsets(top: 7, left: 14, bottom: 7, right: 14)
+        scopeBar.setViews([scopeRows, scopeSeparator], in: .top)
+        scopeBar.orientation = .vertical
+        scopeBar.spacing = 0
+        [discoverBar, localBar].forEach { $0.widthAnchor.constraint(equalTo: scopeRows.widthAnchor, constant: -28).isActive = true }
+        [scopeRows, scopeSeparator].forEach { $0.widthAnchor.constraint(equalTo: scopeBar.widthAnchor).isActive = true }
+
+        // Gallery, desktop preview and empty state share one area; only one is visible.
+        galleryScroll.documentView = collectionView
+        galleryScroll.hasVerticalScroller = true
+        galleryScroll.autohidesScrollers = true
+        galleryScroll.drawsBackground = false
+        galleryScroll.automaticallyAdjustsContentInsets = false
+        let galleryArea = BackdropView()
+        configureViewer()
+        for subview in [galleryScroll, viewerView, emptyStateView] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            galleryArea.addSubview(subview)
+            NSLayoutConstraint.activate([
+                subview.leadingAnchor.constraint(equalTo: galleryArea.leadingAnchor), subview.trailingAnchor.constraint(equalTo: galleryArea.trailingAnchor),
+                subview.topAnchor.constraint(equalTo: galleryArea.topAnchor), subview.bottomAnchor.constraint(equalTo: galleryArea.bottomAnchor)
+            ])
+        }
+        viewerView.isHidden = true
+        emptyStateView.isHidden = true
+
+        configureApplyBar()
+        let barSeparator = NSBox(); barSeparator.boxType = .separator
+        let view = NSView()
+        for subview in [scopeBar, galleryArea, barSeparator, applyBar] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(subview)
+            subview.leadingAnchor.constraint(equalTo: view.leadingAnchor).isActive = true
+            subview.trailingAnchor.constraint(equalTo: view.trailingAnchor).isActive = true
+        }
+        NSLayoutConstraint.activate([
+            scopeBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            galleryArea.topAnchor.constraint(equalTo: scopeBar.bottomAnchor),
+            galleryArea.bottomAnchor.constraint(equalTo: barSeparator.topAnchor),
+            barSeparator.bottomAnchor.constraint(equalTo: applyBar.topAnchor),
+            applyBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            applyBar.heightAnchor.constraint(equalToConstant: 52),
+            galleryArea.heightAnchor.constraint(greaterThanOrEqualToConstant: 240)
+        ])
+        return view
+    }
+
+    private func configureViewer() {
+        previewTitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        previewMetadataLabel.textColor = .secondaryLabelColor
+        previewTagsLabel.textColor = .tertiaryLabelColor
+        previewTagsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        for label in [previewTitleLabel, previewMetadataLabel, previewTagsLabel] {
+            label.alignment = .center
+            label.lineBreakMode = .byTruncatingTail
+            label.isSelectable = true
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        let noticeIcon = NSImageView(image: NSImage(systemSymbolName: "crop", accessibilityDescription: nil) ?? NSImage())
+        noticeIcon.symbolConfiguration = .init(pointSize: NSFont.smallSystemFontSize, weight: .regular)
+        noticeIcon.contentTintColor = .secondaryLabelColor
+        let noticeLabel = NSTextField(labelWithString: "Approximate preview from a cropped thumbnail. Set Wallpaper uses the full original.")
+        noticeLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        noticeLabel.textColor = .secondaryLabelColor
+        noticeLabel.lineBreakMode = .byTruncatingTail
+        noticeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        approximatePreviewNotice.setViews([noticeIcon, noticeLabel], in: .leading)
+        approximatePreviewNotice.spacing = 4
+        approximatePreviewNotice.toolTip = "Wallhaven's preview image is cropped to 3:2, so the framing shown here can differ from the original. The original is downloaded only when you set it."
+        approximatePreviewNotice.setAccessibilityElement(true)
+        approximatePreviewNotice.setAccessibilityRole(.staticText)
+        approximatePreviewNotice.setAccessibilityLabel(noticeLabel.stringValue)
+        approximatePreviewNotice.isHidden = true
+        let caption = NSStackView(views: [previewTitleLabel, previewMetadataLabel, previewTagsLabel, approximatePreviewNotice])
+        caption.orientation = .vertical
+        caption.spacing = 3
+        caption.setHuggingPriority(.required, for: .vertical)
+        caption.setCustomSpacing(5, after: previewTitleLabel)
+        for subview in [stageView, caption] {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            viewerView.addSubview(subview)
+        }
+        NSLayoutConstraint.activate([
+            stageView.topAnchor.constraint(equalTo: viewerView.topAnchor, constant: 20),
+            stageView.leadingAnchor.constraint(equalTo: viewerView.leadingAnchor, constant: 28),
+            stageView.trailingAnchor.constraint(equalTo: viewerView.trailingAnchor, constant: -28),
+            caption.topAnchor.constraint(equalTo: stageView.bottomAnchor, constant: 14),
+            caption.centerXAnchor.constraint(equalTo: viewerView.centerXAnchor),
+            caption.leadingAnchor.constraint(greaterThanOrEqualTo: viewerView.leadingAnchor, constant: 28),
+            caption.bottomAnchor.constraint(equalTo: viewerView.bottomAnchor, constant: -16)
+        ])
+        viewerView.setAccessibilityElement(true)
+        viewerView.setAccessibilityRole(.group)
+        viewerView.setAccessibilityLabel("Desktop preview")
+        viewerView.onNavigate = { [weak self] direction in self?.moveSelection(direction: direction) }
+        viewerView.onClose = { [weak self] in self?.setViewerVisible(false) }
+    }
+
+    private func configureApplyBar() {
+        busyIndicator.style = .spinning
+        busyIndicator.controlSize = .small
+        busyIndicator.isDisplayedWhenStopped = false
+        selectionLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.isHidden = true
+        let text = NSStackView(views: [selectionLabel, statusLabel])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 1
+        for view in [text, selectionLabel, statusLabel] {
+            view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        }
+        displayPopUp.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
+        displayPopUp.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
+        displayPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        setWallpaperButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 118).isActive = true
+        applyBar.setViews([busyIndicator, text, favoriteButton, moreButton], in: .leading)
+        applyBar.setViews([displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
+        applyBar.setCustomSpacing(10, after: text)
+        applyBar.setCustomSpacing(4, after: favoriteButton)
+        applyBar.spacing = 8
+        applyBar.edgeInsets = NSEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
+        applyBar.setAccessibilityLabel("Selected wallpaper")
+    }
+
+    private func makeRotationPopover() -> NSPopover {
+        let title = NSTextField(labelWithString: "Automatic Rotation")
+        title.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        let grid = NSGridView(views: [
+            [NSTextField(labelWithString: "Change wallpaper:"), rotationPopUp],
+            [NSTextField(labelWithString: "Choose from:"), rotationSourcePopUp],
+            [NSGridCell.emptyContentView, shuffleButton]
+        ])
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowAlignment = .firstBaseline
+        grid.rowSpacing = 8
+        grid.columnSpacing = 8
+        rotationPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+        rotationSourcePopUp.widthAnchor.constraint(equalTo: rotationPopUp.widthAnchor).isActive = true
+        rotationSummaryLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        rotationSummaryLabel.textColor = .secondaryLabelColor
+        rotationSummaryLabel.preferredMaxLayoutWidth = 290
+        let stack = NSStackView(views: [title, grid, rotationSummaryLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        rotationSummaryLabel.widthAnchor.constraint(equalToConstant: 290).isActive = true
+        let container = NSView()
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16)
+        ])
+        let controller = NSViewController()
+        controller.view = container
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = controller
+        return popover
+    }
+
+    // MARK: - State restoration
+
+    // Internal for development tests: real startup path with injected, isolated dependencies.
+    func restoreState() {
         searchField.stringValue = state.wallhavenSearch.query
         categoryPopUp.selectItem(at: WallhavenCategory.allCases.firstIndex(of: state.wallhavenSearch.category) ?? 0)
         aspectPopUp.selectItem(at: WallhavenAspectRatio.allCases.firstIndex(of: state.wallhavenSearch.aspectRatio) ?? 0)
         sortingPopUp.selectItem(at: WallhavenSorting.allCases.firstIndex(of: state.wallhavenSearch.sorting) ?? 0)
         selectResolutionControl()
         scalingPopUp.selectItem(at: ScalingMode.allCases.firstIndex(of: state.scalingMode) ?? 0)
+        stageView.scaling = state.scalingMode
         rotationPopUp.selectItem(at: RotationInterval.allCases.firstIndex(of: state.rotationInterval) ?? 0)
         shuffleButton.state = state.shuffleEnabled ? .on : .off
         refreshDisplays(); refreshCollectionControls(); updateSourceUI(); configureRotationTimer()
@@ -399,16 +578,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         guard let id = state.selectedCollectionID else { return nil }
         return state.collections.first { $0.id == id }
     }
+    /// The gallery's visible selection is the only Set target; remembered state just restores it.
     private var selectedIndex: Int? {
-        if let item = collectionView.selectionIndexPaths.first?.item, currentItems.indices.contains(item) { return item }
-        switch state.currentSource {
-        case .local:
-            guard let path = state.selectedImagePath else { return nil }
-            return currentItems.firstIndex { if case .local(let url) = $0 { return url.path == path }; return false }
-        default:
-            guard let identity = state.selectedRemoteIdentity else { return nil }
-            return currentItems.firstIndex { $0.identifier == identity }
-        }
+        guard let item = collectionView.selectionIndexPaths.first?.item, currentItems.indices.contains(item) else { return nil }
+        return item
     }
     private var selectedItem: BrowserItem? {
         guard let index = selectedIndex, currentItems.indices.contains(index) else { return nil }
@@ -431,59 +604,66 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         return RotationInterval.allCases.indices.contains(index) ? RotationInterval.allCases[index] : .off
     }
 
-    @objc private func sourceChanged() {
-        guard LibrarySource.allCases.indices.contains(sourcePicker.selectedSegment) else { return }
-        searchTask?.cancel()
-        searchGeneration = UUID()
-        searchTask = nil
-        isSearching = false
-        progressIndicator.stopAnimation(nil)
-        searchButton.isEnabled = true
-        state.currentSource = LibrarySource.allCases[sourcePicker.selectedSegment]
-        stateStore.save(state)
-        remoteThumbnailProvider.reset(); detailTask?.cancel()
-        updateSourceUI()
-        if state.currentSource == .discover && remoteResults.isEmpty { performSearch(page: 1, appending: false) }
-        else {
-            reloadCurrentSource()
-            showStatus("\(currentItems.count) wallpapers in \(state.currentSource.displayName).", isError: false)
-        }
-    }
+    // MARK: - Sources
 
     @objc func showDiscover(_ sender: Any?) { selectSource(.discover) }
     @objc func showLocal(_ sender: Any?) { selectSource(.local) }
     @objc func showFavorites(_ sender: Any?) { selectSource(.favorites) }
     @objc func showCollections(_ sender: Any?) { selectSource(.collections) }
 
-    var isInspectorVisible: Bool { inspectorView?.isHidden == false }
-
-    @objc func toggleInspector(_ sender: Any?) {
-        inspectorView?.isHidden.toggle()
+    private func activate(_ item: SidebarItem) {
+        switch item {
+        case .discover: selectSource(.discover)
+        case .local: selectSource(.local)
+        case .favorites: selectSource(.favorites)
+        case .collection(let id): state.selectedCollectionID = id; selectSource(.collections)
+        }
     }
 
     private func selectSource(_ source: LibrarySource) {
-        sourcePicker.selectedSegment = LibrarySource.allCases.firstIndex(of: source) ?? 0
-        sourceChanged()
+        searchTask?.cancel()
+        searchGeneration = UUID()
+        searchTask = nil
+        isSearching = false
+        state.currentSource = source
+        stateStore.save(state)
+        remoteThumbnailProvider.reset(); detailTask?.cancel()
+        isViewerVisible = false
+        updateSourceUI()
+        if state.currentSource == .discover && remoteResults.isEmpty { performSearch(page: 1, appending: false) }
+        else { reloadCurrentSource() }
     }
 
+    private var currentSidebarItem: SidebarItem? {
+        switch state.currentSource {
+        case .discover: return .discover
+        case .local: return .local
+        case .favorites: return .favorites
+        case .collections: return selectedCollection.map { .collection($0.id) }
+        }
+    }
+
+    @objc func toggleSidebar(_ sender: Any?) { splitViewController?.toggleSidebar(sender) }
+    private var isSidebarVisible: Bool { splitViewController?.splitViewItems.first?.isCollapsed == false }
+
+    // MARK: - Search
+
     @objc func focusSearch(_ sender: Any?) {
-        sourcePicker.selectedSegment = LibrarySource.allCases.firstIndex(of: .discover) ?? 0
-        if state.currentSource != .discover { sourceChanged() }
-        window?.makeFirstResponder(searchField)
+        if state.currentSource != .discover { selectSource(.discover) }
+        if let searchToolbarItem, window?.toolbar?.isVisible == true { searchToolbarItem.beginSearchInteraction() }
+        else { window?.makeFirstResponder(searchField) }
     }
 
     @objc func search(_ sender: Any?) {
         if state.currentSource != .discover {
-            sourcePicker.selectedSegment = LibrarySource.allCases.firstIndex(of: .discover) ?? 0
-            state.currentSource = .discover; updateSourceUI()
+            state.currentSource = .discover; isViewerVisible = false; updateSourceUI()
         }
         persistSearchOptions(); performSearch(page: 1, appending: false)
     }
 
     @objc private func searchOptionChanged(_ sender: Any?) {
         persistSearchOptions()
-        invalidateSearch()
-        showStatus("Search filters updated. Choose Search to apply them.", isError: false)
+        if state.currentSource == .discover { performSearch(page: 1, appending: false) } else { invalidateSearch() }
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -496,9 +676,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         searchTask?.cancel()
         searchGeneration = UUID()
         isSearching = false
-        progressIndicator.stopAnimation(nil)
-        searchButton.isEnabled = true
         updateEmptyAndPagination()
+        updateControlAvailability()
     }
 
     private func persistSearchOptions() {
@@ -540,18 +719,17 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         searchTask?.cancel(); detailTask?.cancel()
         let generation = UUID()
         searchGeneration = generation
+        searchErrorText = nil
         if !appending {
             remoteThumbnailProvider.reset()
             remoteResults = []
             currentPage = 0; lastPage = 0; totalResults = 0
+            lastAppendFailure = nil
             collectionView.reloadData()
             restoreSelection()
-            updateControlAvailability()
         }
-        isSearching = true; progressIndicator.startAnimation(nil)
-        emptyStateLabel.stringValue = appending ? "Loading more wallpapers…" : "Searching Wallhaven…"
-        emptyStateLabel.isHidden = appending && !remoteResults.isEmpty
-        searchButton.isEnabled = false; loadMoreButton.isEnabled = false
+        isSearching = true
+        updateEmptyAndPagination(); updateControlAvailability()
         let options = state.wallhavenSearch
         searchTask = Task { [weak self] in
             guard let self else { return }
@@ -562,69 +740,99 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 resultOptions = options
                 if appending {
                     let known = Set(remoteResults.map(\.identityKey))
-                    remoteResults.append(contentsOf: result.wallpapers.filter { !known.contains($0.identityKey) })
+                    let added = result.wallpapers.filter { !known.contains($0.identityKey) }
+                    let start = remoteResults.count
+                    remoteResults.append(contentsOf: added)
+                    collectionView.insertItems(at: Set((start..<remoteResults.count).map { IndexPath(item: $0, section: 0) }))
                 } else {
                     remoteResults = result.wallpapers
                     state.selectedRemoteIdentity = remoteResults.first?.identityKey
+                    collectionView.reloadData(); restoreSelection()
                 }
                 currentPage = result.currentPage; lastPage = result.lastPage; totalResults = result.total
-                isSearching = false; progressIndicator.stopAnimation(nil); searchButton.isEnabled = true
-                collectionView.reloadData(); restoreSelection(); updateEmptyAndPagination(); updateControlAvailability(); stateStore.save(state)
-                let rate = result.rateLimit.remaining.map { " · \($0) requests remaining" } ?? ""
-                showStatus("Loaded \(remoteResults.count) of \(result.total) Wallhaven results\(rate).", isError: false)
+                isSearching = false
+                updateEmptyAndPagination(); updateControlAvailability(); stateStore.save(state)
+                if let remaining = result.rateLimit.remaining, remaining < 10 {
+                    showStatus("Wallhaven allows \(remaining) more requests this minute.", isError: false)
+                }
+                DispatchQueue.main.async { [weak self] in self?.loadMoreIfNeeded() }
             } catch is CancellationError {
                 return
             } catch {
                 guard !Task.isCancelled, searchGeneration == generation else { return }
-                isSearching = false; progressIndicator.stopAnimation(nil); searchButton.isEnabled = true
-                updateEmptyAndPagination(errorText: friendlyMessage(for: error)); updateControlAvailability()
-                showStatus(friendlyMessage(for: error), isError: true)
+                isSearching = false
+                if appending {
+                    lastAppendFailure = Date()
+                    showStatus("Couldn’t load more results. \(friendlyMessage(for: error))", isError: true)
+                } else {
+                    searchErrorText = friendlyMessage(for: error)
+                    showStatus("", isError: false)
+                }
+                updateEmptyAndPagination(); updateControlAvailability()
             }
         }
     }
 
-    @objc private func loadMore(_ sender: Any?) {
-        guard !isSearching, currentPage < lastPage, resultOptions == state.wallhavenSearch else { return }
+    @objc private func galleryDidScroll(_ notification: Notification) { loadMoreIfNeeded() }
+
+    /// Loads the next Discover page when the user nears the end of the grid. A failed page waits
+    /// a few seconds before scrolling can retry it, so an outage never turns into a request loop.
+    private func loadMoreIfNeeded() {
+        guard state.currentSource == .discover, !isSearching, currentPage < lastPage, resultOptions == state.wallhavenSearch,
+              !galleryScroll.isHidden, Date().timeIntervalSince(lastAppendFailure ?? .distantPast) > 5 else { return }
+        let visible = galleryScroll.documentVisibleRect
+        guard visible.maxY >= collectionView.frame.height - max(visible.height * 0.5, 200) else { return }
         performSearch(page: currentPage + 1, appending: true)
     }
 
+    // MARK: - Local folder
+
     @objc func chooseFolder(_ sender: Any?) {
+        guard let window else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose a Wallpaper Folder"; panel.prompt = "Choose Folder"
+        panel.message = "Wallpier shows the JPEG, PNG and HEIC images in the folder you choose."
         panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
         if let path = state.folderPath { panel.directoryURL = URL(fileURLWithPath: path) }
-        guard panel.runModal() == .OK, let folderURL = panel.url else { return }
-        sourcePicker.selectedSegment = LibrarySource.allCases.firstIndex(of: .local) ?? 1
-        sourceChanged(); loadFolder(folderURL, persistSelection: true)
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let folderURL = panel.url, let self else { return }
+            selectSource(.local); loadFolder(folderURL, persistSelection: true)
+        }
     }
 
     private func loadFolder(_ folderURL: URL, persistSelection: Bool) {
         let standardizedURL = folderURL.standardizedFileURL
         let requestID = UUID(); folderLoadID = requestID; thumbnailProvider.reset()
-        if state.currentSource == .local { localURLs = []; collectionView.reloadData() }
-        folderPathLabel.stringValue = standardizedURL.path; folderPathLabel.toolTip = standardizedURL.path
-        imageCountLabel.stringValue = "Loading…"; updateEmptyAndPagination(loadingText: "Loading local wallpapers…")
+        if state.currentSource == .local { localURLs = []; collectionView.reloadData(); restoreSelection() }
+        folderPathLabel.stringValue = (standardizedURL.path as NSString).abbreviatingWithTildeInPath; folderPathLabel.toolTip = standardizedURL.path
+        isLoadingFolder = true
+        updateSourceUI(); updateEmptyAndPagination()
         Task.detached(priority: .userInitiated) {
             let result = Result { try SupportedWallpaperFiles.images(in: standardizedURL) }
             await MainActor.run { [weak self] in
                 guard let self, self.folderLoadID == requestID else { return }
+                self.isLoadingFolder = false
                 switch result {
                 case .success(let urls):
-                    self.localURLs = urls; self.imageCountLabel.stringValue = urls.count == 1 ? "1 image" : "\(urls.count) images"
+                    self.localURLs = urls
                     self.state.folderPath = standardizedURL.path
                     if persistSelection || !urls.contains(where: { $0.path == self.state.selectedImagePath }) { self.state.selectedImagePath = urls.first?.path }
                     self.stateStore.save(self.state)
+                    self.refreshSidebar()
                     if self.state.currentSource == .local {
+                        self.updateSourceUI()
                         self.reloadCurrentSource()
                         self.showStatus(urls.isEmpty ? "No supported images found in this folder." : "Loaded \(urls.count) local wallpapers.", isError: false)
                     }
                 case .failure(let error):
-                    self.imageCountLabel.stringValue = ""
+                    self.updateEmptyAndPagination()
                     self.presentError(title: "Could Not Open Folder", message: error.localizedDescription)
                 }
             }
         }
     }
+
+    // MARK: - Setting wallpapers
 
     @objc func setWallpaper(_ sender: Any?) {
         guard rotationTask == nil, downloadTask == nil else { showStatus("Wait for the current download to finish.", isError: false); return }
@@ -663,13 +871,14 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 else { showStatus("Automatic rotation failed: \(message)", isError: true) }
             }
         }
+        updateControlAvailability()
     }
 
     private func localOriginal(for reference: WallpaperReference) async throws -> URL {
         if let cached = try await originalCache.cachedURL(for: reference) {
             updateReference(reference, cachedPath: cached.path); return cached
         }
-        showStatus("Downloading \(reference.resolution) original from Wallhaven…", isError: false)
+        showStatus("Downloading the \(reference.resolution) original from Wallhaven…", isError: false)
         let temporary = try await provider.downloadOriginal(for: reference)
         defer { try? FileManager.default.removeItem(at: temporary) }
         try Task.checkCancellation()
@@ -739,21 +948,22 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         return DisplayAssignment(displayID: displayID, displayName: displayName, imagePath: current.imageURL.path, scaling: current.scaling)
     }
 
+    // MARK: - Selection and preview
+
     @objc func previousWallpaper(_ sender: Any?) { moveSelection(direction: -1) }
     @objc func nextWallpaper(_ sender: Any?) { moveSelection(direction: 1) }
 
     private func moveSelection(direction: Int) {
         guard let next = WallpaperNavigation.index(after: selectedIndex, direction: direction, count: currentItems.count) else { NSSound.beep(); return }
-        selectItem(at: next, announce: true)
+        selectItem(at: next)
     }
 
-    private func selectItem(at index: Int, announce: Bool) {
+    private func selectItem(at index: Int) {
         guard currentItems.indices.contains(index) else { return }
         let item = currentItems[index]; let indexPath = IndexPath(item: index, section: 0)
         collectionView.selectionIndexPaths = [indexPath]
         collectionView.scrollToItems(at: [indexPath], scrollPosition: .nearestVerticalEdge)
         rememberSelection(item); updatePreview(for: item)
-        if announce { showStatus("Selected \(item.title).", isError: false) }
         updateControlAvailability()
     }
 
@@ -773,42 +983,79 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             index = currentItems.firstIndex { if case .local(let url) = $0 { return url.path == state.selectedImagePath }; return false } ?? 0
         default: index = currentItems.firstIndex { $0.identifier == state.selectedRemoteIdentity } ?? 0
         }
-        selectItem(at: index, announce: false)
+        selectItem(at: index)
     }
 
     private func updatePreview(for item: BrowserItem?) {
         detailTask?.cancel()
-        previewImageView.image = NSImage(systemSymbolName: "photo", accessibilityDescription: "No preview")
+        stageView.image = nil
+        approximatePreviewNotice.isHidden = true
         guard let item else {
-            previewTitleLabel.stringValue = "No wallpaper selected"
-            previewMetadataLabel.stringValue = "Select a wallpaper to preview it."
+            previewTitleLabel.stringValue = "No Wallpaper Selected"
+            previewMetadataLabel.stringValue = ""
             previewTagsLabel.stringValue = ""
+            stageView.setAccessibilityLabel("No wallpaper selected")
+            updateSelectionSummary()
             return
         }
         previewTitleLabel.stringValue = item.title
         switch item {
         case .local(let url):
-            previewMetadataLabel.stringValue = url.path; previewTagsLabel.stringValue = "Local file"
-            thumbnailProvider.requestThumbnail(for: url, maximumPixelSize: 900) { [weak self] image in
-                guard case .local(let selectedURL) = self?.selectedItem, selectedURL == url else { return }
-                self?.previewImageView.image = image
+            stageView.imagePixelSize = .zero
+            previewMetadataLabel.stringValue = (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
+            previewTagsLabel.stringValue = url.pathExtension.uppercased()
+            loadLocalPreview(url) { [weak self] in
+                guard case .local(let selectedURL) = self?.selectedItem, selectedURL == url else { return false }
+                return true
+            }
+            Task.detached(priority: .utility) {
+                let size = DesktopPreviewView.pixelSize(of: url)
+                await MainActor.run { [weak self] in
+                    guard let self, case .local(let selectedURL) = self.selectedItem, selectedURL == url, let size else { return }
+                    self.stageView.imagePixelSize = size
+                    self.previewMetadataLabel.stringValue = "\(Int(size.width)) × \(Int(size.height)) · " + self.previewMetadataLabel.stringValue
+                }
             }
         case .remote(let ref):
             configureRemoteMetadata(ref)
-            remoteThumbnailProvider.requestThumbnail(for: ref.previewURL, maximumPixelSize: 1000) { [weak self] image in
-                guard self?.selectedReference?.identityKey == ref.identityKey else { return }
-                self?.previewImageView.image = image
+            stageView.imagePixelSize = CGSize(width: ref.width, height: ref.height)
+            let isCurrent: () -> Bool = { [weak self] in self?.selectedReference?.identityKey == ref.identityKey }
+            // A downloaded original gives the sharpest preview; Wallhaven's large thumbnail is the fallback.
+            if let path = ref.cachedLocalPath {
+                loadLocalPreview(URL(fileURLWithPath: path), isCurrent: isCurrent) { [weak self] in self?.loadRemotePreview(ref, isCurrent: isCurrent) }
+            } else {
+                loadRemotePreview(ref, isCurrent: isCurrent)
             }
             if ref.uploader == nil || ref.tags.isEmpty { fetchDetails(for: ref) }
+        }
+        stageView.setAccessibilityLabel("Desktop preview of \(item.title)")
+        updateSelectionSummary()
+    }
+
+    private func loadLocalPreview(_ url: URL, isCurrent: @escaping () -> Bool, onFailure: (() -> Void)? = nil) {
+        thumbnailProvider.requestThumbnail(for: url, maximumPixelSize: 1800) { [weak self] image in
+            guard isCurrent() else { return }
+            guard let self, let image else { onFailure?(); return }
+            stageView.image = image
+            approximatePreviewNotice.isHidden = true
+        }
+    }
+
+    private func loadRemotePreview(_ ref: WallpaperReference, isCurrent: @escaping () -> Bool) {
+        remoteThumbnailProvider.requestThumbnail(for: ref.previewURL, maximumPixelSize: 1000) { [weak self] image in
+            guard isCurrent(), let self else { return }
+            stageView.image = image
+            // Wallhaven's large thumbnail is a 3:2 crop: say so rather than imply exact framing.
+            approximatePreviewNotice.isHidden = image == nil
         }
     }
 
     private func configureRemoteMetadata(_ reference: WallpaperReference) {
-        let uploader = reference.uploader.map { " · by \($0)" } ?? ""
-        let cacheStatus = reference.cachedLocalPath == nil ? "" : " · original cached"
-        previewMetadataLabel.stringValue = "\(reference.resolution)\(uploader)\(cacheStatus)"
+        let parts = ["\(reference.width) × \(reference.height)", reference.uploader.map { "by \($0)" },
+                     reference.cachedLocalPath == nil ? nil : "Original downloaded"]
+        previewMetadataLabel.stringValue = parts.compactMap { $0 }.joined(separator: " · ")
         previewTagsLabel.stringValue = reference.tags.isEmpty ? "Wallhaven · SFW" : reference.tags.joined(separator: " · ")
-        favoriteButton.title = state.isFavorite(reference) ? "Remove from Favorites" : "Add to Favorites"
+        updateSelectionSummary()
     }
 
     private func fetchDetails(for reference: WallpaperReference) {
@@ -824,52 +1071,224 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         }
     }
 
+    /// First line of the apply bar: what Set Wallpaper will apply.
+    private func updateSelectionSummary() {
+        let title: String, detail: String
+        switch selectedItem {
+        case nil: title = "No Wallpaper Selected"; detail = ""
+        case .local(let url)?: title = url.deletingPathExtension().lastPathComponent; detail = url.pathExtension.uppercased()
+        case .remote(let ref)?: title = ref.wallpaperID; detail = "\(ref.width) × \(ref.height)"
+        }
+        let text = NSMutableAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium),
+            .foregroundColor: selectedItem == nil ? NSColor.secondaryLabelColor : NSColor.labelColor])
+        if !detail.isEmpty {
+            text.append(NSAttributedString(string: "  " + detail, attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        selectionLabel.attributedStringValue = text
+        let isFavorite = selectedReference.map(state.isFavorite) ?? false
+        favoriteButton.image = NSImage(systemSymbolName: isFavorite ? "heart.fill" : "heart",
+                                       accessibilityDescription: isFavorite ? "Remove from Favorites" : "Add to Favorites")
+        favoriteButton.contentTintColor = isFavorite ? .systemPink : .secondaryLabelColor
+        favoriteButton.toolTip = isFavorite ? "Remove from Favorites (⌘D)" : "Add to Favorites (⌘D)"
+        favoriteButton.setAccessibilityLabel(isFavorite ? "Remove from Favorites" : "Add to Favorites")
+    }
+
+    // MARK: - Gallery / desktop preview mode
+
+    @objc func toggleViewer(_ sender: Any?) { setViewerVisible(!isViewerVisible) }
+
+    @objc private func viewModeChanged(_ sender: NSSegmentedControl) { setViewerVisible(sender.selectedSegment == 1) }
+
+    private func setViewerVisible(_ visible: Bool) {
+        guard !visible || selectedItem != nil else { viewModeControl.selectedSegment = 0; NSSound.beep(); return }
+        guard visible != isViewerVisible else { return }
+        isViewerVisible = visible
+        updateContentVisibility(animated: true)
+        window?.makeFirstResponder(visible ? viewerView : collectionView)
+        if !visible, let index = selectedIndex {
+            collectionView.scrollToItems(at: [IndexPath(item: index, section: 0)], scrollPosition: .nearestVerticalEdge)
+        }
+    }
+
+    private func updateContentVisibility(animated: Bool = false) {
+        let hasItems = !currentItems.isEmpty
+        let showViewer = isViewerVisible && hasItems && selectedItem != nil
+        if !showViewer && isViewerVisible { isViewerVisible = false }
+        let target: NSView = showViewer ? viewerView : galleryScroll
+        let changed = target.isHidden
+        viewerView.isHidden = !showViewer
+        galleryScroll.isHidden = showViewer || !hasItems
+        viewModeControl.selectedSegment = showViewer ? 1 : 0
+        viewModeControl.setEnabled(hasItems, forSegment: 1)
+        if !showViewer, window?.firstResponder === viewerView { window?.makeFirstResponder(collectionView) }
+        if animated, changed, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            target.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                target.animator().alphaValue = 1
+            }
+        } else {
+            target.alphaValue = 1
+        }
+    }
+
+    @objc func makeThumbnailsLarger(_ sender: Any?) { changeThumbnailSize(by: 1) }
+    @objc func makeThumbnailsSmaller(_ sender: Any?) { changeThumbnailSize(by: -1) }
+
+    private var thumbnailSizeIndex: Int { GalleryLayout.thumbnailWidths.firstIndex(of: galleryLayout.targetWidth) ?? 1 }
+
+    private func changeThumbnailSize(by step: Int) {
+        let index = thumbnailSizeIndex + step
+        guard GalleryLayout.thumbnailWidths.indices.contains(index) else { NSSound.beep(); return }
+        galleryLayout.targetWidth = GalleryLayout.thumbnailWidths[index]
+        UserDefaults.standard.set(index, forKey: "GalleryThumbnailSize")
+        collectionView.reloadData()
+        if let index = selectedIndex {
+            collectionView.selectionIndexPaths = [IndexPath(item: index, section: 0)]
+            collectionView.scrollToItems(at: [IndexPath(item: index, section: 0)], scrollPosition: .nearestVerticalEdge)
+        }
+    }
+
+    // MARK: - Favorites and collections
+
     @objc func toggleFavorite(_ sender: Any?) {
         guard let ref = selectedReference else { return }
-        state.toggleFavorite(ref); stateStore.save(state)
-        updateSourceUI()
-        if state.currentSource == .favorites { reloadCurrentSource() } else { updatePreview(for: .remote(ref)) }
+        if let index = state.favorites.firstIndex(where: { $0.identityKey == ref.identityKey }) {
+            return setMembership(ref, in: .favorites, at: index, member: false)
+        }
+        setMembership(ref, in: .favorites, at: state.favorites.count, member: true, addition: true)
     }
 
-    @objc private func addToCollection(_ sender: NSPopUpButton) {
-        defer { sender.selectItem(at: 0) }
-        guard sender.indexOfSelectedItem > 0, let ref = selectedReference else { return }
-        let index = sender.indexOfSelectedItem - 1
-        guard state.collections.indices.contains(index) else { return }
-        state.collections[index].add(ref); stateStore.save(state); refreshCollectionControls()
-        showStatus("Added \(ref.wallpaperID) to \(state.collections[index].name).", isError: false)
+    @objc func addToCollection(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID, let ref = selectedReference,
+              let collection = state.collections.first(where: { $0.id == id }) else { return }
+        setMembership(ref, in: .collection(id), at: collection.wallpapers.count, member: true, addition: true)
     }
 
-    @objc private func removeFromCollection(_ sender: Any?) {
-        guard let id = state.selectedCollectionID, let index = state.collections.firstIndex(where: { $0.id == id }), let ref = selectedReference else { return }
-        state.collections[index].remove(identityKey: ref.identityKey); stateStore.save(state); refreshCollectionControls(); reloadCurrentSource()
+    @objc func removeFromCollection(_ sender: Any?) {
+        guard let id = state.selectedCollectionID, let ref = selectedReference,
+              let index = selectedCollection?.wallpapers.firstIndex(where: { $0.identityKey == ref.identityKey }) else { return }
+        setMembership(ref, in: .collection(id), at: index, member: false)
+    }
+
+    /// Delete key and ⌘⌫: removes the selection from the favorites or collection being viewed.
+    @objc func removeSelected(_ sender: Any?) {
+        switch state.currentSource {
+        case .favorites where selectedReference != nil: toggleFavorite(sender)
+        case .collections where selectedReference != nil: removeFromCollection(sender)
+        default: NSSound.beep()
+        }
+    }
+
+    private var currentList: MemberList? {
+        switch state.currentSource {
+        case .favorites: return .favorites
+        case .collections: return state.selectedCollectionID.map(MemberList.collection)
+        default: return nil
+        }
+    }
+
+    /// Adds a wallpaper to, or removes it from, Favorites or a collection at a position. Each real
+    /// change registers its opposite with the window's Undo (⌘Z, ⇧⌘Z) for this session only, which
+    /// also retires any obsolete Redo; a change that changes nothing registers nothing. Restoring
+    /// the desktop is the separate, persistent Undo Wallpaper Change.
+    private func setMembership(_ ref: WallpaperReference, in list: MemberList, at index: Int, member: Bool, addition: Bool = false) {
+        var members: [WallpaperReference], name: String
+        switch list {
+        case .favorites: members = state.favorites; name = "Favorites"
+        case .collection(let id):
+            guard let collection = state.collections.first(where: { $0.id == id }) else { return }
+            members = collection.wallpapers; name = "“\(collection.name)”"
+        }
+        guard members.contains(where: { $0.identityKey == ref.identityKey }) != member else { return }
+        if member { members.insert(ref, at: min(index, members.count)) } else { members.removeAll { $0.identityKey == ref.identityKey } }
+        switch list {
+        case .favorites: state.favorites = members
+        case .collection(let id):
+            guard let position = state.collections.firstIndex(where: { $0.id == id }) else { return }
+            state.collections[position] = WallpaperCollection(id: id, name: state.collections[position].name, wallpapers: members)
+        }
+        // In the list being viewed, select the restored wallpaper, or keep the grid position after a removal.
+        let viewing = currentList == list
+        if viewing, !members.isEmpty { state.selectedRemoteIdentity = member ? ref.identityKey : members[min(index, members.count - 1)].identityKey }
+        stateStore.save(state); refreshCollectionControls()
+        if viewing { reloadCurrentSource() } else { updateSelectionSummary() }
+        if let undoManager = window?.undoManager {
+            undoManager.registerUndo(withTarget: self) { $0.setMembership(ref, in: list, at: index, member: !member, addition: addition) }
+            undoManager.setActionName(addition ? "Add to \(name)" : "Remove from \(name)")
+        }
+        showStatus(member ? "\(addition ? "Added" : "Restored") \(ref.wallpaperID) to \(name)." : "Removed \(ref.wallpaperID) from \(name).", isError: false)
+    }
+
+    /// Adds dropped wallpapers (by identity) to Favorites or a collection.
+    private func collect(_ identities: [String], into target: SidebarItem) -> Bool {
+        let known = remoteResults + state.favorites + state.collections.flatMap(\.wallpapers)
+        let references = identities.compactMap { identity in known.first { $0.identityKey == identity } }
+        guard !references.isEmpty else { return false }
+        let list: MemberList, name: String, members: [WallpaperReference]
+        switch target {
+        case .favorites: list = .favorites; name = "Favorites"; members = state.favorites
+        case .collection(let id):
+            guard let collection = state.collections.first(where: { $0.id == id }) else { return false }
+            list = .collection(id); name = collection.name; members = collection.wallpapers
+        default: return false
+        }
+        var present = Set(members.map(\.identityKey))
+        let adding = references.filter { present.insert($0.identityKey).inserted }
+        // One drop is one Undo step; a drop that adds nothing leaves Undo and Redo untouched.
+        guard !adding.isEmpty else { return true }
+        window?.undoManager?.beginUndoGrouping()
+        for (offset, ref) in adding.enumerated() {
+            setMembership(ref, in: list, at: members.count + offset, member: true, addition: true)
+        }
+        window?.undoManager?.endUndoGrouping()
+        showStatus("Added \(adding.count == 1 ? adding[0].wallpaperID : "\(adding.count) wallpapers") to \(name).", isError: false)
+        return true
     }
 
     @objc func openSourcePage(_ sender: Any?) {
-        guard let ref = selectedReference else { return }
-        NSWorkspace.shared.open(ref.sourcePageURL)
+        switch selectedItem {
+        case .remote(let ref)?: NSWorkspace.shared.open(ref.sourcePageURL)
+        case .local(let url)?: NSWorkspace.shared.activateFileViewerSelecting([url])
+        case nil: NSSound.beep()
+        }
+    }
+
+    @objc func copy(_ sender: Any?) {
+        guard let item = selectedItem else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        switch item {
+        case .remote(let ref): pasteboard.writeObjects([ref.sourcePageURL as NSURL])
+        case .local(let url): pasteboard.writeObjects([url as NSURL])
+        }
     }
 
     @objc func createCollection(_ sender: Any?) {
+        // From an item's menu, the new collection starts with that wallpaper.
+        let adding = (sender as? NSMenuItem)?.representedObject as? String == "withSelection" ? selectedReference : nil
         promptForCollectionName(title: "New Collection", initialValue: "") { [weak self] name in
             guard let self, !name.isEmpty else { return }
             let collection = WallpaperCollection(name: name)
-            state.collections.append(collection); state.selectedCollectionID = collection.id; stateStore.save(state)
-            refreshCollectionControls()
-            if state.currentSource == .collections { reloadCurrentSource() }
+            state.collections.append(collection); stateStore.save(state)
+            if let adding { setMembership(adding, in: .collection(collection.id), at: 0, member: true, addition: true) }
+            else { state.selectedCollectionID = collection.id; refreshCollectionControls(); selectSource(.collections) }
         }
     }
 
     @objc func renameCollection(_ sender: Any?) {
-        guard let id = state.selectedCollectionID, let index = state.collections.firstIndex(where: { $0.id == id }) else { return }
+        guard let id = targetCollectionID(sender), let index = state.collections.firstIndex(where: { $0.id == id }) else { return }
         promptForCollectionName(title: "Rename Collection", initialValue: state.collections[index].name) { [weak self] name in
             guard let self, !name.isEmpty, let current = state.collections.firstIndex(where: { $0.id == id }) else { return }
-            state.collections[current].rename(to: name); stateStore.save(state); refreshCollectionControls()
+            state.collections[current].rename(to: name); stateStore.save(state); refreshCollectionControls(); updateWindowTitle()
         }
     }
 
     @objc func deleteCollection(_ sender: Any?) {
-        guard let id = state.selectedCollectionID, let collection = state.collections.first(where: { $0.id == id }), let window else { return }
+        guard let id = targetCollectionID(sender), let collection = state.collections.first(where: { $0.id == id }), let window else { return }
         let alert = NSAlert(); alert.alertStyle = .warning
         alert.messageText = "Delete “\(collection.name)”?"
         alert.informativeText = "The collection will be removed. Cached originals and favorites are not deleted."
@@ -877,6 +1296,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
             state.collections.removeAll { $0.id == id }
+            // Removal Undo cannot restore into a deleted collection; don't offer it.
+            window.undoManager?.removeAllActions(withTarget: self)
             if state.activeRotationCollectionID == id {
                 rotationTask?.cancel()
                 state.activeRotationCollectionID = nil
@@ -884,9 +1305,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 rotationPopUp.selectItem(at: RotationInterval.allCases.firstIndex(of: .off) ?? 0)
                 configureRotationTimer()
             }
-            state.selectedCollectionID = state.collections.first?.id; stateStore.save(state)
-            refreshCollectionControls(); reloadCurrentSource()
+            if state.selectedCollectionID == id { state.selectedCollectionID = state.collections.first?.id }
+            stateStore.save(state)
+            refreshCollectionControls(); updateSourceUI(); reloadCurrentSource()
         }
+    }
+
+    /// Sidebar context menus name their collection; menu-bar commands act on the one being viewed.
+    private func targetCollectionID(_ sender: Any?) -> UUID? {
+        (sender as? NSMenuItem)?.representedObject as? UUID ?? (state.currentSource == .collections ? state.selectedCollectionID : nil)
     }
 
     private func promptForCollectionName(title: String, initialValue: String, completion: @escaping (String) -> Void) {
@@ -894,27 +1321,44 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let input = NSTextField(string: initialValue); input.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
         let alert = NSAlert(); alert.messageText = title; alert.informativeText = "Enter a short, descriptive name."; alert.accessoryView = input
         alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = input
         alert.beginSheetModal(for: window) { response in
             guard response == .alertFirstButtonReturn else { return }
             completion(input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
 
-    @objc private func collectionSelectionChanged() {
-        guard state.collections.indices.contains(collectionPopUp.indexOfSelectedItem) else { return }
-        state.selectedCollectionID = state.collections[collectionPopUp.indexOfSelectedItem].id; stateStore.save(state); reloadCurrentSource()
-    }
-
     private func refreshCollectionControls() {
         if state.selectedCollectionID == nil || !state.collections.contains(where: { $0.id == state.selectedCollectionID }) { state.selectedCollectionID = state.collections.first?.id }
-        collectionPopUp.removeAllItems(); collectionPopUp.addItems(withTitles: state.collections.map(\.name))
-        if let selected = state.selectedCollectionID, let index = state.collections.firstIndex(where: { $0.id == selected }) { collectionPopUp.selectItem(at: index) }
-        addToCollectionPopUp.removeAllItems(); addToCollectionPopUp.addItem(withTitle: "Add to Collection…"); addToCollectionPopUp.addItems(withTitles: state.collections.map(\.name))
-        refreshRotationSources(); stateStore.save(state); updateControlAvailability()
+        refreshRotationSources(); refreshSidebar(); stateStore.save(state); updateControlAvailability()
     }
 
+    private func refreshSidebar() {
+        let rotating = state.rotationInterval != .off
+        let folderName = state.folderPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+        let library = [
+            SidebarNode(.discover, title: "Discover", symbolName: "globe"),
+            SidebarNode(.local, title: folderName ?? "Folder", symbolName: "folder",
+                        count: state.folderPath == nil || isLoadingFolder ? nil : localURLs.count,
+                        isRotating: rotating && state.activeRotationCollectionID == nil),
+            SidebarNode(.favorites, title: "Favorites", symbolName: "heart", count: state.favorites.count)
+        ]
+        let collections = state.collections.map {
+            SidebarNode(.collection($0.id), title: $0.name, symbolName: "rectangle.stack", count: $0.wallpapers.count,
+                        isRotating: rotating && state.activeRotationCollectionID == $0.id)
+        }
+        var groups = [SidebarNode(group: "Library", children: library)]
+        if !collections.isEmpty { groups.append(SidebarNode(group: "Collections", children: collections)) }
+        sidebar.reload(groups: groups, selection: currentSidebarItem)
+    }
+
+    // MARK: - Rotation
+
     private func refreshRotationSources() {
-        rotationSourcePopUp.removeAllItems(); rotationSourcePopUp.addItem(withTitle: "Local Folder"); rotationSourcePopUp.addItems(withTitles: state.collections.map(\.name))
+        let folderName = state.folderPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Local Folder"
+        rotationSourcePopUp.removeAllItems(); rotationSourcePopUp.addItem(withTitle: folderName); rotationSourcePopUp.addItems(withTitles: state.collections.map(\.name))
+        rotationSourcePopUp.item(at: 0)?.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+        for index in state.collections.indices { rotationSourcePopUp.item(at: index + 1)?.image = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: nil) }
         if let id = state.activeRotationCollectionID, let index = state.collections.firstIndex(where: { $0.id == id }) { rotationSourcePopUp.selectItem(at: index + 1) }
         else { rotationSourcePopUp.selectItem(at: 0) }
     }
@@ -923,17 +1367,44 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         rotationTask?.cancel()
         let index = rotationSourcePopUp.indexOfSelectedItem - 1
         state.activeRotationCollectionID = state.collections.indices.contains(index) ? state.collections[index].id : nil
-        stateStore.save(state); updateControlAvailability()
+        stateStore.save(state); refreshSidebar(); updateControlAvailability()
     }
 
-    @objc private func rotationSelectionChanged() {
+    @objc func rotationSelectionChanged() {
         rotationTask?.cancel()
         state.rotationInterval = selectedRotationInterval; stateStore.save(state); configureRotationTimer()
         showStatus(selectedRotationInterval == .off ? "Automatic rotation is off." : "Automatic rotation: \(selectedRotationInterval.displayName).", isError: false)
-        updateControlAvailability()
+        refreshSidebar(); updateControlAvailability()
     }
 
-    @objc private func shuffleChanged() { state.shuffleEnabled = shuffleButton.state == .on; stateStore.save(state) }
+    @objc private func shuffleChanged() { state.shuffleEnabled = shuffleButton.state == .on; stateStore.save(state); updateControlAvailability() }
+
+    @objc func setRotationInterval(_ sender: NSMenuItem) {
+        guard RotationInterval.allCases.indices.contains(sender.tag) else { return }
+        rotationPopUp.selectItem(at: sender.tag); rotationSelectionChanged()
+    }
+
+    @objc func toggleShuffle(_ sender: Any?) {
+        shuffleButton.state = shuffleButton.state == .on ? .off : .on; shuffleChanged()
+    }
+
+    /// From a sidebar row: rotate through that folder or collection, then show the settings so
+    /// an interval can be chosen if rotation is off.
+    @objc func useForRotation(_ sender: NSMenuItem) {
+        let id = sender.representedObject as? UUID
+        rotationSourcePopUp.selectItem(at: id.flatMap { id in state.collections.firstIndex { $0.id == id } }.map { $0 + 1 } ?? 0)
+        rotationSourceChanged()
+        if state.rotationInterval == .off { showRotationSettings(nil) }
+    }
+
+    @objc func showRotationSettings(_ sender: Any?) {
+        guard window != nil else { return }
+        if rotationPopover.isShown { rotationPopover.performClose(sender); return }
+        updateControlAvailability()
+        let anchor: NSView = rotationButton.window != nil ? rotationButton : (window?.contentView ?? rotationButton)
+        if let content = rotationPopover.contentViewController?.view { rotationPopover.contentSize = content.fittingSize }
+        rotationPopover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+    }
 
     private func configureRotationTimer() {
         rotationTimer?.invalidate(); rotationTimer = nil
@@ -971,6 +1442,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                     if !Task.isCancelled { showStatus("Automatic rotation failed: \(friendlyMessage(for: error))", isError: true) }
                 }
             }
+            updateControlAvailability()
         } else {
             guard !localURLs.isEmpty else { return }
             let index = rotationIndex(current: localURLs.firstIndex { $0.path == state.selectedImagePath }, count: localURLs.count)
@@ -994,6 +1466,31 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         return WallpaperNavigation.index(after: current, direction: 1, count: count) ?? 0
     }
 
+    private var rotationSourceName: String {
+        if let id = state.activeRotationCollectionID, let collection = state.collections.first(where: { $0.id == id }) { return "“\(collection.name)”" }
+        return state.folderPath.map { "“\(URL(fileURLWithPath: $0).lastPathComponent)”" } ?? "your local folder"
+    }
+
+    private var rotationSummary: String {
+        let display = selectedScreen?.localizedName ?? "the selected display"
+        let count: Int
+        if let id = state.activeRotationCollectionID { count = state.collections.first(where: { $0.id == id })?.wallpapers.count ?? 0 }
+        else { count = localURLs.count }
+        if count == 0 {
+            return state.activeRotationCollectionID == nil && state.folderPath == nil
+                ? "Choose a folder or a collection to rotate through."
+                : "\(rotationSourceName.prefix(1).uppercased() + rotationSourceName.dropFirst()) has no wallpapers to rotate through yet."
+        }
+        guard state.rotationInterval != .off else {
+            return "Wallpier can change the wallpaper on \(display) on a schedule while it’s open."
+        }
+        let order = state.shuffleEnabled ? "a random wallpaper" : "the next wallpaper"
+        let every = rotationTitle(state.rotationInterval)
+        return "\(every.prefix(1) + every.dropFirst().lowercased()), Wallpier sets \(order) from \(rotationSourceName) on \(display) using \(scalingTitle(selectedScalingMode)). Rotation runs while Wallpier is open."
+    }
+
+    // MARK: - Undo
+
     @objc func undoWallpaperChange(_ sender: Any?) {
         guard downloadTask == nil, rotationTask == nil else { return }
         guard let entry = state.history.last else { showStatus("There is no Wallpier wallpaper change to undo.", isError: false); NSSound.beep(); return }
@@ -1015,6 +1512,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 _ = state.popHistory(); state.setAssignment(assignment); state.selectedDisplayID = assignment.displayID; state.scalingMode = assignment.scaling
                 let saved = stateStore.save(state)
                 refreshDisplays(); scalingPopUp.selectItem(at: ScalingMode.allCases.firstIndex(of: assignment.scaling) ?? 0)
+                stageView.scaling = assignment.scaling
                 showStatus(String(format: "Restored %@ in %.1f ms.", url.lastPathComponent, result.elapsedTime * 1_000), isError: false)
                 refreshUndoAvailability()
                 if saved { await cleanupRollbackFiles() }
@@ -1063,23 +1561,43 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         return protected
     }
 
+    // MARK: - Displays and scaling
+
     @objc func displaySelectionChanged() {
         guard let screen = selectedScreen else { return }
         state.selectedDisplayID = identifier(for: screen); updateDisplayMinimum(); stateStore.save(state)
         invalidateSearch()
-        displayPopUp.toolTip = description(for: screen)
+        updateStageDisplay(screen)
     }
-    @objc func scalingSelectionChanged() { state.scalingMode = selectedScalingMode; stateStore.save(state) }
+    @objc func scalingSelectionChanged() {
+        state.scalingMode = selectedScalingMode; stateStore.save(state)
+        stageView.scaling = selectedScalingMode
+        updateControlAvailability()
+    }
     @objc private func screenParametersChanged(_ notification: Notification) { refreshDisplays() }
 
     func refreshDisplays() {
         let desired = state.selectedDisplayID; screens = availableScreens()
-        displayPopUp.removeAllItems(); displayPopUp.addItems(withTitles: screens.map(description(for:)))
+        displayPopUp.removeAllItems()
+        let names = screens.map(\.localizedName)
+        for screen in screens {
+            // Repeat the resolution only when two displays share a name.
+            let title = names.filter { $0 == screen.localizedName }.count > 1 ? description(for: screen) : screen.localizedName
+            displayPopUp.addItem(withTitle: title)
+            displayPopUp.lastItem?.image = NSImage(systemSymbolName: "display", accessibilityDescription: nil)
+            displayPopUp.lastItem?.toolTip = description(for: screen)
+        }
         if let desired, let index = screens.firstIndex(where: { identifier(for: $0) == desired }) { displayPopUp.selectItem(at: index) }
         else { displayPopUp.selectItem(at: screens.isEmpty ? -1 : 0) }
         displayPopUp.isEnabled = !screens.isEmpty
-        if let screen = selectedScreen { state.selectedDisplayID = identifier(for: screen); displayPopUp.toolTip = description(for: screen); updateDisplayMinimum() }
+        if let screen = selectedScreen { state.selectedDisplayID = identifier(for: screen); updateDisplayMinimum(); updateStageDisplay(screen) }
         stateStore.save(state); updateControlAvailability()
+    }
+
+    private func updateStageDisplay(_ screen: NSScreen) {
+        displayPopUp.toolTip = description(for: screen)
+        let size = CGSize(width: screen.frame.width * screen.backingScaleFactor, height: screen.frame.height * screen.backingScaleFactor)
+        if size.width > 0, size.height > 0 { stageView.displayPixelSize = size }
     }
 
     private func identifier(for screen: NSScreen) -> String {
@@ -1092,12 +1610,35 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         return "\(screen.localizedName) — \(width)×\(height) px"
     }
 
+    private func scalingTitle(_ mode: ScalingMode) -> String {
+        switch mode {
+        case .fill: return "Fill Screen"
+        case .fit: return "Fit to Screen"
+        case .center: return "Center"
+        }
+    }
+
+    private func rotationTitle(_ interval: RotationInterval) -> String {
+        switch interval {
+        case .off: return "Never"
+        case .fifteenMinutes: return "Every 15 Minutes"
+        case .oneHour: return "Every Hour"
+        case .oneDay: return "Every Day"
+        }
+    }
+
+    // MARK: - Presentation updates
+
     private func updateSourceUI() {
-        discoverControls.isHidden = state.currentSource != .discover
-        localControls.isHidden = state.currentSource != .local
-        favoritesControls.isHidden = state.currentSource != .favorites
-        collectionsControls.isHidden = state.currentSource != .collections
-        sourceSummaryLabel.stringValue = state.favorites.isEmpty ? "No favorites yet. Add wallpapers from Discover." : "\(state.favorites.count) favorite wallpaper\(state.favorites.count == 1 ? "" : "s")"
+        discoverBar.isHidden = state.currentSource != .discover
+        localBar.isHidden = state.currentSource != .local || state.folderPath == nil
+        scopeBar.isHidden = discoverBar.isHidden && localBar.isHidden
+        scopeBarCollapsed.isActive = scopeBar.isHidden
+        if let path = state.folderPath, folderPathLabel.stringValue.isEmpty {
+            folderPathLabel.stringValue = (path as NSString).abbreviatingWithTildeInPath; folderPathLabel.toolTip = path
+        }
+        sidebar.select(currentSidebarItem)
+        updateWindowTitle()
         updateControlAvailability()
     }
 
@@ -1105,44 +1646,95 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         collectionView.reloadData(); restoreSelection(); updateEmptyAndPagination(); updateControlAvailability()
     }
 
-    private func updateEmptyAndPagination(errorText: String? = nil, loadingText: String? = nil) {
-        let items = currentItems
-        if let loadingText { emptyStateLabel.stringValue = loadingText; emptyStateLabel.isHidden = false }
-        else if let errorText, items.isEmpty { emptyStateLabel.stringValue = errorText; emptyStateLabel.isHidden = false }
-        else if items.isEmpty {
-            switch state.currentSource {
-            case .discover: emptyStateLabel.stringValue = "No safe-for-work Wallhaven results matched these filters."
-            case .local: emptyStateLabel.stringValue = state.folderPath == nil ? "Choose a folder to browse local wallpapers." : "No supported images were found."
-            case .favorites: emptyStateLabel.stringValue = "No favorites yet. Add wallpapers from Discover."
-            case .collections: emptyStateLabel.stringValue = state.collections.isEmpty ? "Create a collection to organize Wallhaven wallpapers." : "This collection is empty."
+    private func updateWindowTitle() {
+        guard let window else { return }
+        let count = currentItems.count
+        let wallpapers = count == 1 ? "1 wallpaper" : "\(count.formatted()) wallpapers"
+        switch state.currentSource {
+        case .discover:
+            window.title = "Discover"
+            window.subtitle = totalResults > 0 ? "\(remoteResults.count.formatted()) of \(totalResults.formatted()) wallpapers" : ""
+        case .local:
+            window.title = state.folderPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Folder"
+            window.subtitle = state.folderPath == nil || isLoadingFolder ? "" : wallpapers
+        case .favorites:
+            window.title = "Favorites"; window.subtitle = wallpapers
+        case .collections:
+            window.title = selectedCollection?.name ?? "Collections"; window.subtitle = selectedCollection == nil ? "" : wallpapers
+        }
+    }
+
+    private func updateEmptyAndPagination() {
+        updateWindowTitle()
+        defer { updateContentVisibility() }
+        guard currentItems.isEmpty else { emptyStateView.isHidden = true; return }
+        switch state.currentSource {
+        case .discover:
+            if isSearching {
+                emptyStateView.show(symbolName: nil, title: "Searching Wallhaven…", message: "")
+            } else if let searchErrorText {
+                let offline = searchErrorText.contains("offline") || searchErrorText.contains("reach Wallhaven")
+                emptyStateView.show(symbolName: offline ? "wifi.exclamationmark" : "exclamationmark.triangle",
+                                    title: "Couldn’t Load Wallpapers", message: searchErrorText,
+                                    action: ("Try Again", #selector(search(_:)), self))
+            } else if resultOptions == nil || resultOptions != state.wallhavenSearch {
+                emptyStateView.show(symbolName: "magnifyingglass", title: "Search Wallhaven",
+                                    message: "Press Return in the search field to see safe-for-work wallpapers.")
+            } else {
+                emptyStateView.show(symbolName: "magnifyingglass", title: "No Results",
+                                    message: "No safe-for-work Wallhaven wallpapers matched these filters.")
             }
-            emptyStateLabel.isHidden = false
-        } else { emptyStateLabel.isHidden = true }
-        if state.currentSource == .discover {
-            resultCountLabel.stringValue = totalResults > 0 ? "\(remoteResults.count) of \(totalResults) results" : ""
-            loadMoreButton.isHidden = currentPage >= lastPage || lastPage == 0
-            loadMoreButton.isEnabled = !isSearching && currentPage < lastPage && resultOptions == state.wallhavenSearch
-        } else {
-            resultCountLabel.stringValue = items.count == 1 ? "1 wallpaper" : "\(items.count) wallpapers"
-            loadMoreButton.isHidden = true
+        case .local:
+            if isLoadingFolder {
+                emptyStateView.show(symbolName: nil, title: "Loading Folder…", message: "")
+            } else if state.folderPath == nil {
+                emptyStateView.show(symbolName: "folder", title: "No Folder Chosen",
+                                    message: "Choose a folder of JPEG, PNG or HEIC images to browse them here.",
+                                    action: ("Choose Folder…", #selector(chooseFolder(_:)), self))
+            } else {
+                emptyStateView.show(symbolName: "photo.on.rectangle", title: "No Images",
+                                    message: "This folder has no JPEG, PNG or HEIC images.",
+                                    action: ("Choose Another Folder…", #selector(chooseFolder(_:)), self))
+            }
+        case .favorites:
+            emptyStateView.show(symbolName: "heart", title: "No Favorites Yet",
+                                message: "Click the heart or press ⌘D on any Wallhaven wallpaper to keep it here.")
+        case .collections:
+            if let collection = selectedCollection {
+                emptyStateView.show(symbolName: "rectangle.stack", title: "“\(collection.name)” Is Empty",
+                                    message: "Drag wallpapers onto this collection in the sidebar, or choose Add to Collection.")
+            } else {
+                emptyStateView.show(symbolName: "rectangle.stack", title: "No Collections",
+                                    message: "Collections keep Wallhaven wallpapers together, and can be used for automatic rotation.",
+                                    action: ("New Collection…", #selector(createCollection(_:)), self))
+            }
         }
     }
 
     private func updateControlAvailability() {
-        let hasItems = !currentItems.isEmpty; let hasRemote = selectedReference != nil
-        setWallpaperButton.isEnabled = selectedItem != nil && selectedScreen != nil && downloadTask == nil && rotationTask == nil
-        previousButton.isEnabled = hasItems; nextButton.isEnabled = hasItems
-        undoButton.isEnabled = canUndoWallpaper && downloadTask == nil && rotationTask == nil
-        undoButton.toolTip = canUndoWallpaper ? "Restore the previous wallpaper" : "No restorable wallpaper change"
-        favoriteButton.isHidden = !hasRemote; addToCollectionPopUp.isHidden = !hasRemote
-        addToCollectionPopUp.isEnabled = hasRemote && !state.collections.isEmpty; openSourceButton.isHidden = !hasRemote
-        removeFromCollectionButton.isHidden = state.currentSource != .collections || !hasRemote
-        renameCollectionButton.isEnabled = selectedCollection != nil; deleteCollectionButton.isEnabled = selectedCollection != nil
+        let canMutate = downloadTask == nil && rotationTask == nil
+        let hasSelection = selectedItem != nil
+        setWallpaperButton.isEnabled = hasSelection && selectedScreen != nil && canMutate
+        undoButton.isEnabled = canUndoWallpaper && canMutate
+        undoButton.toolTip = canUndoWallpaper ? "Undo Wallpaper Change" : "No restorable wallpaper change"
+        favoriteButton.isHidden = selectedReference == nil
+        moreButton.isHidden = !hasSelection
+        // An empty gallery shows its own spinner; the bar's is for work behind visible content.
+        let busy = !canMutate || ((isSearching || isLoadingFolder) && !currentItems.isEmpty)
+        if busy { busyIndicator.startAnimation(nil) } else { busyIndicator.stopAnimation(nil) }
+        busyIndicator.isHidden = !busy
+
         let rotationCount: Int
         if let id = state.activeRotationCollectionID { rotationCount = state.collections.first(where: { $0.id == id })?.wallpapers.count ?? 0 }
         else { rotationCount = localURLs.count }
         rotationPopUp.isEnabled = rotationCount > 0 || state.rotationInterval != .off
         shuffleButton.isEnabled = rotationCount > 0 && state.rotationInterval != .off
+        let rotating = state.rotationInterval != .off
+        rotationButton.contentTintColor = rotating ? .controlAccentColor : nil
+        rotationButton.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath",
+                                       accessibilityDescription: rotating ? "Automatic Rotation On" : "Automatic Rotation")
+        rotationButton.toolTip = rotating ? "Automatic rotation: \(rotationTitle(state.rotationInterval).lowercased()) from \(rotationSourceName)" : "Automatic Rotation"
+        rotationSummaryLabel.stringValue = rotationSummary
     }
 
     private func friendlyMessage(for error: Error) -> String {
@@ -1157,8 +1749,22 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         return error.localizedDescription
     }
 
+    /// Informational messages fade after a few seconds; errors and in-progress work stay.
     private func showStatus(_ text: String, isError: Bool) {
-        statusLabel.stringValue = text; statusLabel.textColor = isError ? .systemRed : .secondaryLabelColor; statusLabel.setAccessibilityLabel(text)
+        statusClearTask?.cancel()
+        if !isError, !text.isEmpty {
+            statusClearTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard let self, !Task.isCancelled, statusLabel.stringValue == text, downloadTask == nil, rotationTask == nil else { return }
+                showStatus("", isError: false)
+            }
+        }
+        statusLabel.stringValue = text
+        statusLabel.textColor = isError ? .systemRed : .secondaryLabelColor
+        statusLabel.toolTip = text
+        statusLabel.isHidden = text.isEmpty
+        statusLabel.setAccessibilityLabel(text)
+        if !text.isEmpty { NSAccessibility.post(element: statusLabel, notification: .announcementRequested, userInfo: [.announcement: text]) }
     }
     private func presentError(title: String, message: String) {
         showStatus("\(title): \(message)", isError: true)
@@ -1168,25 +1774,156 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     @objc func showHelp(_ sender: Any?) {
         let alert = NSAlert(); alert.messageText = "Wallpier Help"
-        alert.informativeText = "Discover searches safe-for-work wallpapers through the official Wallhaven API. Selecting a result loads a preview; Set Wallpaper downloads only that full-resolution original. Favorites and collections keep references without downloading originals. Local continues to browse a folder on this Mac."
+        alert.informativeText = """
+        Discover searches safe-for-work wallpapers on Wallhaven. Your folder, Favorites and collections are in the sidebar.
+
+        Select a wallpaper and press Space to preview it on your display’s shape; ← and → browse, Esc returns. \
+        Set Wallpaper (Return) downloads only that original and applies it with the display and scaling shown beside it. \
+        Undo Wallpaper Change, in the toolbar and Wallpaper menu, restores the previous wallpaper; \
+        ⌘Z undoes removing a wallpaper from Favorites or a collection.
+
+        Drag wallpapers onto Favorites or a collection to keep them. The rotation button in the toolbar changes the wallpaper on a schedule while Wallpier is open.
+        """
         alert.addButton(withTitle: "OK")
         if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
     }
 
+    // MARK: - Menus
+
+    /// The selected wallpaper's actions: the ⋯ button, a right-click, and Wallpaper ▸ share it.
+    func itemMenu() -> NSMenu {
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = .command) {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            item.target = self
+        }
+        add("Set Wallpaper", #selector(setWallpaper(_:)))
+        add(isViewerVisible ? "Back to Gallery" : "Preview on Desktop", #selector(toggleViewer(_:)))
+        menu.addItem(.separator())
+        if let ref = selectedReference {
+            add(state.isFavorite(ref) ? "Remove from Favorites" : "Add to Favorites", #selector(toggleFavorite(_:)))
+            let collections = NSMenuItem(title: "Add to Collection", action: nil, keyEquivalent: "")
+            collections.submenu = NSMenu(title: "Add to Collection")
+            populateCollectionMenu(collections.submenu!)
+            menu.addItem(collections)
+            if state.currentSource == .collections, let collection = selectedCollection {
+                add("Remove from “\(collection.name)”", #selector(removeFromCollection(_:)))
+            }
+            menu.addItem(.separator())
+            add("Open on Wallhaven", #selector(openSourcePage(_:)))
+            add("Copy Link", #selector(copy(_:)))
+        } else if selectedItem != nil {
+            add("Show in Finder", #selector(openSourcePage(_:)))
+            add("Copy", #selector(copy(_:)))
+        }
+        return menu
+    }
+
+    func populateCollectionMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let ref = selectedReference
+        for collection in state.collections {
+            let item = menu.addItem(withTitle: collection.name, action: #selector(addToCollection(_:)), keyEquivalent: "")
+            item.representedObject = collection.id
+            item.target = self
+            item.image = NSImage(systemSymbolName: "rectangle.stack", accessibilityDescription: nil)
+            item.state = ref.map { ref in collection.wallpapers.contains { $0.identityKey == ref.identityKey } } == true ? .on : .off
+        }
+        if !state.collections.isEmpty { menu.addItem(.separator()) }
+        let new = menu.addItem(withTitle: "New Collection…", action: #selector(createCollection(_:)), keyEquivalent: "")
+        new.representedObject = "withSelection"
+        new.target = self
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) { populateCollectionMenu(menu) }
+
+    @objc private func showMoreMenu(_ sender: NSButton) {
+        itemMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    private func sidebarMenu(for item: SidebarItem) -> NSMenu? {
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector, _ object: Any? = nil, checked: Bool = false) {
+            let menuItem = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            menuItem.target = self
+            menuItem.representedObject = object
+            menuItem.state = checked ? .on : .off
+        }
+        let rotating = state.rotationInterval != .off
+        switch item {
+        case .discover: return nil
+        case .favorites: return nil
+        case .local:
+            add(state.folderPath == nil ? "Choose Folder…" : "Change Folder…", #selector(chooseFolder(_:)))
+            if state.folderPath != nil {
+                menu.addItem(.separator())
+                add("Use for Automatic Rotation", #selector(useForRotation(_:)), checked: rotating && state.activeRotationCollectionID == nil)
+            }
+        case .collection(let id):
+            add("Use for Automatic Rotation", #selector(useForRotation(_:)), id, checked: rotating && state.activeRotationCollectionID == id)
+            menu.addItem(.separator())
+            add("Rename…", #selector(renameCollection(_:)), id)
+            add("Delete…", #selector(deleteCollection(_:)), id)
+        }
+        return menu
+    }
+
+    /// ⌘⌫ removal applies only while the gallery or preview has focus in the key window, so in the
+    /// search field or a sheet's text field it stays a text command.
+    private var isBrowsingFocused: Bool {
+        guard let window, window.isKeyWindow else { return false }
+        return window.firstResponder === collectionView || window.firstResponder === viewerView
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        let canMutate = downloadTask == nil && rotationTask == nil
         switch menuItem.action {
-        case #selector(toggleInspector(_:)):
-            menuItem.title = isInspectorVisible ? "Hide Inspector" : "Show Inspector"
-            menuItem.state = isInspectorVisible ? .on : .off
-            return true
-        case #selector(setWallpaper(_:)): return selectedItem != nil && selectedScreen != nil && downloadTask == nil && rotationTask == nil
+        case #selector(toggleSidebar(_:)):
+            menuItem.title = isSidebarVisible ? "Hide Sidebar" : "Show Sidebar"
+            return splitViewController != nil
+        case #selector(toggleViewer(_:)):
+            menuItem.title = isViewerVisible ? "Back to Gallery" : "Preview on Desktop"
+            return isViewerVisible || selectedItem != nil
+        case #selector(makeThumbnailsLarger(_:)): return thumbnailSizeIndex < GalleryLayout.thumbnailWidths.count - 1
+        case #selector(makeThumbnailsSmaller(_:)): return thumbnailSizeIndex > 0
+        case #selector(setWallpaper(_:)): return selectedItem != nil && selectedScreen != nil && canMutate
         case #selector(previousWallpaper(_:)), #selector(nextWallpaper(_:)): return !currentItems.isEmpty
-        case #selector(undoWallpaperChange(_:)): return canUndoWallpaper && downloadTask == nil && rotationTask == nil
-        case #selector(toggleFavorite(_:)), #selector(openSourcePage(_:)): return selectedReference != nil
-        case #selector(renameCollection(_:)), #selector(deleteCollection(_:)): return selectedCollection != nil
+        case #selector(undoWallpaperChange(_:)): return canUndoWallpaper && canMutate
+        case #selector(toggleFavorite(_:)):
+            menuItem.title = selectedReference.map(state.isFavorite) == true ? "Remove from Favorites" : "Add to Favorites"
+            return selectedReference != nil
+        case #selector(openSourcePage(_:)):
+            if menuItem.keyEquivalent == "o" { menuItem.title = selectedReference == nil && selectedItem != nil ? "Show in Finder" : "Open on Wallhaven" }
+            return selectedItem != nil
+        case #selector(copy(_:)): return selectedItem != nil
+        case #selector(addToCollection(_:)): return selectedReference != nil
+        case #selector(createCollection(_:)):
+            return menuItem.representedObject as? String != "withSelection" || selectedReference != nil
+        case #selector(removeSelected(_:)):
+            switch state.currentSource {
+            case .favorites: menuItem.title = "Remove from Favorites"
+            case .collections: menuItem.title = selectedCollection.map { "Remove from “\($0.name)”" } ?? "Remove from Collection"
+            default: menuItem.title = "Remove from Collection"
+            }
+            return selectedReference != nil && currentList != nil && isBrowsingFocused
+        case #selector(renameCollection(_:)), #selector(deleteCollection(_:)): return targetCollectionID(menuItem) != nil
+        case #selector(setRotationInterval(_:)):
+            menuItem.state = RotationInterval.allCases.firstIndex(of: state.rotationInterval) == menuItem.tag ? .on : .off
+            return rotationPopUp.isEnabled
+        case #selector(toggleShuffle(_:)):
+            menuItem.state = state.shuffleEnabled ? .on : .off
+            return shuffleButton.isEnabled
+        case #selector(showRotationSettings(_:)): return window != nil
+        case #selector(showDiscover(_:)): menuItem.state = state.currentSource == .discover ? .on : .off; return true
+        case #selector(showLocal(_:)): menuItem.state = state.currentSource == .local ? .on : .off; return true
+        case #selector(showFavorites(_:)): menuItem.state = state.currentSource == .favorites ? .on : .off; return true
+        case #selector(showCollections(_:)): menuItem.state = state.currentSource == .collections ? .on : .off; return true
         default: return true
         }
     }
+
+    // MARK: - Gallery data source and delegate
 
     func numberOfSections(in collectionView: NSCollectionView) -> Int { 1 }
     func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { currentItems.count }
@@ -1195,24 +1932,83 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let reusable = collectionView.makeItem(withIdentifier: WallpaperCollectionViewItem.reuseIdentifier, for: indexPath)
         guard let item = reusable as? WallpaperCollectionViewItem, currentItems.indices.contains(indexPath.item) else { return reusable }
         let represented = currentItems[indexPath.item]
-        let placeholder = NSImage(systemSymbolName: "photo", accessibilityDescription: "Loading thumbnail")
-        item.configure(identifier: represented.identifier, title: represented.title, toolTip: represented.toolTip, placeholder: placeholder)
+        item.configure(identifier: represented.identifier, title: represented.title, toolTip: represented.toolTip)
+        // Decode at the cell's pixel size; switch to Wallhaven's larger thumbnail only when cells need it.
+        let pixels = galleryLayout.fittedItemSize.width * (window?.backingScaleFactor ?? 2)
+        let maximumPixelSize = Int(min(max(pixels, 360), 720))
         switch represented {
         case .local(let url):
-            thumbnailProvider.requestThumbnail(for: url) { [weak item] image in
+            thumbnailProvider.requestThumbnail(for: url, maximumPixelSize: maximumPixelSize) { [weak item] image in
                 guard (item?.representedObject as? String) == represented.identifier else { return }; item?.setThumbnail(image)
             }
         case .remote(let ref):
-            remoteThumbnailProvider.requestThumbnail(for: ref.thumbnailURL) { [weak item] image in
+            remoteThumbnailProvider.requestThumbnail(for: pixels > 340 ? ref.previewURL : ref.thumbnailURL, maximumPixelSize: maximumPixelSize) { [weak item] image in
                 guard (item?.representedObject as? String) == represented.identifier else { return }; item?.setThumbnail(image)
             }
         }
         return item
     }
 
+    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                        sizeForItemAt indexPath: IndexPath) -> NSSize { galleryLayout.fittedItemSize }
+
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
         guard let index = indexPaths.first?.item, currentItems.indices.contains(index) else { return }
         let item = currentItems[index]; rememberSelection(item); updatePreview(for: item)
-        showStatus("Selected \(item.title).", isError: false); updateControlAvailability()
+        updateControlAvailability()
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, canDragItemsAt indexPaths: Set<IndexPath>, with event: NSEvent) -> Bool { true }
+
+    func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
+        guard currentItems.indices.contains(indexPath.item) else { return nil }
+        switch currentItems[indexPath.item] {
+        case .local(let url): return url as NSURL
+        case .remote(let ref):
+            let item = NSPasteboardItem()
+            item.setString(ref.identityKey, forType: .wallpierReference)
+            item.setString(ref.sourcePageURL.absoluteString, forType: .URL)
+            item.setString(ref.sourcePageURL.absoluteString, forType: .string)
+            return item
+        }
+    }
+
+    // MARK: - Toolbar
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.toggleSidebar, .sidebarSeparator, .viewMode, .flexibleSpace, .rotation, .undoWallpaper, .search]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar) + [.space]
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        func viewItem(_ view: NSView, label: String) -> NSToolbarItem {
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = view
+            item.label = label
+            item.paletteLabel = label
+            item.toolTip = view.toolTip
+            return item
+        }
+        switch itemIdentifier {
+        case .sidebarSeparator:
+            guard let splitView = splitViewController?.splitView else { return nil }
+            return NSTrackingSeparatorToolbarItem(identifier: itemIdentifier, splitView: splitView, dividerIndex: 0)
+        case .viewMode: return viewItem(viewModeControl, label: "View")
+        case .rotation: return viewItem(rotationButton, label: "Rotation")
+        case .undoWallpaper: return viewItem(undoButton, label: "Undo")
+        case .search:
+            let item = NSSearchToolbarItem(itemIdentifier: itemIdentifier)
+            item.searchField = searchField
+            item.preferredWidthForSearchField = 220
+            item.label = "Search"
+            searchField.delegate = self
+            searchToolbarItem = item
+            return item
+        default: return nil
+        }
     }
 }
