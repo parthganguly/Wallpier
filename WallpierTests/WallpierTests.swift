@@ -3263,3 +3263,829 @@ extension WallpierTests {
         }
     }
 }
+
+// MARK: - Deterministic rotation proof
+//
+// These tests drive the real production rotation orchestration. The only seam is the DEBUG-only
+// `rotationTimerFactoryForTesting`, which lets the harness capture the exact Timer the production
+// code schedules and invoke `Timer.fire()` to deliver the real callback. Production still wires
+// its own handler; the interval popup action and startup `restoreState()` are used unchanged.
+// All timers are real `Timer` objects, never slept, and invalidated by teardown.
+
+@MainActor
+private final class RotationHarness {
+    let controller: MainWindowController
+    let network = SetAuditNetwork()
+    let desktop = SetAuditWallpaperService()
+    let thumbnails = SetAuditThumbnails()
+    let store: WallpaperStateStore
+    let root: URL
+    let incoming: URL
+    let prior: URL
+    let originals: URL
+    private final class ScreenList { var screens: [NSScreen] = [] }
+    private let displayList: ScreenList
+    let x = SetAuditScreen(101)
+    let y = SetAuditScreen(202)
+    private(set) var scheduledTimers: [Timer] = []
+    private(set) var scheduledIntervals: [TimeInterval] = []
+
+    var rollbackRoot: URL { root.appendingPathComponent("Rollback") }
+
+    init(root: URL, references: [WallpaperReference], interval: RotationInterval,
+         shuffle: Bool, localImages: Int, favorites: [WallpaperReference] = [],
+         extraCollections: [WallpaperCollection] = []) throws {
+        precondition(localImages > 0 || !references.isEmpty)
+        self.root = root
+        incoming = root.appendingPathComponent("incoming.png")
+        prior = root.appendingPathComponent("prior.png")
+        originals = root.appendingPathComponent("Originals")
+        store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = WallpaperState()
+        state.rotationInterval = interval
+        state.shuffleEnabled = shuffle
+        state.selectedDisplayID = "101"
+        state.favorites = favorites
+        if localImages > 0 {
+            let folder = root.appendingPathComponent("Folder")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for index in 0..<localImages {
+                try Data([1]).write(to: folder.appendingPathComponent(String(format: "wall-%02d.jpg", index)))
+            }
+            state.currentSource = .local
+            state.folderPath = folder.path
+            state.selectedImagePath = folder.appendingPathComponent("wall-00.jpg").path
+            // Batch 3: rotation's place is its own cursor. Seed it as the folder scan reports the path.
+            state.rotationCursor = try SupportedWallpaperFiles.images(in: folder.standardizedFileURL).first?.path
+        } else {
+            state.currentSource = .collections
+            state.collections = [WallpaperCollection(name: "Rotation", wallpapers: references)]
+            state.selectedCollectionID = state.collections[0].id
+            state.activeRotationCollectionID = state.collections[0].id
+            state.selectedRemoteIdentity = references.first?.identityKey
+            // Batch 3: rotation's place is its own cursor, seeded where GLM seeded the shared selection.
+            state.rotationCursor = references.first?.identityKey
+            state.collections += extraCollections
+        }
+        XCTAssertTrue(store.save(state))
+        // Capture a separate box so all dependencies exist before constructing the controller.
+        let displayList = ScreenList()
+        displayList.screens = [x, y]
+        controller = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
+            provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            remoteThumbnailProvider: thumbnails, availableScreens: { displayList.screens })
+        self.displayList = displayList
+        desktop.current = prior
+        controller.rotationTimerFactoryForTesting = { [weak self] interval, handler in
+            guard let self else { preconditionFailure("Rotation harness outlived its test") }
+            let timer = Timer(timeInterval: interval, repeats: true) { _ in handler() }
+            self.scheduledTimers.append(timer)
+            self.scheduledIntervals.append(interval)
+            RunLoop.main.add(timer, forMode: .common)
+            return timer
+        }
+        controller.scalingPopUp.addItems(withTitles: ScalingMode.allCases.map(\.displayName))
+        controller.scalingPopUp.selectItem(at: 0)
+        controller.rotationPopUp.addItems(withTitles: RotationInterval.allCases.map(\.displayName))
+        if localImages == 0 {
+            controller.refreshDisplays()
+            controller.showCollections(nil)
+        }
+    }
+
+    func selectRotationInterval(_ interval: RotationInterval) {
+        controller.rotationPopUp.selectItem(at: RotationInterval.allCases.firstIndex(of: interval)!)
+        controller.rotationSelectionChanged()
+    }
+
+    func cached(_ reference: WallpaperReference) -> URL {
+        originals.appendingPathComponent(RemoteWallpaperCache.filename(for: reference))
+    }
+
+    /// A new controller over the same persisted state and isolated dependencies, through the real startup path.
+    func relaunch() -> MainWindowController {
+        let relaunched = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
+            provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
+            historyStore: WallpaperHistoryStore(root: rollbackRoot, originalsRoot: originals),
+            remoteThumbnailProvider: thumbnails, availableScreens: { [displayList] in displayList.screens })
+        relaunched.rotationTimerFactoryForTesting = controller.rotationTimerFactoryForTesting
+        relaunched.scalingPopUp.addItems(withTitles: ScalingMode.allCases.map(\.displayName))
+        relaunched.rotationPopUp.addItems(withTitles: RotationInterval.allCases.map(\.displayName))
+        relaunched.restoreState()
+        return relaunched
+    }
+}
+
+extension WallpierTests {
+    @MainActor
+    private func rotationHarness(references: [WallpaperReference] = [], interval: RotationInterval = .off,
+                                 shuffle: Bool = false, localImages: Int = 0,
+                                 favorites: [WallpaperReference] = [],
+                                 extraCollections: [WallpaperCollection] = []) throws -> RotationHarness {
+        let root = try historyTestFolder()
+        let harness = try RotationHarness(root: root, references: references, interval: interval,
+                                          shuffle: shuffle, localImages: localImages, favorites: favorites,
+                                          extraCollections: extraCollections)
+        try writeTestImage(to: harness.incoming)
+        try writeTestImage(to: harness.prior, width: 3)
+        addTeardownBlock {
+            let tasks = await MainActor.run {
+                harness.scheduledTimers.forEach { $0.invalidate() }
+                let tasks = [harness.controller.downloadTask, harness.controller.rotationTask,
+                             harness.controller.searchTask, harness.controller.detailTask,
+                             harness.controller.undoValidationTask].compactMap { $0 }
+                tasks.forEach { $0.cancel() }
+                harness.network.downloadGate.release(.failure(CancellationError()))
+                harness.network.pendingDataGates.forEach { $0.release(.failure(CancellationError())) }
+                return tasks
+            }
+            for task in tasks { await task.value }
+            try FileManager.default.removeItem(at: root)
+        }
+        return harness
+    }
+
+    private func rotationReferences(_ ids: String...) -> [WallpaperReference] {
+        ids.map { remoteReference(id: $0) }
+    }
+
+    // Bounded ordered wait for the asynchronous local-folder scan; no sleeps.
+    @MainActor
+    private func waitUntil(_ message: String, timeout: TimeInterval = 5,
+                           _ condition: @escaping @MainActor () -> Bool) async {
+        let reached = expectation(description: message)
+        let poller = Task { @MainActor in
+            while !Task.isCancelled, !condition() { await Task.yield() }
+            if !Task.isCancelled { reached.fulfill() }
+        }
+        await fulfillment(of: [reached], timeout: timeout)
+        poller.cancel()
+    }
+
+    // MARK: A — one active timer, replaced by interval changes, removed by Off
+
+    @MainActor
+    func testRotationScheduleIsSingleReplacedAndStoppedByIntervalChanges() throws {
+        let h = try rotationHarness(references: rotationReferences("aaaaaa", "bbbbbb"), interval: .fifteenMinutes)
+        // Startup restores exactly one schedule.
+        h.controller.restoreState()
+        XCTAssertEqual(h.scheduledIntervals, [900])
+        XCTAssertEqual(h.scheduledTimers.count, 1)
+        XCTAssertTrue(h.scheduledTimers[0].isValid)
+        // Changing the interval invalidates the previous schedule; exactly one remains.
+        h.selectRotationInterval(.oneHour)
+        XCTAssertEqual(h.scheduledIntervals, [900, 3_600])
+        XCTAssertFalse(h.scheduledTimers[0].isValid)
+        XCTAssertTrue(h.scheduledTimers[1].isValid)
+        XCTAssertEqual(h.scheduledTimers.filter(\.isValid).count, 1)
+        // Off stops the schedule without creating another one.
+        h.selectRotationInterval(.off)
+        XCTAssertEqual(h.scheduledTimers.count, 2)
+        XCTAssertFalse(h.scheduledTimers[1].isValid)
+        XCTAssertEqual(h.scheduledTimers.filter(\.isValid).count, 0)
+    }
+
+    // MARK: B — one fire = exactly one rotation attempt
+
+    @MainActor
+    func testSingleTimerFireProducesExactlyOneRotationAttempt() async throws {
+        let h = try rotationHarness(references: rotationReferences("aaaaaa", "bbbbbb"))
+        h.selectRotationInterval(.fifteenMinutes)
+        XCTAssertEqual(h.scheduledTimers.count, 1)
+        let next = h.controller.state.collections[0].wallpapers[1]
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        XCTAssertEqual(h.network.downloads, [next.originalURL])
+        XCTAssertEqual(h.desktop.calls.count, 0, "A pending download must not mutate the wallpaper yet")
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        // A later fire of the same repeating timer begins exactly one more attempt.
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        XCTAssertEqual(h.network.downloads.count, 2)
+        XCTAssertEqual(h.desktop.calls.count, 1, "A single fire must not start a second concurrent attempt")
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.count, 2)
+        XCTAssertEqual(h.store.load().history.count, 2)
+    }
+
+    // MARK: C — a tick during an in-flight rotation is excluded until the slot is released
+
+    @MainActor
+    func testRotationTickWhileRotationInFlightIsExcludedAndLaterTickRecovers() async throws {
+        let h = try rotationHarness(references: rotationReferences("aaaaaa", "bbbbbb"))
+        h.selectRotationInterval(.fifteenMinutes)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        XCTAssertEqual(h.network.downloads.count, 1)
+        // Second tick while the previous rotation is still suspended: the existing policy is to
+        // skip it entirely — no second download and no second mutation attempt.
+        h.scheduledTimers[0].fire()
+        XCTAssertEqual(h.network.downloads.count, 1)
+        XCTAssertEqual(h.desktop.calls.count, 0)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        XCTAssertEqual(h.network.downloads.count, 1, "The skipped tick must not have queued a second attempt")
+        XCTAssertEqual(h.store.load().history.count, 1)
+        // Once the slot is released a later tick rotates again.
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        XCTAssertEqual(h.network.downloads.count, 2)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.count, 2)
+        XCTAssertEqual(h.store.load().history.count, 2)
+    }
+
+    // MARK: D — only the selected next original is downloaded, on demand
+
+    @MainActor
+    func testRotationDownloadsOnlyTheSelectedNextOriginalOnDemand() async throws {
+        let refs = rotationReferences("rotate-0", "rotate-1", "rotate-2", "rotate-3")
+        let h = try rotationHarness(references: refs)
+        h.selectRotationInterval(.fifteenMinutes)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        XCTAssertEqual(h.network.downloads, [refs[1].originalURL])
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.network.downloads.count, 1, "No eager downloads of the remaining collection items")
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(refs[1])])
+        // The following tick downloads exactly the next selected original and nothing else.
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        XCTAssertEqual(h.network.downloads, [refs[1].originalURL, refs[2].originalURL])
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.network.downloads.count, 2)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(refs[1]), h.cached(refs[2])])
+    }
+
+    // MARK: E — download failure keeps wallpaper and history intact and recovers
+
+    @MainActor
+    func testRotationDownloadFailureLeavesWallpaperAndHistoryUntouchedAndRecovers() async throws {
+        let h = try rotationHarness(references: rotationReferences("aaaaaa", "bbbbbb"))
+        h.selectRotationInterval(.fifteenMinutes)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        h.network.downloadGate.release(.failure(URLError(.notConnectedToInternet)))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertTrue(h.desktop.calls.isEmpty, "The wallpaper boundary must not be called after a failed download")
+        XCTAssertTrue(h.store.load().history.isEmpty)
+        XCTAssertNil(h.store.load().assignment(for: "101"))
+        XCTAssertTrue(h.controller.statusLabel.stringValue.contains("Automatic rotation failed"))
+        XCTAssertTrue(h.controller.setWallpaperButton.isEnabled, "The pending-operation state must be released")
+        // A later timer fire can attempt and succeed.
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        XCTAssertEqual(h.store.load().history.count, 1)
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.desktop.current?.path)
+    }
+
+    // MARK: F — wallpaper-boundary failure does not commit and cleans prepared rollback
+
+    @MainActor
+    func testRotationWallpaperBoundaryFailureDoesNotCommitAndRecovers() async throws {
+        let h = try rotationHarness(references: rotationReferences("aaaaaa", "bbbbbb"))
+        h.selectRotationInterval(.fifteenMinutes)
+        h.desktop.failure = CocoaError(.fileReadUnknown)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        XCTAssertEqual(h.desktop.current, h.prior, "The current wallpaper must remain intact")
+        XCTAssertTrue(h.store.load().history.isEmpty, "No false success may be recorded")
+        XCTAssertNil(h.store.load().assignment(for: "101"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: h.rollbackRoot.path), [],
+                       "The prepared rollback snapshot is cleaned after the failed attempt")
+        XCTAssertTrue(h.controller.statusLabel.stringValue.contains("Automatic rotation failed"))
+        // Later rotation remains possible.
+        h.desktop.failure = nil
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.count, 2)
+        XCTAssertEqual(h.store.load().history.count, 1)
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.desktop.current?.path)
+    }
+
+    // MARK: G — successful rotation commits through the shared Set path
+
+    @MainActor
+    func testSuccessfulCollectionRotationUsesSharedSetPathAndCommitsCoherently() async throws {
+        let h = try rotationHarness(references: rotationReferences("aaaaaa", "bbbbbb"))
+        h.selectRotationInterval(.fifteenMinutes)
+        h.controller.scalingPopUp.selectItem(at: 1)
+        h.controller.scalingSelectionChanged()
+        let next = h.controller.state.collections[0].wallpapers[1]
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls, [SetAuditWallpaperService.Call(image: h.cached(next), display: "101", scaling: .fit)])
+        let entry = try XCTUnwrap(h.store.load().history.last)
+        XCTAssertEqual(entry.replacement.imagePath, h.cached(next).path)
+        XCTAssertEqual(entry.replacement.displayID, "101")
+        XCTAssertEqual(entry.replacement.scaling, .fit)
+        XCTAssertEqual(entry.previous.imagePath, h.prior.path, "The prior image is captured through the shared path")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(entry.rollbackPath))), try Data(contentsOf: h.prior))
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.cached(next).path)
+        // Batch 3 supersedes GLM's `selectedRemoteIdentity == next`: rotation advances its own
+        // cursor and leaves the browsing selection where the user left it.
+        XCTAssertEqual(h.controller.state.rotationCursor, next.identityKey)
+        XCTAssertEqual(h.controller.state.selectedRemoteIdentity, h.controller.state.collections[0].wallpapers[0].identityKey)
+        XCTAssertTrue(h.controller.statusLabel.stringValue.hasPrefix("Set "))
+        XCTAssertTrue(h.controller.statusLabel.stringValue.contains("on Display 101"))
+        XCTAssertTrue(h.controller.setWallpaperButton.isEnabled)
+    }
+
+    @MainActor
+    func testSuccessfulLocalFolderRotationUsesSharedSetPath() async throws {
+        let h = try rotationHarness(localImages: 3)
+        h.controller.restoreState()
+        await waitUntil("local folder loaded") { h.controller.statusLabel.stringValue == "Loaded 3 local wallpapers." }
+        h.selectRotationInterval(.fifteenMinutes)
+        XCTAssertEqual(h.scheduledTimers.count, 1)
+        let browsed = h.controller.state.selectedImagePath
+        h.scheduledTimers[0].fire()
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        let applied = h.desktop.calls[0]
+        XCTAssertEqual(applied.image.lastPathComponent, "wall-01.jpg", "Rotation advances to the next folder image")
+        // /var and /private/var name the same temporary folder; compare the resolved locations.
+        XCTAssertEqual(applied.image.deletingLastPathComponent().resolvingSymlinksInPath().path,
+                       URL(fileURLWithPath: try XCTUnwrap(h.controller.state.folderPath)).resolvingSymlinksInPath().path)
+        XCTAssertEqual(applied.display, "101")
+        XCTAssertEqual(applied.scaling, .fill)
+        let entry = try XCTUnwrap(h.store.load().history.last)
+        XCTAssertEqual(entry.replacement.imagePath, applied.image.path)
+        XCTAssertEqual(entry.previous.imagePath, h.prior.path)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(entry.rollbackPath))), try Data(contentsOf: h.prior))
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, applied.image.path)
+        // Batch 3 supersedes GLM's `selectedImagePath == applied`: rotation advances its own
+        // cursor and leaves the browsing selection where the user left it.
+        XCTAssertEqual(h.controller.state.rotationCursor, applied.image.path)
+        XCTAssertEqual(h.controller.state.selectedImagePath, browsed)
+        XCTAssertTrue(h.controller.statusLabel.stringValue.hasPrefix("Set "))
+        XCTAssertTrue(h.network.downloads.isEmpty, "Local rotation must not touch the network")
+    }
+
+    // MARK: H — Off stops scheduled and in-flight work; invalidated callbacks cannot fire
+
+    @MainActor
+    func testRotationOffStopsInFlightWorkAndInvalidatedCallbackCannotFire() async throws {
+        let h = try rotationHarness(references: rotationReferences("aaaaaa", "bbbbbb"))
+        h.selectRotationInterval(.fifteenMinutes)
+        XCTAssertEqual(h.scheduledTimers.count, 1)
+        let timer = h.scheduledTimers[0]
+        timer.fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        // Off while the tick's rotation is still suspended.
+        h.selectRotationInterval(.off)
+        XCTAssertFalse(timer.isValid, "Off must invalidate the stored schedule")
+        XCTAssertEqual(h.scheduledTimers.count, 1, "Off must not create a replacement schedule")
+        XCTAssertEqual(h.scheduledTimers.filter(\.isValid).count, 0)
+        // Real Timer semantics: an invalidated timer cannot be invoked, even explicitly.
+        timer.fire()
+        XCTAssertEqual(h.network.downloads.count, 1)
+        XCTAssertEqual(h.desktop.calls.count, 0, "A stale invalidated callback cannot mutate the wallpaper")
+        // The in-flight tick was cancelled; it must not mutate the wallpaper either.
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertTrue(h.desktop.calls.isEmpty)
+        XCTAssertTrue(h.store.load().history.isEmpty)
+        XCTAssertNil(h.store.load().assignment(for: "101"))
+        // Rotation can be re-enabled and a later tick succeeds.
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        h.selectRotationInterval(.fifteenMinutes)
+        XCTAssertEqual(h.scheduledTimers.count, 2)
+        XCTAssertTrue(h.scheduledTimers[1].isValid)
+        h.scheduledTimers[1].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.count, 1)
+        XCTAssertEqual(h.store.load().history.count, 1)
+    }
+
+    // MARK: Shuffle — the chosen item is honored; selections stay valid members
+
+    @MainActor
+    func testShuffleRotationAlternatesDeterministicallyForTwoItems() async throws {
+        let refs = rotationReferences("aaaaaa", "bbbbbb")
+        let h = try rotationHarness(references: refs, shuffle: true)
+        try FileManager.default.createDirectory(at: h.originals, withIntermediateDirectories: true)
+        try writeTestImage(to: h.cached(refs[0]), width: 9)
+        try writeTestImage(to: h.cached(refs[1]), width: 10)
+        h.selectRotationInterval(.fifteenMinutes)
+        var applied: [URL] = []
+        for _ in 0..<4 {
+            h.scheduledTimers[0].fire()
+            try await finishAuditTask(h.controller.rotationTask)
+            applied.append(try XCTUnwrap(h.desktop.calls.last?.image))
+        }
+        // With two members the shuffled result is always the other item: fully deterministic.
+        XCTAssertEqual(applied, [h.cached(refs[1]), h.cached(refs[0]), h.cached(refs[1]), h.cached(refs[0])])
+        XCTAssertTrue(h.network.downloads.isEmpty, "Cached members rotate without downloads")
+        XCTAssertEqual(h.store.load().history.count, 4)
+    }
+
+    @MainActor
+    func testShuffleRotationAlwaysSelectsAValidDifferentMember() async throws {
+        let refs = rotationReferences("shuffle-0", "shuffle-1", "shuffle-2")
+        let h = try rotationHarness(references: refs, shuffle: true)
+        try FileManager.default.createDirectory(at: h.originals, withIntermediateDirectories: true)
+        for (index, ref) in refs.enumerated() { try writeTestImage(to: h.cached(ref), width: 9 + index) }
+        h.selectRotationInterval(.fifteenMinutes)
+        var previous: WallpaperReference?
+        for _ in 0..<6 {
+            h.scheduledTimers[0].fire()
+            try await finishAuditTask(h.controller.rotationTask)
+            let appliedPath = try XCTUnwrap(h.desktop.calls.last?.image).path
+            let member = refs.first { h.cached($0).path == appliedPath }
+            XCTAssertNotNil(member, "The applied wallpaper must be a valid collection member")
+            XCTAssertNotEqual(member?.identityKey, previous?.identityKey, "Shuffle never repeats the current member")
+            previous = member
+        }
+        XCTAssertEqual(h.desktop.calls.count, 6)
+        XCTAssertTrue(h.network.downloads.isEmpty)
+    }
+}
+
+// MARK: - Batch 3: rotation's place is its own (D6); a finished change keeps newer choices (D7)
+//
+// Same harnesses and gates as the rotation proof above. Each timer tick is delivered with
+// Timer.fire(); nothing sleeps, touches the desktop, the network, or real user state.
+
+extension WallpierTests {
+    @MainActor
+    private func visibleSelection(_ controller: MainWindowController) -> [Int] {
+        controller.collectionView.selectionIndexPaths.map(\.item).sorted()
+    }
+
+    /// One tick of the live schedule whose original download completes with `result`.
+    @MainActor
+    private func tick(_ h: RotationHarness, _ result: Result<URL, Error>) async throws {
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        try XCTUnwrap(h.scheduledTimers.last { $0.isValid }).fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        h.network.downloadGate.release(result)
+        try await finishAuditTask(h.controller.rotationTask)
+    }
+
+    /// One tick of the live schedule for members whose originals are already cached.
+    @MainActor
+    private func cachedTick(_ h: RotationHarness, _ controller: MainWindowController? = nil) async throws {
+        try XCTUnwrap(h.scheduledTimers.last { $0.isValid }).fire()
+        try await finishAuditTask((controller ?? h.controller).rotationTask)
+    }
+
+    @MainActor
+    private func cacheOriginals(_ h: RotationHarness, _ refs: [WallpaperReference]) throws {
+        try FileManager.default.createDirectory(at: h.originals, withIntermediateDirectories: true)
+        for (index, ref) in refs.enumerated() { try writeTestImage(to: h.cached(ref), width: 9 + index) }
+    }
+
+    // MARK: D6 — browsing never moves rotation, and rotation never moves browsing
+
+    @MainActor
+    func testRotationSequenceIsIndependentOfBrowsingAndNavigation() async throws {
+        let refs = rotationReferences("seq-a", "seq-b", "seq-c")
+        let favorite = remoteReference(id: "unrelated")
+        let h = try rotationHarness(references: refs, favorites: [favorite])
+        h.selectRotationInterval(.fifteenMinutes)
+        XCTAssertEqual(visibleSelection(h.controller), [0])
+        // Navigate the rotating collection while its rotation is still downloading.
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        h.controller.previousWallpaper(nil)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(refs[1])])
+        XCTAssertEqual(visibleSelection(h.controller), [2], "Rotation must not move the visible selection")
+        XCTAssertEqual(h.controller.state.selectedRemoteIdentity, refs[2].identityKey, "…nor the remembered one")
+        // Browse an unrelated favorite: the next tick continues after the last rotated member.
+        h.controller.showFavorites(nil)
+        XCTAssertEqual(h.controller.state.selectedRemoteIdentity, favorite.identityKey)
+        try await tick(h, .success(h.incoming))
+        XCTAssertEqual(h.network.downloads, [refs[1].originalURL, refs[2].originalURL])
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(refs[1]), h.cached(refs[2])])
+        XCTAssertEqual(h.controller.state.selectedRemoteIdentity, favorite.identityKey)
+        XCTAssertEqual(visibleSelection(h.controller), [0])
+        try await tick(h, .success(h.incoming))
+        XCTAssertEqual(h.desktop.calls.last?.image, h.cached(refs[0]), "The sequence wraps around")
+        XCTAssertEqual(h.store.load().history.count, 3)
+    }
+
+    @MainActor
+    func testShuffleNeverRepeatsTheLastRotatedMemberWhileBrowsingElsewhere() async throws {
+        let refs = rotationReferences("shuf-a", "shuf-b")
+        let h = try rotationHarness(references: refs, shuffle: true, favorites: [remoteReference(id: "elsewhere")])
+        try cacheOriginals(h, refs)
+        h.selectRotationInterval(.fifteenMinutes)
+        h.controller.showFavorites(nil)
+        var applied: [URL] = []
+        for _ in 0..<6 {
+            try await cachedTick(h)
+            applied.append(try XCTUnwrap(h.desktop.calls.last?.image))
+            h.controller.showCollections(nil)
+            h.controller.showFavorites(nil)
+        }
+        // With two members, never repeating the last rotated one fully determines the order.
+        XCTAssertEqual(applied, [1, 0, 1, 0, 1, 0].map { h.cached(refs[$0]) })
+    }
+
+    @MainActor
+    func testLocalRotationSequenceIsIndependentOfLocalBrowsing() async throws {
+        let h = try rotationHarness(localImages: 4)
+        h.controller.restoreState()
+        await waitUntil("local folder loaded") { h.controller.statusLabel.stringValue == "Loaded 4 local wallpapers." }
+        h.selectRotationInterval(.fifteenMinutes)
+        try await cachedTick(h)
+        XCTAssertEqual(visibleSelection(h.controller), [0])
+        h.controller.previousWallpaper(nil)
+        let browsed = h.controller.state.selectedImagePath
+        XCTAssertEqual(browsed.map { URL(fileURLWithPath: $0).lastPathComponent }, "wall-03.jpg")
+        try await cachedTick(h)
+        XCTAssertEqual(h.desktop.calls.map(\.image.lastPathComponent), ["wall-01.jpg", "wall-02.jpg"])
+        XCTAssertEqual(visibleSelection(h.controller), [3])
+        XCTAssertEqual(h.controller.state.selectedImagePath, browsed)
+    }
+
+    @MainActor
+    func testRotationSourceChangeStartsTheNewSourceFromItsFirstMember() async throws {
+        let refs = rotationReferences("src-a", "src-b", "src-c")
+        let other = WallpaperCollection(name: "Other", wallpapers: rotationReferences("src-p", "src-q"))
+        let h = try rotationHarness(references: refs, extraCollections: [other])
+        try cacheOriginals(h, refs + other.wallpapers)
+        h.controller.restoreState() // Startup fills the rotation source menu that useForRotation selects in.
+        h.selectRotationInterval(.fifteenMinutes)
+        let first = h.controller.state.collections[0].id
+        func use(_ id: UUID) {
+            let item = NSMenuItem(); item.representedObject = id
+            h.controller.useForRotation(item)
+        }
+        try await cachedTick(h)
+        use(other.id)
+        try await cachedTick(h)
+        try await cachedTick(h)
+        use(first)
+        try await cachedTick(h)
+        use(first) // Choosing the active source again keeps its place.
+        try await cachedTick(h)
+        XCTAssertEqual(h.desktop.calls.map(\.image),
+                       [refs[1], other.wallpapers[0], other.wallpapers[1], refs[0], refs[1]].map(h.cached))
+        XCTAssertTrue(h.network.downloads.isEmpty)
+    }
+
+    @MainActor
+    func testRemovingTheLastRotatedMemberContinuesWithTheMemberAfterIt() async throws {
+        let refs = rotationReferences("rm-a", "rm-b", "rm-c", "rm-d")
+        let h = try rotationHarness(references: refs)
+        try cacheOriginals(h, refs)
+        h.selectRotationInterval(.fifteenMinutes)
+        try await cachedTick(h)
+        // Remove the last rotated member, b, from the rotating collection being viewed.
+        h.controller.nextWallpaper(nil)
+        h.controller.removeSelected(nil)
+        XCTAssertEqual(h.controller.state.collections[0].wallpapers.map(\.identityKey), [refs[0], refs[2], refs[3]].map(\.identityKey))
+        try await cachedTick(h)
+        // Removing a member that was not last rotated leaves the sequence alone.
+        XCTAssertEqual(visibleSelection(h.controller), [1])
+        h.controller.nextWallpaper(nil)
+        h.controller.removeSelected(nil)
+        XCTAssertEqual(h.controller.state.collections[0].wallpapers.map(\.identityKey), [refs[0], refs[2]].map(\.identityKey))
+        try await cachedTick(h)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[1], refs[2], refs[0]].map(h.cached))
+    }
+
+    @MainActor
+    func testFailedRotationAttemptsAdvancePastTheFailingMember() async throws {
+        let refs = rotationReferences("fail-a", "fail-b", "fail-c")
+        let h = try rotationHarness(references: refs)
+        h.selectRotationInterval(.fifteenMinutes)
+        try await tick(h, .failure(URLError(.notConnectedToInternet)))
+        XCTAssertTrue(h.desktop.calls.isEmpty)
+        try await tick(h, .success(h.incoming))
+        XCTAssertEqual(h.network.downloads, [refs[1].originalURL, refs[2].originalURL],
+                       "A failed member is not retried on the next tick")
+        h.desktop.failure = CocoaError(.fileReadUnknown)
+        try await tick(h, .success(h.incoming))
+        h.desktop.failure = nil
+        try await tick(h, .success(h.incoming))
+        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[2], refs[0], refs[1]].map(h.cached))
+        XCTAssertEqual(h.store.load().history.map(\.replacement.imagePath), [refs[2], refs[1]].map { h.cached($0).path })
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.cached(refs[1]).path)
+    }
+
+    @MainActor
+    func testRotationSequenceContinuesAfterRelaunch() async throws {
+        let refs = rotationReferences("relaunch-a", "relaunch-b", "relaunch-c")
+        let h = try rotationHarness(references: refs, favorites: [remoteReference(id: "relaunch-f")])
+        try cacheOriginals(h, refs)
+        h.selectRotationInterval(.fifteenMinutes)
+        try await cachedTick(h)
+        h.controller.showFavorites(nil)
+        h.scheduledTimers[0].invalidate()
+        let relaunched = h.relaunch()
+        XCTAssertEqual(h.scheduledTimers.filter(\.isValid).count, 1, "Startup restores exactly one schedule")
+        XCTAssertEqual(relaunched.state.currentSource, .favorites)
+        try await cachedTick(h, relaunched)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[1], refs[2]].map(h.cached))
+        XCTAssertEqual(relaunched.state.selectedRemoteIdentity, h.controller.state.favorites[0].identityKey)
+    }
+
+    // MARK: Batch 3 repair — a local rotation place belongs to the folder it was made in
+
+    @MainActor
+    private func makeFolder(_ h: RotationHarness, _ name: String, images: Int) throws -> URL {
+        let folder = h.root.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for index in 0..<images { try Data([1]).write(to: folder.appendingPathComponent(String(format: "\(name)-%02d.jpg", index))) }
+        return folder
+    }
+
+    /// Opens `folder` through the folder picker's completion path and waits for its load to finish.
+    @MainActor
+    private func open(_ controller: MainWindowController, _ folder: URL, status: String) async {
+        controller.statusLabel.stringValue = ""
+        controller.openFolder(folder)
+        await waitUntil("folder load finished: \(status)") { controller.statusLabel.stringValue.hasPrefix(status) }
+    }
+
+    @MainActor
+    func testReturningToAnEarlierLocalFolderStartsItFromItsFirstImage() async throws {
+        let h = try rotationHarness(localImages: 4)
+        let a = URL(fileURLWithPath: try XCTUnwrap(h.store.load().folderPath))
+        let b = try makeFolder(h, "Other", images: 2)
+        h.controller.restoreState()
+        await waitUntil("local folder loaded") { h.controller.statusLabel.stringValue == "Loaded 4 local wallpapers." }
+        h.selectRotationInterval(.fifteenMinutes)
+        try await cachedTick(h)
+        // A → B → A with no tick in between: A's old place must not come back.
+        await open(h.controller, b, status: "Loaded 2 ")
+        XCTAssertNil(h.store.load().rotationCursor, "A different folder starts from its first image")
+        await open(h.controller, a, status: "Loaded 4 ")
+        XCTAssertNil(h.controller.state.rotationCursor)
+        try await cachedTick(h)
+        XCTAssertEqual(h.desktop.calls.map(\.image.lastPathComponent), ["wall-01.jpg", "wall-00.jpg"])
+        // Folder and place are saved together, and a fresh controller continues from them.
+        let saved = h.store.load()
+        XCTAssertEqual(saved.folderPath, h.controller.state.folderPath)
+        XCTAssertEqual(saved.rotationCursor, h.desktop.calls.last?.image.path)
+        h.scheduledTimers.forEach { $0.invalidate() }
+        let relaunched = h.relaunch()
+        await waitUntil("relaunched folder loaded") { relaunched.statusLabel.stringValue == "Loaded 4 local wallpapers." }
+        try await cachedTick(h, relaunched)
+        XCTAssertEqual(h.desktop.calls.map(\.image.lastPathComponent), ["wall-01.jpg", "wall-00.jpg", "wall-01.jpg"])
+    }
+
+    @MainActor
+    func testReselectingTheSameFolderOrAFailedFolderLoadKeepsTheLocalRotationPlace() async throws {
+        let h = try rotationHarness(localImages: 4)
+        let a = URL(fileURLWithPath: try XCTUnwrap(h.store.load().folderPath))
+        h.controller.restoreState()
+        await waitUntil("local folder loaded") { h.controller.statusLabel.stringValue == "Loaded 4 local wallpapers." }
+        h.selectRotationInterval(.fifteenMinutes)
+        try await cachedTick(h)
+        // Reselect the same folder through a path that standardizes to it, with rotation off and back on around it.
+        h.selectRotationInterval(.off)
+        await open(h.controller, a.appendingPathComponent("..").appendingPathComponent(a.lastPathComponent), status: "Loaded 4 ")
+        XCTAssertEqual(h.controller.state.folderPath, a.path)
+        h.selectRotationInterval(.fifteenMinutes)
+        try await cachedTick(h)
+        let place = try XCTUnwrap(h.desktop.calls.last).image.path
+        // A folder that can't be read leaves the configured folder and its place alone, in memory and on disk.
+        await open(h.controller, h.root.appendingPathComponent("Missing"), status: "Could Not Open Folder")
+        for state in [h.controller.state, h.store.load()] {
+            XCTAssertEqual(state.folderPath, a.path)
+            XCTAssertEqual(state.rotationCursor, place)
+        }
+        h.scheduledTimers.forEach { $0.invalidate() }
+        let relaunched = h.relaunch()
+        await waitUntil("relaunched folder loaded") { relaunched.statusLabel.stringValue == "Loaded 4 local wallpapers." }
+        try await cachedTick(h, relaunched)
+        XCTAssertEqual(h.desktop.calls.map(\.image.lastPathComponent), ["wall-01.jpg", "wall-02.jpg", "wall-03.jpg"])
+    }
+
+    @MainActor
+    func testChangingTheBrowsingFolderLeavesTheCollectionRotationPlaceAlone() async throws {
+        let refs = rotationReferences("own-a", "own-b", "own-c")
+        let h = try rotationHarness(references: refs)
+        try cacheOriginals(h, refs)
+        let folder = try makeFolder(h, "Browse", images: 2)
+        h.controller.restoreState()
+        h.selectRotationInterval(.fifteenMinutes)
+        try await cachedTick(h)
+        await open(h.controller, folder, status: "Loaded 2 ")
+        XCTAssertEqual(h.store.load().rotationCursor, refs[1].identityKey, "The collection still owns the rotation place")
+        try await cachedTick(h)
+        h.scheduledTimers.forEach { $0.invalidate() }
+        let relaunched = h.relaunch()
+        await waitUntil("relaunched folder loaded") { relaunched.statusLabel.stringValue == "Loaded 2 local wallpapers." }
+        try await cachedTick(h, relaunched)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[1], refs[2], refs[0]].map(h.cached))
+        XCTAssertTrue(h.network.downloads.isEmpty)
+    }
+
+    // MARK: D7 — a finished change records what it captured and keeps the newer choices
+
+    @MainActor
+    func testInFlightSetKeepsNewerDisplayAndScalingPreferences() async throws {
+        let h = try setAuditHarness()
+        let a = h.controller.state.favorites[0]
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.controller.displayPopUp.selectItem(at: 1)
+        h.controller.displaySelectionChanged()
+        h.controller.scalingPopUp.selectItem(at: 1)
+        h.controller.scalingSelectionChanged()
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        // The change applied, assigned and recorded what it captured…
+        XCTAssertEqual(h.desktop.calls, [.init(image: h.cached(a), display: "101", scaling: .fill)])
+        let saved = h.store.load()
+        XCTAssertEqual(saved.assignment(for: "101")?.scaling, .fill)
+        XCTAssertNil(saved.assignment(for: "202"))
+        XCTAssertEqual(saved.history.last?.replacement.displayID, "101")
+        XCTAssertEqual(saved.history.last?.replacement.scaling, .fill)
+        // …while the newer choices stay selected: in memory, on disk and in the controls.
+        for state in [h.controller.state, saved] {
+            XCTAssertEqual(state.selectedDisplayID, "202")
+            XCTAssertEqual(state.scalingMode, .fit)
+        }
+        XCTAssertEqual(h.controller.displayPopUp.indexOfSelectedItem, 1)
+        XCTAssertEqual(h.controller.scalingPopUp.indexOfSelectedItem, 1)
+        // The next Set uses them.
+        h.controller.setWallpaper(nil)
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(h.desktop.calls.last, .init(image: h.cached(a), display: "202", scaling: .fit))
+        // A relaunch restores them.
+        let screens: [NSScreen] = [h.x, h.y]
+        let originals = h.root.appendingPathComponent("Originals")
+        let relaunched = MainWindowController(window: nil, wallpaperService: h.desktop, stateStore: h.store,
+            provider: WallhavenProvider(client: h.network), originalCache: RemoteWallpaperCache(rootURL: originals),
+            historyStore: WallpaperHistoryStore(root: h.root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            remoteThumbnailProvider: h.thumbnails, availableScreens: { screens })
+        // The harness state rotates hourly; an unscheduled Timer keeps that schedule inert.
+        relaunched.rotationTimerFactoryForTesting = { interval, _ in Timer(timeInterval: interval, repeats: true) { _ in } }
+        relaunched.scalingPopUp.addItems(withTitles: ScalingMode.allCases.map(\.displayName))
+        relaunched.rotationPopUp.addItems(withTitles: RotationInterval.allCases.map(\.displayName))
+        relaunched.restoreState()
+        XCTAssertEqual(relaunched.displayPopUp.indexOfSelectedItem, 1)
+        XCTAssertEqual(relaunched.scalingPopUp.indexOfSelectedItem, 1)
+        XCTAssertEqual(relaunched.stageView.scaling, .fit)
+    }
+
+    @MainActor
+    func testInFlightRotationKeepsNewerDisplayAndScalingPreferences() async throws {
+        let refs = rotationReferences("pref-a", "pref-b", "pref-c")
+        let h = try rotationHarness(references: refs)
+        h.selectRotationInterval(.fifteenMinutes)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        h.controller.displayPopUp.selectItem(at: 1)
+        h.controller.displaySelectionChanged()
+        h.controller.scalingPopUp.selectItem(at: 1)
+        h.controller.scalingSelectionChanged()
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls, [.init(image: h.cached(refs[1]), display: "101", scaling: .fill)])
+        XCTAssertEqual(h.store.load().history.last?.replacement.displayID, "101")
+        XCTAssertEqual(h.store.load().history.last?.replacement.scaling, .fill)
+        for state in [h.controller.state, h.store.load()] {
+            XCTAssertEqual(state.selectedDisplayID, "202")
+            XCTAssertEqual(state.scalingMode, .fit)
+        }
+        XCTAssertEqual(h.controller.displayPopUp.indexOfSelectedItem, 1)
+        XCTAssertEqual(h.controller.scalingPopUp.indexOfSelectedItem, 1)
+        // The next tick targets the newer choices.
+        try await tick(h, .success(h.incoming))
+        XCTAssertEqual(h.desktop.calls.last, .init(image: h.cached(refs[2]), display: "202", scaling: .fit))
+        let relaunched = h.relaunch()
+        XCTAssertEqual(relaunched.displayPopUp.indexOfSelectedItem, 1)
+        XCTAssertEqual(relaunched.scalingPopUp.indexOfSelectedItem, 1)
+    }
+}

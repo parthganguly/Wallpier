@@ -206,6 +206,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     var sidebarForTesting: SidebarController { sidebar }
     var galleryScrollForTesting: NSScrollView { galleryScroll }
     var galleryLayoutForTesting: GalleryLayout { galleryLayout }
+
+    // Test-only rotation seam: when set, this creates the repeating rotation Timer instead of the
+    // native target/selector Timer below. Development and release leave it nil, so the production
+    // scheduling path, retention, tolerance and run-loop behavior are unchanged.
+    var rotationTimerFactoryForTesting: ((TimeInterval, @escaping () -> Void) -> Timer)?
 #endif
 
     convenience init() {
@@ -822,9 +827,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         if let path = state.folderPath { panel.directoryURL = URL(fileURLWithPath: path) }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let folderURL = panel.url, let self else { return }
-            selectSource(.local); loadFolder(folderURL, persistSelection: true)
+            openFolder(folderURL)
         }
     }
+
+    func openFolder(_ folderURL: URL) { selectSource(.local); loadFolder(folderURL, persistSelection: true) }
 
     private func loadFolder(_ folderURL: URL, persistSelection: Bool) {
         let standardizedURL = folderURL.standardizedFileURL
@@ -944,7 +951,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             if let entry { state.appendHistory(entry) }
             // With no known prior assignment, older entries cannot undo this new change.
             else if prior == nil { state.history.removeAll() }
-            state.setAssignment(replacement); state.selectedDisplayID = displayID; state.scalingMode = scaling
+            // The assignment and history record what this change captured; the display and scaling
+            // choices stay whatever the user has selected since, so state keeps agreeing with the controls.
+            state.setAssignment(replacement)
             let saved = stateStore.save(state)
             let undoNote = prior == nil || entry?.undoUnavailableReason != nil ? " Undo unavailable for this change." : ""
             showStatus(String(format: "Set %@ on %@ in %.1f ms.", imageURL.lastPathComponent, screen.localizedName, result.elapsedTime * 1_000) + undoNote, isError: false)
@@ -1278,6 +1287,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             members = collection.wallpapers; name = "“\(collection.name)”"
         }
         guard members.contains(where: { $0.identityKey == ref.identityKey }) != member else { return }
+        // Removing the member rotation last used keeps rotation's place: it continues with the one that followed.
+        if !member, case .collection(let id) = list, id == state.activeRotationCollectionID, state.rotationCursor == ref.identityKey,
+           let position = members.firstIndex(where: { $0.identityKey == ref.identityKey }) {
+            state.rotationCursor = position > 0 ? members[position - 1].identityKey : nil
+        }
         if member { members.insert(ref, at: min(index, members.count)) } else { members.removeAll { $0.identityKey == ref.identityKey } }
         switch list {
         case .favorites: state.favorites = members
@@ -1483,6 +1497,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func configureRotationTimer() {
         rotationTimer?.invalidate(); rotationTimer = nil
         guard let seconds = state.rotationInterval.seconds else { return }
+        #if DEBUG
+        if let rotationTimerFactoryForTesting {
+            rotationTimer = rotationTimerFactoryForTesting(seconds) { [weak self] in self?.rotateWallpaper() }
+            rotationTimer?.tolerance = min(seconds * 0.05, 60)
+            return
+        }
+        #endif
         let timer = Timer(
             timeInterval: seconds,
             target: self,
@@ -1500,8 +1521,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         if let id = state.activeRotationCollectionID {
             guard let collection = state.collections.first(where: { $0.id == id }), !collection.wallpapers.isEmpty else { return }
             let refs = collection.wallpapers
-            let index = rotationIndex(current: refs.firstIndex { $0.identityKey == state.selectedRemoteIdentity }, count: refs.count)
-            let ref = refs[index]; state.selectedRemoteIdentity = ref.identityKey; stateStore.save(state)
+            // Rotation follows its own cursor, never the browsing selection. An attempt moves the
+            // cursor even if it fails, so one unavailable wallpaper isn't retried on every tick.
+            let index = rotationIndex(current: refs.firstIndex { $0.identityKey == state.rotationCursor }, count: refs.count)
+            let ref = refs[index]; state.rotationCursor = ref.identityKey; stateStore.save(state)
             setWallpaperButton.isEnabled = false
             let scaling = selectedScalingMode
             rotationTask = Task { [weak self] in
@@ -1519,8 +1542,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             updateControlAvailability()
         } else {
             guard !localURLs.isEmpty else { return }
-            let index = rotationIndex(current: localURLs.firstIndex { $0.path == state.selectedImagePath }, count: localURLs.count)
-            state.selectedImagePath = localURLs[index].path; stateStore.save(state)
+            let index = rotationIndex(current: localURLs.firstIndex { $0.path == state.rotationCursor }, count: localURLs.count)
+            state.rotationCursor = localURLs[index].path; stateStore.save(state)
             let url = localURLs[index]; let scaling = selectedScalingMode
             rotationTask = Task { [weak self] in
                 guard let self else { return }

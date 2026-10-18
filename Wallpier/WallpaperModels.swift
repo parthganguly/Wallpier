@@ -273,7 +273,9 @@ struct WallpaperState: Codable, Equatable {
     static let historyLimit = 20
 
     var version = Self.currentVersion
-    var folderPath: String?
+    /// A local rotation place belongs to this folder: another folder, or this one revisited later,
+    /// starts from its first image. A collection's place is unaffected by the browsing folder.
+    var folderPath: String? { didSet { if folderPath != oldValue, activeRotationCollectionID == nil { rotationCursor = nil } } }
     var selectedImagePath: String?
     var selectedDisplayID: String?
     var scalingMode: ScalingMode = .fill
@@ -288,7 +290,11 @@ struct WallpaperState: Codable, Equatable {
     var favorites: [WallpaperReference] = []
     var collections: [WallpaperCollection] = []
     var selectedCollectionID: UUID?
-    var activeRotationCollectionID: UUID?
+    /// Rotating from a different source starts that source from the beginning.
+    var activeRotationCollectionID: UUID? { didSet { if activeRotationCollectionID != oldValue { rotationCursor = nil } } }
+    /// Rotation's own place, independent of browsing: the member it last attempted, as a
+    /// collection member's identity or a local file path. Unknown or nil starts from the first member.
+    var rotationCursor: String?
 
     init() {}
 
@@ -351,7 +357,7 @@ struct WallpaperState: Codable, Equatable {
         case version, folderPath, selectedImagePath, selectedDisplayID
         case scalingMode, rotationInterval, shuffleEnabled, displayAssignments, history
         case currentSource, selectedRemoteIdentity, wallhavenSearch, favorites, collections
-        case selectedCollectionID, activeRotationCollectionID
+        case selectedCollectionID, activeRotationCollectionID, rotationCursor
     }
 
     init(from decoder: Decoder) throws {
@@ -376,6 +382,7 @@ struct WallpaperState: Codable, Equatable {
         collections = try container.decodeIfPresent([WallpaperCollection].self, forKey: .collections) ?? []
         selectedCollectionID = try container.decodeIfPresent(UUID.self, forKey: .selectedCollectionID)
         activeRotationCollectionID = try container.decodeIfPresent(UUID.self, forKey: .activeRotationCollectionID)
+        rotationCursor = try container.decodeIfPresent(String.self, forKey: .rotationCursor)
     }
 }
 
