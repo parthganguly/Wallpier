@@ -6,7 +6,7 @@ Wallpier is a place to look at wallpapers, so the window belongs to the images.
 A source-list sidebar replaces the segmented source picker and per-source control rows;
 the gallery fills the window edge to edge with display-shaped thumbnails; Space (or a
 double-click) swaps the gallery for a single-wallpaper *desktop preview* that renders the
-image the way the selected display and scaling will actually show it. Applying never
+estimate of how the selected display and scaling will show it. Applying never
 moves: one quiet bar along the bottom always holds Display, Scaling and the single
 accent-colored **Set Wallpaper** button, whatever you are looking at.
 
@@ -58,7 +58,24 @@ Captures: `TEST_RUNNER_WALLPIER_CAPTURE_DIR=<dir> xcodebuild test ... -only-test
   handling (Set Wallpaper, still gated by its enabled state). The search field and preview
   were already correct. Test: `testReturnSetsFromGalleryAndPreviewButSearchesFromSearchField`
   (window `sendEvent` dispatch; fails without the fix).
-- Uncached Wallhaven previews draw the 3:2 cropped `thumbs.large`; the preview caption now
+- (Superseded by Batch 2 below: `thumbs.large` is a 432×243 16:9 crop, not 3:2.) Uncached Wallhaven previews draw the cropped `thumbs.large`; the preview caption now
   says "Approximate preview from a cropped thumbnail…" only in that case. Local files and
   downloaded originals don't show it; nothing is downloaded early. Test:
   `testOnlyCroppedRemotePreviewsAreMarkedApproximateAndNothingIsDownloaded`.
+
+## Batch 2: truthful preview and Discover (2026-10-16)
+
+- Preview source, best first: a validated cached original (ImageIO-downsampled to 1800 px);
+  `thumbs.large` for 16:9 originals (it is a 432×243 centre crop, whole only for 16:9); Wallhaven's
+  aspect-preserving `thumbs.original` for every other shape; else `thumbs.large`, labelled
+  “Cropped thumbnail; framing is approximate…”. Thumbnails are labelled “Low-resolution preview;
+  detail may differ.” Older saved references lack `thumbs.original`; the selected one gains it from
+  its details. A newer, better image is never replaced by an older or worse one; a Set that caches
+  the original refreshes the preview only if that wallpaper is still selected. No original is
+  downloaded for previewing. The stage is an estimate, not macOS's own rendering.
+- Network: the API and original downloads keep separate backoffs, so a metadata 429 (or an
+  exhausted quota) no longer stops Set from downloading an original, while an original 429 is
+  still honoured. Details load only for the visible preview, after a 300 ms dwell, once per wallpaper.
+- Discover: the subtitle names the request the results came from (“forest” or Top This Month,
+  on Wallhaven); edited text or a changed display-derived size shows “Showing …” and Update Results
+  (Return does the same); further pages repeat the results' own request. Filters still apply at once.

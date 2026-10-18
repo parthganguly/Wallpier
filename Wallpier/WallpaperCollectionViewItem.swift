@@ -27,6 +27,7 @@ final class WallpaperCollectionViewItem: NSCollectionViewItem {
         setThumbnail(nil, failed: false)
         view.toolTip = toolTip
         view.setAccessibilityLabel(title)
+        view.setAccessibilityHelp(toolTip)
         cell.isSelected = isSelected
     }
 

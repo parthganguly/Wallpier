@@ -46,10 +46,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             case .remote(let ref): return ref.wallpaperID
             }
         }
+        /// Also the gallery cell's accessibility help, so VoiceOver hears more than an opaque ID.
         var toolTip: String {
             switch self {
             case .local(let url): return url.path
-            case .remote(let ref): return "Wallhaven \(ref.wallpaperID) — \(ref.resolution)"
+            case .remote(let ref): return "Wallhaven \(ref.wallpaperID) — \(ref.width) × \(ref.height), \(ref.orientation)"
             }
         }
     }
@@ -85,7 +86,14 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private var resultOptions: WallhavenSearchOptions?
     private var searchErrorText: String?
     private var lastAppendFailure: Date?
-    private(set) var isViewerVisible = false
+    /// Closing the preview, by any path, cancels its pending detail request so reopening can ask again.
+    private(set) var isViewerVisible = false { didSet { if oldValue && !isViewerVisible { cancelDetails() } } }
+    /// How faithful the stage's image is. Completions may only replace it with an equal or better one.
+    private var stageFidelity = PreviewFidelity.none
+    /// The wallpaper whose preview details were requested; reselecting it doesn't request them again.
+    private var detailIdentity: String?
+    /// Details wait for the selection to settle, so arrowing through the preview doesn't fetch every item.
+    static let detailDwellNanoseconds: UInt64 = 300_000_000
 
     // Window structure
     private var splitViewController: NSSplitViewController?
@@ -95,7 +103,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     // Search and filters
     let searchField: NSSearchField = SearchField()
     private var searchToolbarItem: NSSearchToolbarItem?
-    private let categoryPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    let categoryPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let resolutionPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let aspectPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let sortingPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -105,6 +113,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private let discoverBar = NSStackView()
     private let localBar = NSStackView()
     private let folderPathLabel = NSTextField(labelWithString: "")
+    /// Shown when the visible results no longer match the search text, filters or display size.
+    let pendingSearchLabel = NSTextField(labelWithString: "")
+    let updateResultsButton = NSButton(title: "Update Results", target: nil, action: nil)
 
     // Gallery and preview
     private let galleryLayout = GalleryLayout()
@@ -115,8 +126,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     let previewTitleLabel = NSTextField(labelWithString: "No Wallpaper Selected")
     let previewMetadataLabel = NSTextField(labelWithString: "")
     private let previewTagsLabel = NSTextField(labelWithString: "")
-    /// Shown while the stage draws Wallhaven's 3:2 cropped thumbnail instead of the original's pixels.
+    /// Says what the stage is drawn from when it isn't the original: a low-resolution or a cropped thumbnail.
     let approximatePreviewNotice = NSStackView()
+    private let previewNoticeIcon = NSImageView()
+    private let previewNoticeLabel = NSTextField(labelWithString: "")
 
     // Apply bar
     let applyBar = NSStackView()
@@ -270,6 +283,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         searchField.delegate = self
         searchField.sendsWholeSearchString = true
         searchField.setAccessibilityHelp("Searches safe-for-work wallpapers on Wallhaven")
+        searchField.toolTip = "Search Wallhaven (⌘F). Results appear in Discover."
         categoryPopUp.addItems(withTitles: WallhavenCategory.allCases.map(\.displayName))
         resolutionPopUp.addItems(withTitles: ["At Least Display Size", "Any Resolution", "1080p or Larger", "1440p or Larger", "4K or Larger"])
         aspectPopUp.addItems(withTitles: WallhavenAspectRatio.allCases.map(\.displayName))
@@ -364,6 +378,16 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func makeContentView() -> NSView {
         // Scope bar: Discover filters or the current folder, only where relevant.
         discoverBar.setViews([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp], in: .leading)
+        pendingSearchLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        pendingSearchLabel.textColor = .secondaryLabelColor
+        pendingSearchLabel.lineBreakMode = .byTruncatingTail
+        // Shown whole or not at all: a truncated “Showing “…” says nothing. The button and its tooltip remain.
+        pendingSearchLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        updateResultsButton.controlSize = .small
+        updateResultsButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        updateResultsButton.target = self; updateResultsButton.action = #selector(search(_:))
+        discoverBar.setViews([pendingSearchLabel, updateResultsButton], in: .trailing)
+        discoverBar.setVisibilityPriority(.detachOnlyIfNecessary, for: pendingSearchLabel)
         discoverBar.spacing = 8
         let folderIcon = NSImageView(image: NSImage(systemSymbolName: "folder", accessibilityDescription: nil) ?? NSImage())
         folderIcon.contentTintColor = .secondaryLabelColor
@@ -439,21 +463,19 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             label.isSelectable = true
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
-        let noticeIcon = NSImageView(image: NSImage(systemSymbolName: "crop", accessibilityDescription: nil) ?? NSImage())
-        noticeIcon.symbolConfiguration = .init(pointSize: NSFont.smallSystemFontSize, weight: .regular)
-        noticeIcon.contentTintColor = .secondaryLabelColor
-        let noticeLabel = NSTextField(labelWithString: "Approximate preview from a cropped thumbnail. Set Wallpaper uses the full original.")
-        noticeLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        noticeLabel.textColor = .secondaryLabelColor
-        noticeLabel.lineBreakMode = .byTruncatingTail
-        noticeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        approximatePreviewNotice.setViews([noticeIcon, noticeLabel], in: .leading)
+        previewNoticeIcon.symbolConfiguration = .init(pointSize: NSFont.smallSystemFontSize, weight: .regular)
+        previewNoticeIcon.contentTintColor = .secondaryLabelColor
+        previewNoticeLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        previewNoticeLabel.textColor = .secondaryLabelColor
+        previewNoticeLabel.lineBreakMode = .byTruncatingTail
+        previewNoticeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        approximatePreviewNotice.setViews([previewNoticeIcon, previewNoticeLabel], in: .leading)
         approximatePreviewNotice.spacing = 4
-        approximatePreviewNotice.toolTip = "Wallhaven's preview image is cropped to 3:2, so the framing shown here can differ from the original. The original is downloaded only when you set it."
         approximatePreviewNotice.setAccessibilityElement(true)
         approximatePreviewNotice.setAccessibilityRole(.staticText)
-        approximatePreviewNotice.setAccessibilityLabel(noticeLabel.stringValue)
         approximatePreviewNotice.isHidden = true
+        // Even the original's pixels only estimate the desktop: macOS's own rendering isn't reproduced.
+        stageView.toolTip = "An estimate of how the selected display and scaling show this wallpaper."
         let caption = NSStackView(views: [previewTitleLabel, previewMetadataLabel, previewTagsLabel, approximatePreviewNotice])
         caption.orientation = .vertical
         caption.spacing = 3
@@ -627,7 +649,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         isSearching = false
         state.currentSource = source
         stateStore.save(state)
-        remoteThumbnailProvider.reset(); detailTask?.cancel()
+        remoteThumbnailProvider.reset(); cancelDetails()
         isViewerVisible = false
         updateSourceUI()
         if state.currentSource == .discover && remoteResults.isEmpty { performSearch(page: 1, appending: false) }
@@ -670,6 +692,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         guard notification.object as? NSSearchField === searchField else { return }
         persistSearchOptions()
         invalidateSearch()
+        // Typing elsewhere doesn't filter the folder or library: say where the search goes.
+        let scope = "Press Return to search Wallhaven in Discover."
+        if state.currentSource != .discover, statusLabel.stringValue != scope { showStatus(scope, isError: false) }
     }
 
     private func invalidateSearch() {
@@ -716,7 +741,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func performSearch(page: Int, appending: Bool) {
-        searchTask?.cancel(); detailTask?.cancel()
+        searchTask?.cancel()
         let generation = UUID()
         searchGeneration = generation
         searchErrorText = nil
@@ -730,7 +755,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         }
         isSearching = true
         updateEmptyAndPagination(); updateControlAvailability()
-        let options = state.wallhavenSearch
+        // A further page extends the visible results, so it repeats their request, not the edited controls.
+        let options = appending ? resultOptions ?? state.wallhavenSearch : state.wallhavenSearch
         searchTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -778,7 +804,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     /// Loads the next Discover page when the user nears the end of the grid. A failed page waits
     /// a few seconds before scrolling can retry it, so an outage never turns into a request loop.
     private func loadMoreIfNeeded() {
-        guard state.currentSource == .discover, !isSearching, currentPage < lastPage, resultOptions == state.wallhavenSearch,
+        guard state.currentSource == .discover, !isSearching, currentPage < lastPage,
               !galleryScroll.isHidden, Date().timeIntervalSince(lastAppendFailure ?? .distantPast) > 5 else { return }
         let visible = galleryScroll.documentVisibleRect
         guard visible.maxY >= collectionView.frame.height - max(visible.height * 0.5, 200) else { return }
@@ -876,7 +902,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     private func localOriginal(for reference: WallpaperReference) async throws -> URL {
         if let cached = try await originalCache.cachedURL(for: reference) {
-            updateReference(reference, cachedPath: cached.path); return cached
+            updateReference(reference, cachedPath: cached.path); showOriginalIfSelected(reference, at: cached); return cached
         }
         showStatus("Downloading the \(reference.resolution) original from Wallhaven…", isError: false)
         let temporary = try await provider.downloadOriginal(for: reference)
@@ -884,6 +910,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         try Task.checkCancellation()
         let installed = try await originalCache.installDownloadedFile(temporary, for: reference, protectedPaths: currentProtectedPaths())
         updateReference(reference, cachedPath: installed.path)
+        showOriginalIfSelected(reference, at: installed)
         return installed
     }
 
@@ -987,9 +1014,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func updatePreview(for item: BrowserItem?) {
-        detailTask?.cancel()
+        if item?.identifier != detailIdentity { cancelDetails() }
         stageView.image = nil
-        approximatePreviewNotice.isHidden = true
+        stageFidelity = .none
+        updatePreviewNotice()
         guard let item else {
             previewTitleLabel.stringValue = "No Wallpaper Selected"
             previewMetadataLabel.stringValue = ""
@@ -1004,10 +1032,6 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             stageView.imagePixelSize = .zero
             previewMetadataLabel.stringValue = (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
             previewTagsLabel.stringValue = url.pathExtension.uppercased()
-            loadLocalPreview(url) { [weak self] in
-                guard case .local(let selectedURL) = self?.selectedItem, selectedURL == url else { return false }
-                return true
-            }
             Task.detached(priority: .utility) {
                 let size = DesktopPreviewView.pixelSize(of: url)
                 await MainActor.run { [weak self] in
@@ -1019,35 +1043,71 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         case .remote(let ref):
             configureRemoteMetadata(ref)
             stageView.imagePixelSize = CGSize(width: ref.width, height: ref.height)
-            let isCurrent: () -> Bool = { [weak self] in self?.selectedReference?.identityKey == ref.identityKey }
-            // A downloaded original gives the sharpest preview; Wallhaven's large thumbnail is the fallback.
-            if let path = ref.cachedLocalPath {
-                loadLocalPreview(URL(fileURLWithPath: path), isCurrent: isCurrent) { [weak self] in self?.loadRemotePreview(ref, isCurrent: isCurrent) }
-            } else {
-                loadRemotePreview(ref, isCurrent: isCurrent)
-            }
-            if ref.uploader == nil || ref.tags.isEmpty { fetchDetails(for: ref) }
         }
         stageView.setAccessibilityLabel("Desktop preview of \(item.title)")
         updateSelectionSummary()
+        if isViewerVisible { loadPreviewContent(for: item) }
     }
 
-    private func loadLocalPreview(_ url: URL, isCurrent: @escaping () -> Bool, onFailure: (() -> Void)? = nil) {
+    /// Draws the selected wallpaper on the stage and fetches the details the preview shows. Only while
+    /// the preview is visible: the gallery shows neither, so browsing it costs no requests.
+    private func loadPreviewContent(for item: BrowserItem) {
+        switch item {
+        case .local(let url): loadLocalPreview(url, identity: item.identifier)
+        case .remote(let ref):
+            // A validated cached original is best, but checking takes a moment: show the most faithful
+            // thumbnail meanwhile unless an original is expected. Nothing here downloads an original.
+            if ref.cachedLocalPath == nil { loadRemotePreview(ref) }
+            Task { [weak self] in
+                let cached = try? await self?.originalCache.cachedURL(for: ref)
+                guard let self, selectedItem?.identifier == ref.identityKey else { return }
+                if let cached { loadLocalPreview(cached, identity: ref.identityKey) { [weak self] in self?.loadRemotePreview(ref) } }
+                else if ref.cachedLocalPath != nil { loadRemotePreview(ref) }
+            }
+            fetchDetailsIfNeeded(for: ref)
+        }
+    }
+
+    private func loadLocalPreview(_ url: URL, identity: String, onFailure: (() -> Void)? = nil) {
         thumbnailProvider.requestThumbnail(for: url, maximumPixelSize: 1800) { [weak self] image in
-            guard isCurrent() else { return }
-            guard let self, let image else { onFailure?(); return }
-            stageView.image = image
-            approximatePreviewNotice.isHidden = true
+            guard let self, selectedItem?.identifier == identity else { return }
+            guard let image else { onFailure?(); return }
+            showOnStage(image, fidelity: .original, identity: identity)
         }
     }
 
-    private func loadRemotePreview(_ ref: WallpaperReference, isCurrent: @escaping () -> Bool) {
-        remoteThumbnailProvider.requestThumbnail(for: ref.previewURL, maximumPixelSize: 1000) { [weak self] image in
-            guard isCurrent(), let self else { return }
-            stageView.image = image
-            // Wallhaven's large thumbnail is a 3:2 crop: say so rather than imply exact framing.
-            approximatePreviewNotice.isHidden = image == nil
+    private func loadRemotePreview(_ ref: WallpaperReference) {
+        let (url, fidelity) = ref.remotePreview
+        remoteThumbnailProvider.requestThumbnail(for: url, maximumPixelSize: 1000) { [weak self] image in
+            guard let self, let image else { return }
+            showOnStage(image, fidelity: fidelity, identity: ref.identityKey)
         }
+    }
+
+    /// The only way an image reaches the stage: it must belong to the current selection and be at least
+    /// as faithful as what's shown, so late or obsolete completions never downgrade the preview.
+    private func showOnStage(_ image: NSImage, fidelity: PreviewFidelity, identity: String) {
+        guard selectedItem?.identifier == identity, fidelity >= stageFidelity else { return }
+        stageView.image = image
+        stageFidelity = fidelity
+        updatePreviewNotice()
+    }
+
+    private func updatePreviewNotice() {
+        guard let notice = stageFidelity.notice else { approximatePreviewNotice.isHidden = true; return }
+        previewNoticeIcon.image = NSImage(systemSymbolName: notice.symbol, accessibilityDescription: nil)
+        previewNoticeLabel.stringValue = notice.text
+        approximatePreviewNotice.toolTip = notice.help
+        approximatePreviewNotice.setAccessibilityLabel(notice.text)
+        approximatePreviewNotice.setAccessibilityHelp(notice.help)
+        approximatePreviewNotice.isHidden = false
+    }
+
+    /// A Set or rotation made this original available: upgrade the preview only if it still shows that wallpaper.
+    private func showOriginalIfSelected(_ reference: WallpaperReference, at url: URL) {
+        guard let selected = selectedReference, selected.identityKey == reference.identityKey else { return }
+        configureRemoteMetadata(selected)
+        if isViewerVisible { loadLocalPreview(url, identity: selected.identityKey) }
     }
 
     private func configureRemoteMetadata(_ reference: WallpaperReference) {
@@ -1058,17 +1118,30 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         updateSelectionSummary()
     }
 
-    private func fetchDetails(for reference: WallpaperReference) {
+    /// Uploader and tags, and the uncropped thumbnail older references lack, come from the API. Requested
+    /// once per selected wallpaper, after a short dwell, and a throttled API only leaves them missing.
+    private func fetchDetailsIfNeeded(for reference: WallpaperReference) {
+        guard reference.uploader == nil || reference.tags.isEmpty || reference.remotePreview.fidelity == .croppedThumbnail,
+              detailIdentity != reference.identityKey else { return }
+        detailTask?.cancel()
+        detailIdentity = reference.identityKey
         detailTask = Task { [weak self] in
-            guard let self else { return }
             do {
+                try await Task.sleep(nanoseconds: Self.detailDwellNanoseconds)
+                guard let self, isViewerVisible, selectedReference?.identityKey == reference.identityKey else { return }
                 let detailed = try await provider.fetchDetails(for: reference)
                 try Task.checkCancellation(); updateReference(detailed)
-                guard selectedReference?.identityKey == detailed.identityKey else { return }
-                configureRemoteMetadata(detailed)
+                guard let current = selectedReference, current.identityKey == detailed.identityKey else { return }
+                configureRemoteMetadata(current)
+                if current.remotePreview.fidelity > stageFidelity { loadRemotePreview(current) }
             } catch is CancellationError { return }
-            catch { logger.error("Wallhaven detail failed: \(error.localizedDescription, privacy: .public)") }
+            catch { self?.logger.error("Wallhaven detail failed: \(error.localizedDescription, privacy: .public)") }
         }
+    }
+
+    private func cancelDetails() {
+        detailTask?.cancel()
+        detailIdentity = nil
     }
 
     /// First line of the apply bar: what Set Wallpaper will apply.
@@ -1107,6 +1180,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         guard visible != isViewerVisible else { return }
         isViewerVisible = visible
         updateContentVisibility(animated: true)
+        if visible, let item = selectedItem { loadPreviewContent(for: item) }
         window?.makeFirstResponder(visible ? viewerView : collectionView)
         if !visible, let index = selectedIndex {
             collectionView.scrollToItems(at: [IndexPath(item: index, section: 0)], scrollPosition: .nearestVerticalEdge)
@@ -1591,7 +1665,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         else { displayPopUp.selectItem(at: screens.isEmpty ? -1 : 0) }
         displayPopUp.isEnabled = !screens.isEmpty
         if let screen = selectedScreen { state.selectedDisplayID = identifier(for: screen); updateDisplayMinimum(); updateStageDisplay(screen) }
-        stateStore.save(state); updateControlAvailability()
+        stateStore.save(state); updateControlAvailability(); updatePendingSearch()
     }
 
     private func updateStageDisplay(_ screen: NSScreen) {
@@ -1647,13 +1721,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func updateWindowTitle() {
+        updatePendingSearch()
         guard let window else { return }
         let count = currentItems.count
         let wallpapers = count == 1 ? "1 wallpaper" : "\(count.formatted()) wallpapers"
         switch state.currentSource {
         case .discover:
             window.title = "Discover"
-            window.subtitle = totalResults > 0 ? "\(remoteResults.count.formatted()) of \(totalResults.formatted()) wallpapers" : ""
+            // Names the request the results came from, which the edited controls may no longer describe.
+            window.subtitle = totalResults > 0 ? "\(resultOptions?.resultsDescription ?? "Results") on Wallhaven · \(remoteResults.count.formatted()) of \(totalResults.formatted())" : ""
         case .local:
             window.title = state.folderPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Folder"
             window.subtitle = state.folderPath == nil || isLoadingFolder ? "" : wallpapers
@@ -1662,6 +1738,27 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         case .collections:
             window.title = selectedCollection?.name ?? "Collections"; window.subtitle = selectedCollection == nil ? "" : wallpapers
         }
+    }
+
+    /// When the visible results no longer match the search text, filters or display-derived size, say
+    /// which request they show and offer to apply the new one (as Return in the search field does).
+    private func updatePendingSearch() {
+        let draft = state.wallhavenSearch
+        sortingPopUp.toolTip = draft.effectiveSorting == draft.sorting ? "Sort order"
+            : "Without search text Wallhaven has no relevance order, so Discover shows this month’s top wallpapers."
+        var note: String?
+        if let applied = resultOptions, !remoteResults.isEmpty,
+           WallhavenEndpoint.searchURL(options: applied, page: 1) != WallhavenEndpoint.searchURL(options: draft, page: 1) {
+            if applied.trimmedQuery != draft.trimmedQuery { note = "Showing \(applied.resultsDescription)" }
+            else if applied.minimumResolution != draft.minimumResolution, draft.usesDisplayMinimum { note = "Showing results for the previous display size" }
+            else { note = "Showing results for earlier filters" }
+        }
+        pendingSearchLabel.stringValue = note ?? ""
+        pendingSearchLabel.toolTip = note.map { "\($0). Press Return in the search field or click Update Results to search with the current settings." }
+        pendingSearchLabel.isHidden = note == nil
+        updateResultsButton.isHidden = note == nil
+        updateResultsButton.toolTip = draft.trimmedQuery.isEmpty ? "Show \(draft.effectiveSorting.displayName) on Wallhaven"
+            : "Search Wallhaven for “\(draft.trimmedQuery)”"
     }
 
     private func updateEmptyAndPagination() {

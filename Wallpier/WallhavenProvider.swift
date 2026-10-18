@@ -9,14 +9,13 @@ enum WallhavenEndpoint {
             resolvingAgainstBaseURL: false
         )!
         var items: [URLQueryItem] = []
-        let query = options.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = options.trimmedQuery
         if !query.isEmpty {
             items.append(URLQueryItem(name: "q", value: query))
         }
         items.append(URLQueryItem(name: "categories", value: options.category.rawValue))
         items.append(URLQueryItem(name: "purity", value: "100"))
-        // Wallhaven returns an empty page for relevance without a query; show this month's top wallpapers.
-        let sorting = query.isEmpty && options.sorting == .relevance ? WallhavenSorting.toplist : options.sorting
+        let sorting = options.effectiveSorting
         items.append(URLQueryItem(name: "sorting", value: sorting.rawValue))
         items.append(URLQueryItem(name: "order", value: "desc"))
         if sorting == .toplist {
@@ -51,7 +50,9 @@ actor WallhavenProvider: RemoteWallpaperProvider {
     private let cacheLifetime: TimeInterval
     private var searchCache: [URL: SearchCacheEntry] = [:]
     private var detailCache: [String: WallpaperReference] = [:]
-    private var retryNotBefore: Date?
+    /// The API and the original-image host limit separately, so each keeps its own backoff.
+    private enum Origin { case api, originals }
+    private var retryNotBefore: [Origin: Date] = [:]
 
     init(client: NetworkClient = URLSessionNetworkClient(), cacheLifetime: TimeInterval = 300) {
         self.client = client
@@ -116,12 +117,12 @@ actor WallhavenProvider: RemoteWallpaperProvider {
     }
 
     func downloadOriginal(for reference: WallpaperReference) async throws -> URL {
-        try checkBackoff()
+        try checkBackoff(.originals)
         var downloadRequest = request(url: reference.originalURL)
         downloadRequest.setValue("image/*", forHTTPHeaderField: "Accept")
         let (temporaryURL, response) = try await client.download(for: downloadRequest)
         do {
-            try validate(response)
+            try validate(response, origin: .originals)
         } catch {
             try? FileManager.default.removeItem(at: temporaryURL)
             throw error
@@ -145,7 +146,7 @@ actor WallhavenProvider: RemoteWallpaperProvider {
         var lastResult: (Data, HTTPURLResponse)?
         for attempt in 0..<2 {
             try Task.checkCancellation()
-            try checkBackoff()
+            try checkBackoff(.api)
             let result = try await client.data(for: request)
             lastResult = result
             if attempt == 0, [502, 503, 504].contains(result.1.statusCode) {
@@ -157,15 +158,15 @@ actor WallhavenProvider: RemoteWallpaperProvider {
         return lastResult!
     }
 
-    private func validate(_ response: HTTPURLResponse) throws {
+    private func validate(_ response: HTTPURLResponse, origin: Origin = .api) throws {
         if response.statusCode == 429 {
             let delay = max(1, Self.retryAfter(from: response) ?? 60)
-            retryNotBefore = Date().addingTimeInterval(delay)
+            retryNotBefore[origin] = Date().addingTimeInterval(delay)
             throw RemoteProviderError.rateLimited(retryAfter: delay)
         }
         let limits = Self.rateLimit(from: response)
         if limits.remaining == 0, let reset = limits.resetDate, reset > Date() {
-            retryNotBefore = reset
+            retryNotBefore[origin] = reset
         }
         guard (200...299).contains(response.statusCode) else {
             if response.statusCode == 404 {
@@ -175,8 +176,8 @@ actor WallhavenProvider: RemoteWallpaperProvider {
         }
     }
 
-    private func checkBackoff() throws {
-        if let retryNotBefore, retryNotBefore > Date() {
+    private func checkBackoff(_ origin: Origin) throws {
+        if let retryNotBefore = retryNotBefore[origin], retryNotBefore > Date() {
             throw RemoteProviderError.rateLimited(retryAfter: retryNotBefore.timeIntervalSinceNow)
         }
     }
@@ -197,20 +198,27 @@ actor WallhavenProvider: RemoteWallpaperProvider {
             return nil
         }
         if let seconds = TimeInterval(value) {
-            return seconds
+            return validDelay(seconds)
         }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
-        return formatter.date(from: value).map { max(0, $0.timeIntervalSinceNow) }
+        return formatter.date(from: value).flatMap { validDelay(max(0, $0.timeIntervalSinceNow)) }
+    }
+
+    /// nil for a malformed wait (NaN, infinite, negative or beyond the maximum), so callers use their default.
+    private static func validDelay(_ seconds: TimeInterval) -> TimeInterval? {
+        seconds.isFinite && seconds >= 0 && seconds <= RemoteProviderError.maximumRetryDelay ? seconds : nil
     }
 
     private static func resetDate(from response: HTTPURLResponse) -> Date? {
         let names = ["x-ratelimit-reset", "ratelimit-reset"]
         for name in names {
+            // A past reset is harmless; a non-finite or far-future one would suppress requests indefinitely.
             if let value = response.value(forHTTPHeaderField: name),
-               let timestamp = TimeInterval(value) {
+               let timestamp = TimeInterval(value), timestamp.isFinite,
+               timestamp - Date().timeIntervalSince1970 <= RemoteProviderError.maximumRetryDelay {
                 return Date(timeIntervalSince1970: timestamp)
             }
         }
@@ -259,6 +267,7 @@ private struct WallhavenListing: Decodable {
     struct Thumbnails: Decodable {
         let large: URL
         let small: URL
+        let original: URL?
     }
 
     struct Uploader: Decodable {
@@ -287,7 +296,8 @@ private struct WallhavenListing: Decodable {
             height: dimensionY,
             uploader: uploader?.username,
             tags: tags?.prefix(8).map(\.name) ?? [],
-            cachedLocalPath: nil
+            cachedLocalPath: nil,
+            uncroppedPreviewURL: thumbs.original
         )
     }
 }

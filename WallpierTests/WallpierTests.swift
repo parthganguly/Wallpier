@@ -1044,7 +1044,7 @@ extension WallpierTests {
         XCTAssertEqual(controller.state.currentSource, .discover)
     }
 
-    /// Wallhaven's preview image is a 3:2 crop, so an uncached remote preview is labelled approximate;
+    /// An uncached remote preview is drawn from a Wallhaven thumbnail and labelled as such;
     /// a downloaded original or a local file is drawn from its own pixels and is not.
     @MainActor
     func testOnlyCroppedRemotePreviewsAreMarkedApproximateAndNothingIsDownloaded() throws {
@@ -1058,7 +1058,9 @@ extension WallpierTests {
             try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: url)
         }
         try writePNG(0, to: folder.appendingPathComponent("a.png"))
-        let original = root.appendingPathComponent("original.png")
+        // A downloaded original lives in the cache, where Set also finds and validates it.
+        let original = root.appendingPathComponent("Originals").appendingPathComponent(RemoteWallpaperCache.filename(for: CaptureFixtures.references()[3]))
+        try FileManager.default.createDirectory(at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
         try writePNG(1, to: original)
         let network = DownloadCountingNetwork()
         let (controller, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
@@ -1077,7 +1079,7 @@ extension WallpierTests {
         controller.showFavorites(nil)
         controller.toggleViewer(nil)
 
-        // Uncached remote: the cropped Wallhaven preview, clearly marked.
+        // Uncached remote: a Wallhaven thumbnail, clearly marked.
         XCTAssertNil(controller.state.favorites[0].cachedLocalPath)
         XCTAssertNotNil(controller.stageView.image)
         XCTAssertFalse(notice.isHiddenOrHasHiddenAncestor, "An uncached Wallhaven preview must be marked approximate")
@@ -1089,7 +1091,7 @@ extension WallpierTests {
         XCTAssertEqual(controller.state.selectedRemoteIdentity, controller.state.favorites[1].identityKey)
         XCTAssertTrue(notice.isHidden, "No notice before the original's preview has loaded")
         waitFor(controller.stageView.image != nil, "The downloaded original's preview loads")
-        XCTAssertTrue(notice.isHidden, "A preview drawn from the downloaded original is exact")
+        XCTAssertTrue(notice.isHidden, "A preview drawn from the downloaded original needs no source notice")
 
         // Back to the uncached one, then a local file.
         controller.previousWallpaper(nil)
@@ -1099,7 +1101,7 @@ extension WallpierTests {
                 "The local folder loads (\(controller.state.selectedImagePath ?? "nothing selected"))")
         controller.toggleViewer(nil)
         waitFor(controller.stageView.image != nil, "The local file's preview loads")
-        XCTAssertTrue(notice.isHidden, "A local file's preview is exact")
+        XCTAssertTrue(notice.isHidden, "A local file's preview needs no source notice")
 
         // Previewing never downloads an original.
         XCTAssertEqual(network.downloads, 0)
@@ -1373,6 +1375,8 @@ extension WallpierTests {
         let h = try setAuditHarness()
         let detail = SetAuditGate<Data>()
         h.network.dataGates = [detail]
+        // Details and the stage image load only for the visible desktop preview.
+        h.controller.toggleViewer(nil)
         await fulfillment(of: [detail.started], timeout: 2)
         let oldDetailTask = h.controller.detailTask
         let oldPreview = try XCTUnwrap(h.thumbnails.callbacks.first)
@@ -1596,6 +1600,7 @@ extension WallpierTests {
     @MainActor
     func makeCaptureController(root: URL, size: NSSize, appearance: NSAppearance.Name, network: NetworkClient = OfflineNetwork(),
                                windowClass: NSWindow.Type = NSWindow.self, desktop: WallpaperService? = nil,
+                               thumbnails: RemoteThumbnailProvider? = nil, page: RemoteSearchPage? = nil, screens: [NSScreen]? = nil,
                                configure: (inout WallpaperState) -> Void) -> (MainWindowController, NSWindow) {
         let references = CaptureFixtures.references()
         let store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
@@ -1620,8 +1625,8 @@ extension WallpierTests {
         let controller = MainWindowController(window: window, wallpaperService: desktop ?? SetAuditWallpaperService(), stateStore: store,
             provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
             historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
-            remoteThumbnailProvider: CaptureThumbnails(), availableScreens: { [CaptureScreen()] })
-        let page = RemoteSearchPage(wallpapers: references, currentPage: 1, lastPage: 54, total: 1_284,
+            remoteThumbnailProvider: thumbnails ?? CaptureThumbnails(), availableScreens: { screens ?? [CaptureScreen()] })
+        let page = page ?? RemoteSearchPage(wallpapers: references, currentPage: 1, lastPage: 54, total: 1_284,
             rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil))
         controller.prepareForVisualCapture(discoverPage: page)
         return (controller, window)
@@ -2275,5 +2280,986 @@ extension WallpierTests {
         app.commandZ()
         XCTAssertFalse(c.state.collections.contains { $0.id == quiet.id })
         XCTAssertTrue(app.desktop.calls.isEmpty)
+    }
+}
+
+// MARK: - Batch 2: truthful preview, bounded requests and honest Discover state
+//
+// Offline and deterministic. Wallhaven JSON is generated with real thumbnail geometry, the network
+// records every request it starts, thumbnails are drawn from a position-coded pattern, and the desktop
+// is the recording service. Nothing reaches Wallhaven, the user's state or the desktop.
+
+/// Wallhaven thumbnail geometry: `lg` is a 432×243 centre crop, `orig` keeps the source's
+/// proportions on a 300-pixel long edge, `small` is a 300×200 crop.
+enum CompositionFixtures {
+    static let shapes: [(name: String, id: String, width: Int, height: Int)] = [
+        ("16:9", "cmp169", 3840, 2160), ("16:10", "cmp1610", 2560, 1600), ("square", "cmpsq", 2000, 2000),
+        ("portrait", "cmpport", 1200, 2133), ("21:9", "cmp219", 3440, 1440), ("32:9", "cmp329", 5120, 1440)]
+
+    static func listing(id: String, width: Int, height: Int, original: Bool = true,
+                        uploader: String? = nil, tags: [String]? = nil) -> [String: Any] {
+        var thumbs = ["large": "https://th.wallhaven.cc/lg/cm/\(id).jpg", "small": "https://th.wallhaven.cc/small/cm/\(id).jpg"]
+        if original { thumbs["original"] = "https://th.wallhaven.cc/orig/cm/\(id).jpg" }
+        var item: [String: Any] = ["id": id, "url": "https://wallhaven.cc/w/\(id)", "path": "https://w.wallhaven.cc/full/cm/wallhaven-\(id).png",
+                                   "dimension_x": width, "dimension_y": height, "thumbs": thumbs]
+        if let uploader { item["uploader"] = ["username": uploader] }
+        if let tags { item["tags"] = tags.map { ["name": $0] } }
+        return item
+    }
+
+    static func shapeListings() -> [[String: Any]] { shapes.map { listing(id: $0.id, width: $0.width, height: $0.height) } }
+
+    static func searchJSON(_ items: [[String: Any]], page: Int = 1, lastPage: Int = 2, total: Int = 40) -> Data {
+        try! JSONSerialization.data(withJSONObject: ["data": items,
+            "meta": ["current_page": page, "last_page": lastPage, "per_page": 24, "total": total]])
+    }
+
+    static func detailJSON(_ item: [String: Any]) -> Data { try! JSONSerialization.data(withJSONObject: ["data": item]) }
+
+    /// Red is the horizontal position in the original (0 left … 1 right) and green the vertical one
+    /// (0 top … 1 bottom), so every pixel of any crop or scale names the part of the original it shows.
+    static var framesEdges = false
+
+    static func pattern(original: CGSize, canvas: CGSize) -> CGImage {
+        let w = Int(canvas.width), h = Int(canvas.height)
+        let scale = max(canvas.width / original.width, canvas.height / original.height)
+        let shown = CGSize(width: original.width * scale, height: original.height * scale)
+        let offset = CGPoint(x: (canvas.width - shown.width) / 2, y: (canvas.height - shown.height) / 2)
+        var bytes = [UInt8](repeating: 255, count: w * h * 4)
+        for y in 0..<h {
+            for x in 0..<w {
+                let u = (CGFloat(x) + 0.5 - offset.x) / shown.width, v = (CGFloat(y) + 0.5 - offset.y) / shown.height
+                let i = (y * w + x) * 4
+                bytes[i] = UInt8(max(0, min(1, u)) * 255); bytes[i + 1] = UInt8(max(0, min(1, v)) * 255); bytes[i + 2] = 128
+                // Captures only: a white border on the original's edges makes any cropping visible at a glance.
+                let border = 0.035
+                if framesEdges, min(u, 1 - u) * original.width < border * min(original.width, original.height)
+                    || min(v, 1 - v) * original.height < border * min(original.width, original.height) {
+                    bytes[i] = 255; bytes[i + 1] = 255; bytes[i + 2] = 255
+                }
+            }
+        }
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                       space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                       provider: CGDataProvider(data: Data(bytes) as CFData)!, decode: nil, shouldInterpolate: true, intent: .defaultIntent)!
+    }
+
+    static func canvas(for url: URL, original: CGSize) -> CGSize {
+        switch url.pathComponents.dropFirst().first {
+        case "lg": return CGSize(width: 432, height: 243)
+        case "orig":
+            return original.width >= original.height
+                ? CGSize(width: 300, height: (300 * original.height / original.width).rounded())
+                : CGSize(width: (300 * original.width / original.height).rounded(), height: 300)
+        default: return CGSize(width: 300, height: 200)
+        }
+    }
+
+    /// A small stand-in for a full original, with the original's proportions.
+    static func writeOriginal(_ size: CGSize, to url: URL) throws {
+        let canvas = size.width >= size.height ? CGSize(width: 480, height: (480 * size.height / size.width).rounded())
+                                               : CGSize(width: (480 * size.width / size.height).rounded(), height: 480)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, pattern(original: size, canvas: canvas), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+    }
+}
+
+/// Serves each thumbnail URL as the pattern cropped exactly as Wallhaven crops that kind of thumbnail,
+/// remembers which URL every image came from, and can hold callbacks to deliver them late.
+final class CompositionThumbnails: RemoteThumbnailProvider {
+    var sizes: [String: CGSize] = [:]
+    var holds = false
+    private var held: [(url: URL, completion: (NSImage?) -> Void)] = []
+    private var served: [(image: NSImage, url: URL)] = []
+
+    override func requestThumbnail(for url: URL, maximumPixelSize: Int = 420, completion: @escaping (NSImage?) -> Void) {
+        if holds { held.append((url, completion)); return }
+        completion(image(for: url))
+    }
+
+    private func image(for url: URL) -> NSImage? {
+        guard let original = sizes[url.deletingPathExtension().lastPathComponent] else { return nil }
+        let canvas = CompositionFixtures.canvas(for: url, original: original)
+        let image = NSImage(cgImage: CompositionFixtures.pattern(original: original, canvas: canvas), size: canvas)
+        served.append((image, url))
+        return image
+    }
+
+    func releaseHeld() {
+        let pending = held
+        held = []
+        pending.forEach { $0.completion(image(for: $0.url)) }
+    }
+
+    /// The thumbnail kind ("lg", "orig", "small") an image was served as; nil for anything else, such as a decoded original.
+    func kind(of image: NSImage?) -> String? {
+        guard let image, let url = served.first(where: { $0.image === image })?.url else { return nil }
+        return url.pathComponents[1]
+    }
+
+    override func reset() {}
+}
+
+/// Answers Wallhaven's API and original downloads from fixtures and records every request it starts.
+@MainActor
+final class Batch2Network: NetworkClient {
+    var pageItems: [[String: Any]] = []
+    var lastPage = 2
+    var details: [String: [String: Any]] = [:]
+    var apiStatus = 200
+    var apiHeaders: [String: String] = [:]
+    var downloadStatus = 200
+    var downloadHeaders: [String: String] = [:]
+    var originalFile: URL?
+    fileprivate var downloadGate: SetAuditGate<Void>?
+    private(set) var searches: [URLComponents] = []
+    private(set) var detailRequests: [String] = []
+    private(set) var downloads: [URL] = []
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let url = request.url!
+        let body: Data
+        if url.path.hasSuffix("/search") {
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            searches.append(components)
+            let page = Int(components.queryItems?.first { $0.name == "page" }?.value ?? "1") ?? 1
+            let items = pageItems.map { item -> [String: Any] in
+                var copy = item
+                if page > 1 { copy["id"] = "\(item["id"]!)p\(page)" }
+                return copy
+            }
+            body = CompositionFixtures.searchJSON(items, page: page, lastPage: lastPage)
+        } else {
+            detailRequests.append(url.lastPathComponent)
+            body = details[url.lastPathComponent].map(CompositionFixtures.detailJSON) ?? Data()
+        }
+        return (body, HTTPURLResponse(url: url, statusCode: apiStatus, httpVersion: "HTTP/1.1", headerFields: apiHeaders)!)
+    }
+
+    func download(for request: URLRequest) async throws -> (URL, HTTPURLResponse) {
+        downloads.append(request.url!)
+        if let gate = downloadGate { try await gate.value() }
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("wallpier-batch2-\(UUID()).png")
+        if let originalFile, downloadStatus == 200 { try FileManager.default.copyItem(at: originalFile, to: temporary) }
+        else { try Data().write(to: temporary) }
+        return (temporary, HTTPURLResponse(url: request.url!, statusCode: downloadStatus, httpVersion: "HTTP/1.1", headerFields: downloadHeaders)!)
+    }
+}
+
+final class SizedScreen: NSScreen {
+    private let number: Int
+    var size: NSSize, scale: CGFloat
+    init(_ number: Int, _ size: NSSize, scale: CGFloat) { self.number = number; self.size = size; self.scale = scale; super.init() }
+    required init?(coder: NSCoder) { fatalError("unused") }
+    override var localizedName: String { "Display \(number)" }
+    override var frame: NSRect { NSRect(origin: .zero, size: size) }
+    override var backingScaleFactor: CGFloat { scale }
+    override var deviceDescription: [NSDeviceDescriptionKey: Any] { [NSDeviceDescriptionKey("NSScreenNumber"): NSNumber(value: number)] }
+}
+
+extension WallpierTests {
+    @MainActor
+    private func batch2Controller(_ network: Batch2Network, _ thumbnails: CompositionThumbnails = CompositionThumbnails(),
+                                  items: [[String: Any]] = CompositionFixtures.shapeListings(), screens: [NSScreen]? = nil,
+                                  desktop: WallpaperService = SetAuditWallpaperService(),
+                                  configure: (inout WallpaperState) -> Void = { _ in }) async throws -> (MainWindowController, NSWindow, URL) {
+        network.pageItems = items
+        for item in items {
+            thumbnails.sizes[item["id"] as! String] = CGSize(width: item["dimension_x"] as! Int, height: item["dimension_y"] as! Int)
+        }
+        let decoded = try await WallhavenProvider(client: StubNetworkClient(data: CompositionFixtures.searchJSON(items)))
+            .search(options: WallhavenSearchOptions(), page: 1)
+        let page = RemoteSearchPage(wallpapers: decoded.wallpapers, currentPage: 1, lastPage: network.lastPage, total: 40,
+                                    rateLimit: decoded.rateLimit)
+        let root = try historyTestFolder()
+        let (controller, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                         network: network, desktop: desktop, thumbnails: thumbnails, page: page,
+                                                         screens: screens, configure: configure)
+        addTeardownBlock {
+            let tasks = await MainActor.run { () -> [Task<Void, Never>] in
+                let tasks = [controller.downloadTask, controller.searchTask, controller.detailTask, controller.undoValidationTask].compactMap { $0 }
+                tasks.forEach { $0.cancel() }
+                network.downloadGate?.release(.failure(CancellationError()))
+                while let sheet = window.attachedSheet { window.endSheet(sheet) }
+                window.close()
+                return tasks
+            }
+            for task in tasks { await task.value }
+            try? FileManager.default.removeItem(at: root)
+        }
+        return (controller, window, root)
+    }
+
+    @MainActor
+    private func eventually(_ timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
+        let end = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < end { try? await Task.sleep(nanoseconds: 20_000_000) }
+        return condition()
+    }
+
+    @MainActor
+    private func pause(_ seconds: TimeInterval) async { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
+
+    @MainActor
+    private func notice(_ controller: MainWindowController) -> String {
+        controller.approximatePreviewNotice.isHidden ? "" : controller.approximatePreviewNotice.accessibilityLabel() ?? ""
+    }
+
+    private func value(_ components: URLComponents?, _ name: String) -> String? {
+        components?.queryItems?.first { $0.name == name }?.value
+    }
+
+    /// Renders the stage's current source with production drawing and checks, on a grid, that each
+    /// pixel shows the part of the original that the display would show at that point.
+    @MainActor
+    private func compositionErrors(_ stage: DesktopPreviewView, _ scaling: ScalingMode) -> [String] {
+        let view = DesktopPreviewView(frame: NSRect(x: 0, y: 0, width: 640, height: 420))
+        view.image = stage.image
+        view.imagePixelSize = stage.imagePixelSize
+        view.displayPixelSize = stage.displayPixelSize
+        view.scaling = scaling
+        // Draw into an sRGB bitmap, the pattern's own space, so pixels are read back without colour conversion.
+        let width = Int(view.bounds.width), height = Int(view.bounds.height)
+        guard view.image != nil, let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                                         space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return ["no image"] }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        view.draw(view.bounds)
+        NSGraphicsContext.restoreGraphicsState()
+        let pixels = context.data!.assumingMemoryBound(to: UInt8.self)
+        let imageRect = DesktopPreviewView.imageRect(in: view.stageRect, image: view.imagePixelSize, display: view.displayPixelSize, scaling: scaling)
+        let area = view.stageRect.insetBy(dx: 5, dy: 5).intersection(imageRect.insetBy(dx: 3, dy: 3))
+        var errors: [String] = []
+        for fx in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            for fy in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let point = CGPoint(x: area.minX + area.width * fx, y: area.minY + area.height * fy)
+                let u = (point.x - imageRect.minX) / imageRect.width, v = (imageRect.maxY - point.y) / imageRect.height
+                let offset = (height - 1 - Int(point.y)) * context.bytesPerRow + Int(point.x) * 4
+                let red = CGFloat(pixels[offset]) / 255, green = CGFloat(pixels[offset + 1]) / 255
+                if abs(red - u) > 0.05 || abs(green - v) > 0.05 {
+                    errors.append(String(format: "original (%.2f, %.2f) drawn as (%.2f, %.2f)", u, v, red, green))
+                }
+            }
+        }
+        return errors
+    }
+
+    // MARK: Preview (D3)
+
+    // Each shape is drawn from a thumbnail that holds the whole original: Fill, Fit and Center then show
+    // the region of the original the display would. 16:9 keeps the sharper 432-pixel crop, which is whole.
+    @MainActor
+    func testPreviewDrawsTheWholeCompositionForSixSourceShapes() async throws {
+        let network = Batch2Network(), thumbnails = CompositionThumbnails()
+        let (c, _, _) = try await batch2Controller(network, thumbnails)
+        c.showDiscover(nil)
+        c.toggleViewer(nil)
+        for (index, shape) in CompositionFixtures.shapes.enumerated() {
+            if index > 0 { c.nextWallpaper(nil) }
+            XCTAssertEqual(c.previewTitleLabel.stringValue, shape.id)
+            let shown = await eventually { thumbnails.kind(of: c.stageView.image) != nil }
+            XCTAssertTrue(shown, shape.name)
+            XCTAssertEqual(thumbnails.kind(of: c.stageView.image), shape.name == "16:9" ? "lg" : "orig", "\(shape.name) preview source")
+            XCTAssertTrue(notice(c).hasPrefix("Low-resolution preview"), "\(shape.name): \(notice(c))")
+            for mode in ScalingMode.allCases {
+                let errors = compositionErrors(c.stageView, mode)
+                XCTAssertTrue(errors.isEmpty, "\(shape.name) \(mode): \(errors.prefix(3))")
+            }
+        }
+        XCTAssertTrue(network.downloads.isEmpty, "Previewing never downloads an original")
+    }
+
+    // Without an aspect-preserving thumbnail the cropped one is labelled as such; the selected item's
+    // details supply the missing thumbnail and the preview upgrades in place, or stays labelled.
+    @MainActor
+    func testMissingUncroppedThumbnailIsLabelledThenUpgradedFromDetails() async throws {
+        let network = Batch2Network(), thumbnails = CompositionThumbnails()
+        network.details = ["cmpmiss": CompositionFixtures.listing(id: "cmpmiss", width: 3440, height: 1440, uploader: "u", tags: ["t"]),
+                           "cmpnone": CompositionFixtures.listing(id: "cmpnone", width: 1200, height: 2133, original: false, uploader: "u", tags: ["t"])]
+        let (c, _, _) = try await batch2Controller(network, thumbnails, items: [
+            CompositionFixtures.listing(id: "cmpmiss", width: 3440, height: 1440, original: false),
+            CompositionFixtures.listing(id: "cmpnone", width: 1200, height: 2133, original: false)])
+        c.showDiscover(nil)
+        c.toggleViewer(nil)
+        XCTAssertEqual(thumbnails.kind(of: c.stageView.image), "lg")
+        XCTAssertTrue(notice(c).localizedCaseInsensitiveContains("cropped"), notice(c))
+        let upgraded = await eventually { thumbnails.kind(of: c.stageView.image) == "orig" }
+        XCTAssertTrue(upgraded, "The selected wallpaper's details supply its uncropped thumbnail")
+        XCTAssertTrue(notice(c).hasPrefix("Low-resolution preview"), notice(c))
+        XCTAssertTrue(compositionErrors(c.stageView, .fit).isEmpty)
+
+        c.nextWallpaper(nil)
+        _ = await eventually { network.detailRequests.contains("cmpnone") }
+        await pause(0.3)
+        XCTAssertEqual(thumbnails.kind(of: c.stageView.image), "lg")
+        XCTAssertTrue(notice(c).localizedCaseInsensitiveContains("cropped"), "Still a cropped approximation: \(notice(c))")
+    }
+
+    // References saved before thumbs.original was kept still decode, preview as a labelled crop, and
+    // gain (and persist) the uncropped thumbnail once their details are fetched.
+    @MainActor
+    func testLegacyFavoriteDecodesAndGainsItsUncroppedThumbnail() async throws {
+        let legacy = """
+        {"providerIdentifier":"wallhaven","wallpaperID":"cmp329","sourcePageURL":"https://wallhaven.cc/w/cmp329",
+         "originalURL":"https://w.wallhaven.cc/full/cm/wallhaven-cmp329.png","previewURL":"https://th.wallhaven.cc/lg/cm/cmp329.jpg",
+         "thumbnailURL":"https://th.wallhaven.cc/small/cm/cmp329.jpg","width":5120,"height":1440,"tags":[]}
+        """
+        let reference = try JSONDecoder().decode(WallpaperReference.self, from: Data(legacy.utf8))
+        let network = Batch2Network(), thumbnails = CompositionThumbnails()
+        network.details = ["cmp329": CompositionFixtures.listing(id: "cmp329", width: 5120, height: 1440, uploader: "u", tags: ["wide"])]
+        let (c, _, root) = try await batch2Controller(network, thumbnails) { state in
+            state.favorites = [reference]
+            state.selectedRemoteIdentity = reference.identityKey
+        }
+        c.showFavorites(nil)
+        c.toggleViewer(nil)
+        XCTAssertTrue(notice(c).localizedCaseInsensitiveContains("cropped"), notice(c))
+        let upgraded = await eventually { thumbnails.kind(of: c.stageView.image) == "orig" }
+        XCTAssertTrue(upgraded)
+        XCTAssertTrue(notice(c).hasPrefix("Low-resolution preview"), notice(c))
+        let saved = try String(contentsOf: root.appendingPathComponent("state.json"))
+        XCTAssertTrue(saved.replacingOccurrences(of: "\\/", with: "/").contains("th.wallhaven.cc/orig/cm/cmp329.jpg"))
+    }
+
+    // A validated cached original is the preview, even for a fresh search result that doesn't know its
+    // cached path; a saved path to a damaged file is not trusted.
+    @MainActor
+    func testCachedOriginalTakesPrecedenceAndADamagedPathFallsBack() async throws {
+        let network = Batch2Network(), thumbnails = CompositionThumbnails()
+        let references = try await WallhavenProvider(client: StubNetworkClient(data: CompositionFixtures.searchJSON(CompositionFixtures.shapeListings())))
+            .search(options: WallhavenSearchOptions(), page: 1).wallpapers
+        let elsewhere = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: elsewhere) }
+        let damaged = elsewhere.appendingPathComponent("damaged.png")
+        try Data("not an image".utf8).write(to: damaged)
+        var favorite = references[4]
+        favorite.cachedLocalPath = damaged.path
+        let (c, _, root) = try await batch2Controller(network, thumbnails) { state in
+            state.favorites = [favorite]
+            state.selectedRemoteIdentity = favorite.identityKey
+        }
+        let wide = c.remoteResults[5]
+        XCTAssertNil(wide.cachedLocalPath)
+        try CompositionFixtures.writeOriginal(CGSize(width: 5120, height: 1440),
+                                              to: root.appendingPathComponent("Originals").appendingPathComponent(RemoteWallpaperCache.filename(for: wide)))
+        c.showDiscover(nil)
+        for _ in 0..<6 where c.previewTitleLabel.stringValue != wide.wallpaperID { c.nextWallpaper(nil) }
+        XCTAssertEqual(c.previewTitleLabel.stringValue, wide.wallpaperID)
+        c.toggleViewer(nil)
+        let original = await eventually { c.stageView.image != nil && thumbnails.kind(of: c.stageView.image) == nil }
+        XCTAssertTrue(original, "The cached original is drawn")
+        XCTAssertEqual(notice(c), "")
+        for mode in ScalingMode.allCases { XCTAssertTrue(compositionErrors(c.stageView, mode).isEmpty, "\(mode)") }
+
+        // A saved path to a damaged file: the uncropped thumbnail, honestly labelled.
+        c.showFavorites(nil)
+        c.toggleViewer(nil)
+        let fallback = await eventually { thumbnails.kind(of: c.stageView.image) == "orig" }
+        XCTAssertTrue(fallback)
+        XCTAssertTrue(notice(c).hasPrefix("Low-resolution preview"), notice(c))
+        XCTAssertTrue(network.downloads.isEmpty)
+    }
+
+    // A Set that downloads the original refreshes the preview only while that wallpaper is still
+    // selected; late thumbnail callbacks never replace an original with a thumbnail.
+    @MainActor
+    func testDownloadedOriginalRefreshesOnlyTheStillSelectedPreview() async throws {
+        let network = Batch2Network(), thumbnails = CompositionThumbnails(), desktop = SetAuditWallpaperService()
+        let (c, _, root) = try await batch2Controller(network, thumbnails, desktop: desktop)
+        let ultrawide = root.appendingPathComponent("ultrawide.png"), superwide = root.appendingPathComponent("superwide.png")
+        try CompositionFixtures.writeOriginal(CGSize(width: 3440, height: 1440), to: ultrawide)
+        try CompositionFixtures.writeOriginal(CGSize(width: 5120, height: 1440), to: superwide)
+        c.showDiscover(nil)
+        for _ in 0..<4 { c.nextWallpaper(nil) }
+        thumbnails.holds = true
+        c.toggleViewer(nil)
+        XCTAssertEqual(c.previewTitleLabel.stringValue, "cmp219")
+
+        network.originalFile = ultrawide
+        c.setWallpaper(nil)
+        try await finishAuditTask(c.downloadTask)
+        XCTAssertEqual(desktop.calls.count, 1)
+        let refreshed = await eventually { c.stageView.image != nil && thumbnails.kind(of: c.stageView.image) == nil }
+        XCTAssertTrue(refreshed, "The still-selected preview shows the downloaded original")
+        XCTAssertEqual(notice(c), "")
+        thumbnails.holds = false
+        thumbnails.releaseHeld()
+        XCTAssertNil(thumbnails.kind(of: c.stageView.image), "A late thumbnail must not replace the original")
+        XCTAssertEqual(notice(c), "")
+        XCTAssertTrue(compositionErrors(c.stageView, .fit).isEmpty)
+
+        // The selection moves on while the next download runs: each preview keeps its own source.
+        c.nextWallpaper(nil)
+        XCTAssertEqual(c.previewTitleLabel.stringValue, "cmp329")
+        let gate = SetAuditGate<Void>()
+        network.downloadGate = gate
+        network.originalFile = superwide
+        c.setWallpaper(nil)
+        await fulfillment(of: [gate.started], timeout: 2)
+        c.previousWallpaper(nil)
+        let back = await eventually { c.stageView.image != nil && thumbnails.kind(of: c.stageView.image) == nil }
+        XCTAssertTrue(back)
+        let shownBefore = c.stageView.image
+        gate.release(.success(()))
+        try await finishAuditTask(c.downloadTask)
+        await pause(0.3)
+        XCTAssertEqual(c.previewTitleLabel.stringValue, "cmp219")
+        XCTAssertTrue(c.stageView.image === shownBefore, "The other wallpaper's download leaves this preview alone")
+        c.nextWallpaper(nil)
+        let cached = await eventually { c.stageView.image != nil && thumbnails.kind(of: c.stageView.image) == nil }
+        XCTAssertTrue(cached, "Returning to the downloaded wallpaper shows its original")
+        XCTAssertEqual(notice(c), "")
+        XCTAssertEqual(network.downloads.count, 2)
+    }
+
+    // MARK: Network (D4)
+
+    // The gallery shows no detail metadata, so browsing it fetches none; arrowing through the preview
+    // fetches only the wallpaper the user stops on; reselecting it doesn't fetch again.
+    @MainActor
+    func testRapidSelectionStartsDetailRequestsOnlyForTheSettledPreview() async throws {
+        let network = Batch2Network()
+        network.details = Dictionary(uniqueKeysWithValues: CompositionFixtures.shapes.map {
+            ($0.id, CompositionFixtures.listing(id: $0.id, width: $0.width, height: $0.height, tags: []))
+        })
+        let (c, _, _) = try await batch2Controller(network)
+        c.showDiscover(nil)
+        for _ in 0..<30 { c.nextWallpaper(nil); await pause(0.005) }
+        await pause(0.7)
+        XCTAssertEqual(network.detailRequests, [], "Gallery browsing starts no detail requests")
+        c.toggleViewer(nil)
+        for _ in 0..<30 { c.nextWallpaper(nil); await pause(0.005) }
+        let settled = c.previewTitleLabel.stringValue
+        _ = await eventually { !network.detailRequests.isEmpty }
+        await pause(0.5)
+        XCTAssertEqual(network.detailRequests, [settled], "Only the settled preview's details are requested")
+        // Clicking the same wallpaper again or reopening the preview doesn't repeat it, even without tags.
+        let index = try XCTUnwrap(c.collectionView.selectionIndexPaths.first)
+        for _ in 0..<3 { c.collectionView(c.collectionView, didSelectItemsAt: [index]) }
+        c.toggleViewer(nil)
+        c.toggleViewer(nil)
+        await pause(0.5)
+        XCTAssertEqual(network.detailRequests, [settled])
+    }
+
+    // A metadata 429 keeps throttling metadata, but doesn't stop Set downloading an uncached original;
+    // a second Set while one runs never starts a second download.
+    @MainActor
+    func testMetadataRateLimitDoesNotBlockAnEligibleOriginalDownload() async throws {
+        let network = Batch2Network(), desktop = SetAuditWallpaperService()
+        let (c, window, root) = try await batch2Controller(network, desktop: desktop)
+        network.originalFile = root.appendingPathComponent("download.png")
+        try CompositionFixtures.writeOriginal(CGSize(width: 3840, height: 2160), to: try XCTUnwrap(network.originalFile))
+        network.apiStatus = 429
+        network.apiHeaders = ["Retry-After": "60"]
+        c.showDiscover(nil)
+        c.toggleViewer(nil)
+        let asked = await eventually { network.detailRequests.count == 1 }
+        XCTAssertTrue(asked)
+        await pause(0.1)
+        let gate = SetAuditGate<Void>()
+        network.downloadGate = gate
+        c.setWallpaper(nil)
+        await fulfillment(of: [gate.started], timeout: 2)
+        c.setWallpaper(nil)
+        gate.release(.success(()))
+        try await finishAuditTask(c.downloadTask)
+        while let sheet = window.attachedSheet { window.endSheet(sheet) }
+        XCTAssertEqual(network.downloads.count, 1, c.statusLabel.stringValue)
+        XCTAssertEqual(desktop.calls.count, 1, c.statusLabel.stringValue)
+        // Metadata stays throttled: neither another preview's details nor a search reach Wallhaven.
+        c.nextWallpaper(nil)
+        c.search(nil)
+        await pause(0.6)
+        XCTAssertEqual(network.detailRequests.count, 1)
+        XCTAssertTrue(network.searches.isEmpty)
+    }
+
+    // A successful API response that exhausts the quota throttles metadata, not originals.
+    @MainActor
+    func testExhaustedMetadataQuotaStillAllowsAnOriginalDownload() async throws {
+        let network = Batch2Network(), desktop = SetAuditWallpaperService()
+        let (c, _, root) = try await batch2Controller(network, desktop: desktop)
+        network.originalFile = root.appendingPathComponent("download.png")
+        try CompositionFixtures.writeOriginal(CGSize(width: 3840, height: 2160), to: try XCTUnwrap(network.originalFile))
+        network.details = ["cmp169": CompositionFixtures.listing(id: "cmp169", width: 3840, height: 2160, uploader: "u", tags: ["t"])]
+        network.apiHeaders = ["x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Int(Date().timeIntervalSince1970) + 60)]
+        c.showDiscover(nil)
+        c.toggleViewer(nil)
+        let detailed = await eventually { c.previewMetadataLabel.stringValue.contains("by u") }
+        XCTAssertTrue(detailed)
+        c.setWallpaper(nil)
+        try await finishAuditTask(c.downloadTask)
+        XCTAssertEqual(network.downloads.count, 1)
+        XCTAssertEqual(desktop.calls.count, 1, c.statusLabel.stringValue)
+        c.nextWallpaper(nil)
+        await pause(0.6)
+        XCTAssertEqual(network.detailRequests, ["cmp169"], "The exhausted quota still holds back metadata")
+    }
+
+    // A genuine original-download 429 is honoured for originals only; the failed Set releases its guard,
+    // metadata keeps working, and Set recovers once Retry-After has passed.
+    @MainActor
+    func testOriginalRateLimitIsHonouredSeparatelyAndRecovers() async throws {
+        let network = Batch2Network(), desktop = SetAuditWallpaperService()
+        let (c, window, root) = try await batch2Controller(network, desktop: desktop)
+        network.originalFile = root.appendingPathComponent("download.png")
+        try CompositionFixtures.writeOriginal(CGSize(width: 3840, height: 2160), to: try XCTUnwrap(network.originalFile))
+        network.details = ["cmp169": CompositionFixtures.listing(id: "cmp169", width: 3840, height: 2160, uploader: "u", tags: ["t"]),
+                           "cmp1610": CompositionFixtures.listing(id: "cmp1610", width: 2560, height: 1600, uploader: "u", tags: ["t"])]
+        network.downloadStatus = 429
+        network.downloadHeaders = ["Retry-After": "3"]
+        c.showDiscover(nil)
+        c.setWallpaper(nil)
+        try await finishAuditTask(c.downloadTask)
+        while let sheet = window.attachedSheet { window.endSheet(sheet) }
+        XCTAssertEqual(network.downloads.count, 1)
+        XCTAssertTrue(desktop.calls.isEmpty)
+        XCTAssertNil(c.downloadTask)
+        XCTAssertTrue(c.setWallpaperButton.isEnabled, "A failed Set releases its guard")
+        XCTAssertTrue(c.statusLabel.stringValue.contains("rate-limiting"), c.statusLabel.stringValue)
+        c.setWallpaper(nil)
+        try await finishAuditTask(c.downloadTask)
+        while let sheet = window.attachedSheet { window.endSheet(sheet) }
+        XCTAssertEqual(network.downloads.count, 1, "Within Retry-After no second original request starts")
+
+        c.toggleViewer(nil)
+        c.nextWallpaper(nil)
+        let detailed = await eventually { network.detailRequests.contains("cmp1610") }
+        XCTAssertTrue(detailed, "Metadata is a different origin and stays available: \(network.detailRequests)")
+
+        await pause(3.1)
+        network.downloadStatus = 200
+        network.downloadHeaders = [:]
+        c.setWallpaper(nil)
+        try await finishAuditTask(c.downloadTask)
+        XCTAssertEqual(network.downloads.count, 2)
+        XCTAssertEqual(desktop.calls.count, 1, c.statusLabel.stringValue)
+    }
+
+    // A cached original needs no network: it sets while metadata is throttled.
+    @MainActor
+    func testCachedOriginalSetsWithoutNetworkDuringMetadataThrottling() async throws {
+        let network = Batch2Network(), desktop = SetAuditWallpaperService()
+        let (c, _, root) = try await batch2Controller(network, desktop: desktop)
+        try CompositionFixtures.writeOriginal(CGSize(width: 3840, height: 2160), to: root.appendingPathComponent("Originals")
+            .appendingPathComponent(RemoteWallpaperCache.filename(for: c.remoteResults[0])))
+        network.apiStatus = 429
+        network.apiHeaders = ["Retry-After": "60"]
+        c.showDiscover(nil)
+        c.toggleViewer(nil)
+        _ = await eventually { network.detailRequests.count == 1 }
+        c.setWallpaper(nil)
+        try await finishAuditTask(c.downloadTask)
+        XCTAssertTrue(network.downloads.isEmpty)
+        XCTAssertEqual(desktop.calls.count, 1, c.statusLabel.stringValue)
+    }
+
+    // MARK: Discover (D5)
+
+    // Edited search text leaves the results described by the query that produced them, and scrolling
+    // extends them with that same query until Return applies the new one.
+    @MainActor
+    func testEditedQueryKeepsResultsDescribedAndPaginatesWithTheAppliedQuery() async throws {
+        let network = Batch2Network()
+        network.lastPage = 30
+        let (c, window, _) = try await batch2Controller(network)
+        c.showDiscover(nil)
+        await pause(0.3)
+        XCTAssertTrue(window.subtitle.contains("“landscape”"), window.subtitle)
+        c.searchField.stringValue = "forest"
+        c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+        let shown = c.remoteResults.count
+        XCTAssertGreaterThanOrEqual(shown, 6)
+        XCTAssertTrue(window.subtitle.contains("“landscape”"), "Results still name their query: \(window.subtitle)")
+        XCTAssertFalse(c.pendingSearchLabel.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(c.pendingSearchLabel.stringValue, "Showing “landscape”")
+        XCTAssertFalse(c.updateResultsButton.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(c.updateResultsButton.toolTip, "Search Wallhaven for “forest”")
+        let before = network.searches.count
+        c.collectionView.scroll(NSPoint(x: 0, y: c.collectionView.frame.height))
+        NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: c.galleryScrollForTesting.contentView)
+        let paged = await eventually { network.searches.count > before && c.remoteResults.count > shown }
+        XCTAssertTrue(paged, "Scrolling keeps extending the visible results")
+        XCTAssertEqual(Set(network.searches.map { value($0, "q") }), ["landscape"], "Pages match the results' own query")
+
+        c.updateResultsButton.performClick(nil)
+        let applied = await eventually { window.subtitle.contains("“forest”") }
+        XCTAssertTrue(applied, window.subtitle)
+        XCTAssertTrue(c.pendingSearchLabel.isHidden)
+        XCTAssertTrue(c.updateResultsButton.isHidden)
+        let forest = network.searches.filter { value($0, "q") == "forest" }
+        XCTAssertEqual(value(forest.first, "page"), "1")
+        XCTAssertEqual(c.state.wallhavenSearch.query, "forest")
+    }
+
+    // A display-derived minimum change keeps the results, which paginate with their own minimum until
+    // the search is applied again.
+    @MainActor
+    func testDisplayDerivedMinimumChangeKeepsResultsAndTheirMinimum() async throws {
+        let network = Batch2Network()
+        network.lastPage = 30
+        let screens = [SizedScreen(601, NSSize(width: 1440, height: 900), scale: 2), SizedScreen(602, NSSize(width: 1920, height: 1080), scale: 1)]
+        let (c, _, _) = try await batch2Controller(network, screens: screens) { state in
+            state.selectedDisplayID = "601"
+            state.wallhavenSearch.usesDisplayMinimum = true
+            state.wallhavenSearch.minimumWidth = 2880
+            state.wallhavenSearch.minimumHeight = 1800
+        }
+        c.showDiscover(nil)
+        await pause(0.3)
+        c.displayPopUp.selectItem(at: 1)
+        c.displaySelectionChanged()
+        XCTAssertEqual(c.state.wallhavenSearch.minimumResolution, "1920x1080")
+        XCTAssertEqual(c.pendingSearchLabel.stringValue, "Showing results for the previous display size")
+        XCTAssertFalse(c.updateResultsButton.isHidden)
+        let shown = c.remoteResults.count, before = network.searches.count
+        c.collectionView.scroll(NSPoint(x: 0, y: c.collectionView.frame.height))
+        NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: c.galleryScrollForTesting.contentView)
+        let paged = await eventually { network.searches.count > before && c.remoteResults.count > shown }
+        XCTAssertTrue(paged)
+        XCTAssertEqual(Set(network.searches.map { value($0, "atleast") }), ["2880x1800"])
+        c.search(nil)
+        let applied = await eventually { network.searches.contains { value($0, "atleast") == "1920x1080" } }
+        XCTAssertTrue(applied)
+        XCTAssertEqual(value(network.searches.first { value($0, "atleast") == "1920x1080" }, "page"), "1")
+        let settled = await eventually { c.searchTask != nil && c.pendingSearchLabel.isHidden }
+        XCTAssertTrue(settled)
+    }
+
+    // Leaving Discover and coming back keeps its results and their description without searching again.
+    @MainActor
+    func testSwitchingSourcesKeepsDiscoverResultsAndTheirDescription() async throws {
+        let network = Batch2Network()
+        let (c, window, _) = try await batch2Controller(network)
+        c.showDiscover(nil)
+        await pause(0.3)
+        c.searchField.stringValue = "forest"
+        c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+        let results = c.remoteResults, before = network.searches.count
+        c.showFavorites(nil)
+        c.showDiscover(nil)
+        await pause(0.3)
+        XCTAssertEqual(network.searches.count, before)
+        XCTAssertEqual(c.remoteResults, results)
+        XCTAssertEqual(c.searchField.stringValue, "forest")
+        XCTAssertTrue(window.subtitle.contains("“landscape”"), window.subtitle)
+        XCTAssertEqual(c.pendingSearchLabel.stringValue, "Showing “landscape”")
+        XCTAssertFalse(c.pendingSearchLabel.isHiddenOrHasHiddenAncestor)
+    }
+
+    // Filters apply at once, together with any edited text, and the results then describe exactly that request.
+    @MainActor
+    func testFilterChangeSearchesImmediatelyWithTheVisibleControls() async throws {
+        let network = Batch2Network()
+        let (c, window, _) = try await batch2Controller(network)
+        c.showDiscover(nil)
+        await pause(0.3)
+        c.searchField.stringValue = "forest"
+        c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+        c.categoryPopUp.selectItem(at: WallhavenCategory.allCases.firstIndex(of: .general)!)
+        NSApp.sendAction(try XCTUnwrap(c.categoryPopUp.action), to: c.categoryPopUp.target, from: c.categoryPopUp)
+        let applied = await eventually { window.subtitle.contains("“forest”") }
+        XCTAssertTrue(applied, window.subtitle)
+        let first = try XCTUnwrap(network.searches.first { value($0, "categories") == "100" })
+        XCTAssertEqual(value(first, "q"), "forest")
+        XCTAssertEqual(value(first, "page"), "1")
+        XCTAssertEqual(c.remoteResults.first?.wallpaperID, "cmp169")
+        XCTAssertTrue(c.pendingSearchLabel.isHidden)
+        XCTAssertTrue(network.searches.allSatisfy { value($0, "categories") == "100" && value($0, "q") == "forest" })
+    }
+
+    // Search is Wallhaven's: typing outside Discover says where Return will take it, and gallery
+    // cells describe their wallpaper's size and orientation, not only its opaque ID.
+    @MainActor
+    func testSearchScopeAndGalleryDescriptionsAreExplicit() async throws {
+        let network = Batch2Network()
+        let (c, window, _) = try await batch2Controller(network)
+        c.showDiscover(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let portrait = try XCTUnwrap(c.collectionView.item(at: IndexPath(item: 3, section: 0)))
+        XCTAssertEqual(portrait.view.accessibilityLabel(), "cmpport")
+        XCTAssertEqual(portrait.view.accessibilityHelp(), "Wallhaven cmpport — 1200 × 2133, portrait")
+        XCTAssertEqual(c.collectionView.item(at: IndexPath(item: 2, section: 0))?.view.accessibilityHelp(), "Wallhaven cmpsq — 2000 × 2000, square")
+        c.showFavorites(nil)
+        c.searchField.stringValue = "forest"
+        c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+        XCTAssertEqual(c.statusLabel.stringValue, "Press Return to search Wallhaven in Discover.")
+        XCTAssertEqual(c.state.currentSource, .favorites, "Typing never filters the library")
+        XCTAssertTrue(window.subtitle.hasSuffix("wallpapers"))
+    }
+
+    // Wallhaven has no relevance order without search text; the request asks for this month's top
+    // wallpapers, and that is what the results say they are.
+    @MainActor
+    func testEmptyQueryRelevanceIsPresentedAsTheTopListItRequests() async throws {
+        let network = Batch2Network()
+        let (c, window, _) = try await batch2Controller(network) { state in
+            state.wallhavenSearch.query = ""
+            state.wallhavenSearch.sorting = .relevance
+        }
+        c.showDiscover(nil)
+        c.search(nil)
+        let done = await eventually { network.searches.count >= 1 && c.searchTask != nil && !window.subtitle.isEmpty }
+        XCTAssertTrue(done)
+        await pause(0.3)
+        XCTAssertEqual(value(network.searches.first, "sorting"), "toplist")
+        XCTAssertEqual(value(network.searches.first, "topRange"), "1M")
+        XCTAssertTrue(window.subtitle.contains("Top This Month"), window.subtitle)
+    }
+
+    // ⌘F elsewhere opens Discover with the draft search, without searching again.
+    @MainActor
+    func testFindFromAnotherSourceOpensDiscoverWithTheDraftSearch() async throws {
+        let network = Batch2Network()
+        let (c, _, _) = try await batch2Controller(network)
+        XCTAssertEqual(c.state.currentSource, .favorites)
+        c.focusSearch(nil)
+        XCTAssertEqual(c.state.currentSource, .discover)
+        XCTAssertEqual(c.searchField.stringValue, "landscape")
+        await pause(0.3)
+        XCTAssertTrue(network.searches.isEmpty)
+        XCTAssertFalse(c.remoteResults.isEmpty)
+    }
+
+    // MARK: Batch 2 repairs
+
+    // Malformed throttle headers fall back to the default wait instead of an infinite, negative or absurd
+    // one; valid seconds, HTTP dates and reset timestamps keep their meaning, and every message formats.
+    func testMalformedThrottleHeadersFallBackToTheDefaultWait() async throws {
+        let url = URL(string: "https://wallhaven.cc/api/v1/search")!
+        func throttle(_ headers: [String: String]) async throws -> (delay: TimeInterval, messages: [String]) {
+            let response = HTTPURLResponse(url: url, statusCode: 429, httpVersion: nil, headerFields: headers)!
+            let provider = WallhavenProvider(client: SequencedNetworkClient(responses: [(Data(), response)]))
+            do { _ = try await provider.search(options: WallhavenSearchOptions(), page: 1) }
+            catch RemoteProviderError.rateLimited(let delay?) {
+                // The provider's own backoff then reports the remaining wait, which must format too.
+                do { _ = try await provider.search(options: WallhavenSearchOptions(), page: 2) }
+                catch { return (delay, [RemoteProviderError.rateLimited(retryAfter: delay).localizedDescription, error.localizedDescription]) }
+            }
+            XCTFail("Expected a held rate limit for \(headers)")
+            return (0, [])
+        }
+        func httpDate(_ date: Date) -> String {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss 'GMT'"
+            return formatter.string(from: date)
+        }
+        let malformed: [[String: String]] = ["inf", "-inf", "nan", "1e309", "-5", "soon", "", "99999999", "Fri, 31 Dec 9999 23:59:59 GMT"]
+            .map { ["Retry-After": $0] } + [[:], ["x-ratelimit-reset": "inf"], ["x-ratelimit-reset": "1e309"], ["ratelimit-reset": "nan"]]
+        for headers in malformed {
+            let (delay, messages) = try await throttle(headers)
+            XCTAssertEqual(delay, 60, "\(headers)")
+            XCTAssertEqual(messages.count, 2)
+            messages.forEach { XCTAssertTrue($0.contains("about 60 seconds") || $0.contains("about 59 seconds"), "\(headers): \($0)") }
+        }
+        let valid: [([String: String], ClosedRange<TimeInterval>)] = [
+            (["Retry-After": "7"], 7...7),
+            (["Retry-After": httpDate(Date().addingTimeInterval(30))], 28...30),
+            (["Retry-After": "Thu, 01 Jan 1970 00:00:00 GMT"], 1...1),
+            (["x-ratelimit-reset": String(Int(Date().timeIntervalSince1970) + 20)], 18...20),
+        ]
+        for (headers, range) in valid {
+            let delay = try await throttle(headers).delay
+            XCTAssertTrue(range.contains(delay), "\(headers): \(delay)")
+        }
+        for delay in [TimeInterval.infinity, -.infinity, .nan, 1e300, -1e300] {
+            XCTAssertNotNil(RemoteProviderError.rateLimited(retryAfter: delay).errorDescription)
+        }
+    }
+
+    // An exhausted quota with a malformed reset never suppresses requests; a valid throttle holds back only
+    // its own origin and lets the next request through once it has passed.
+    @MainActor
+    func testMalformedResetNeverSuppressesAndAValidThrottleRecovers() async throws {
+        let url = URL(string: "https://wallhaven.cc/api/v1/search")!
+        let ok = try fixtureData(named: "wallhaven-search")
+        for reset in ["inf", "1e309", "nan", "-inf"] {
+            let exhausted = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+                                            headerFields: ["x-ratelimit-remaining": "0", "x-ratelimit-reset": reset])!
+            let client = SequencedNetworkClient(responses: [(ok, exhausted)])
+            let provider = WallhavenProvider(client: client, cacheLifetime: 0)
+            let page = try await provider.search(options: WallhavenSearchOptions(), page: 1)
+            XCTAssertNil(page.rateLimit.resetDate, reset)
+            _ = try await provider.search(options: WallhavenSearchOptions(), page: 1)
+            XCTAssertEqual(client.requestCount, 2, reset)
+        }
+
+        let limited = HTTPURLResponse(url: url, statusCode: 429, httpVersion: nil, headerFields: ["Retry-After": "1"])!
+        let success = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        let client = SequencedNetworkClient(responses: [(Data(), limited), (ok, success)])
+        let provider = WallhavenProvider(client: client, cacheLifetime: 0)
+        for _ in 0..<2 {
+            do { _ = try await provider.search(options: WallhavenSearchOptions(), page: 1); XCTFail("Expected the valid throttle") }
+            catch RemoteProviderError.rateLimited { }
+        }
+        XCTAssertEqual(client.requestCount, 1, "A valid Retry-After holds the API back")
+        try await Task.sleep(nanoseconds: 1_100_000_000)
+        _ = try await provider.search(options: WallhavenSearchOptions(), page: 1)
+        XCTAssertEqual(client.requestCount, 2, "and lets it through once it has passed")
+
+        // A malformed original-download throttle uses the default wait for originals only.
+        let network = Batch2Network()
+        network.downloadStatus = 429
+        network.downloadHeaders = ["Retry-After": "inf"]
+        let downloads = WallhavenProvider(client: network, cacheLifetime: 0)
+        for _ in 0..<2 {
+            do { _ = try await downloads.downloadOriginal(for: remoteReference(id: "abc")); XCTFail("Expected a rate limit") }
+            catch RemoteProviderError.rateLimited(let delay) { XCTAssertLessThanOrEqual(delay ?? .infinity, 60) }
+        }
+        XCTAssertEqual(network.downloads.count, 1)
+        _ = try await downloads.search(options: WallhavenSearchOptions(), page: 1)
+        XCTAssertEqual(network.searches.count, 1, "The API is a separate origin")
+    }
+
+    // Closing the preview during the metadata dwell starts no request; reopening still fetches what's
+    // missing, fetched details stay, and only the current selection in a visible preview is eligible.
+    @MainActor
+    func testClosingThePreviewDuringTheDwellStartsNoDetailRequest() async throws {
+        let network = Batch2Network()
+        network.details = Dictionary(uniqueKeysWithValues: CompositionFixtures.shapes.map {
+            ($0.id, CompositionFixtures.listing(id: $0.id, width: $0.width, height: $0.height, uploader: "u", tags: ["t"]))
+        })
+        let (c, _, _) = try await batch2Controller(network)
+        c.showDiscover(nil)
+        let first = c.previewTitleLabel.stringValue
+        c.toggleViewer(nil)
+        await pause(0.1)
+        c.toggleViewer(nil)
+        await pause(0.6)
+        XCTAssertEqual(network.detailRequests, [], "Closed before the dwell ended")
+
+        c.toggleViewer(nil)
+        let loaded = await eventually { c.previewMetadataLabel.stringValue.contains("by u") }
+        XCTAssertTrue(loaded, "Reopening fetches the details the cancelled request missed")
+        XCTAssertEqual(network.detailRequests, [first])
+        c.toggleViewer(nil)
+        c.toggleViewer(nil)
+        await pause(0.6)
+        XCTAssertEqual(network.detailRequests, [first], "Fetched details aren't requested again")
+        XCTAssertTrue(c.previewMetadataLabel.stringValue.contains("by u"))
+
+        c.nextWallpaper(nil)
+        c.nextWallpaper(nil)
+        let current = c.previewTitleLabel.stringValue
+        _ = await eventually { network.detailRequests.count > 1 }
+        await pause(0.4)
+        XCTAssertEqual(network.detailRequests, [first, current], "Only the selection that settled is requested")
+
+        c.nextWallpaper(nil)
+        c.showFavorites(nil)
+        await pause(0.6)
+        XCTAssertEqual(network.detailRequests, [first, current], "A preview left for another source starts nothing")
+    }
+
+    // A display reconfiguration that changes the derived minimum keeps the results, marks them as the
+    // previous display size's and offers Update Results without searching; paging keeps their minimum.
+    // A reconfiguration that leaves the minimum alone marks nothing.
+    @MainActor
+    func testDisplayRefreshThatChangesTheMinimumMarksResultsAsPrevious() async throws {
+        let network = Batch2Network()
+        network.lastPage = 30
+        let screen = SizedScreen(601, NSSize(width: 1440, height: 900), scale: 2)
+        let (c, _, _) = try await batch2Controller(network, screens: [screen]) { state in
+            state.selectedDisplayID = "601"
+            state.wallhavenSearch.usesDisplayMinimum = true
+            state.wallhavenSearch.minimumWidth = 2880
+            state.wallhavenSearch.minimumHeight = 1800
+        }
+        c.showDiscover(nil)
+        await pause(0.3)
+        let results = c.remoteResults, draft = c.state.wallhavenSearch
+        c.refreshDisplays()
+        XCTAssertTrue(c.pendingSearchLabel.isHidden, "The same display leaves the results current")
+        XCTAssertTrue(c.updateResultsButton.isHidden)
+
+        screen.size = NSSize(width: 3840, height: 2160)
+        screen.scale = 1
+        c.refreshDisplays()
+        XCTAssertEqual(c.state.wallhavenSearch.minimumResolution, "3840x2160")
+        XCTAssertEqual(c.pendingSearchLabel.stringValue, "Showing results for the previous display size")
+        XCTAssertFalse(c.pendingSearchLabel.isHidden)
+        XCTAssertFalse(c.updateResultsButton.isHidden)
+        XCTAssertEqual(c.remoteResults, results)
+        XCTAssertEqual(c.state.wallhavenSearch.query, draft.query)
+        XCTAssertEqual(c.state.wallhavenSearch.category, draft.category)
+        XCTAssertEqual(c.state.wallhavenSearch.sorting, draft.sorting)
+        await pause(0.3)
+        XCTAssertTrue(network.searches.isEmpty, "A display change doesn't search by itself")
+
+        let shown = c.remoteResults.count
+        c.collectionView.scroll(NSPoint(x: 0, y: c.collectionView.frame.height))
+        NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: c.galleryScrollForTesting.contentView)
+        let paged = await eventually { !network.searches.isEmpty && c.remoteResults.count > shown }
+        XCTAssertTrue(paged)
+        XCTAssertEqual(Set(network.searches.map { value($0, "atleast") }), ["2880x1800"])
+        c.search(nil)
+        let applied = await eventually { network.searches.contains { value($0, "atleast") == "3840x2160" } }
+        XCTAssertTrue(applied)
+        let settled = await eventually { c.searchTask != nil && c.pendingSearchLabel.isHidden }
+        XCTAssertTrue(settled)
+    }
+}
+
+
+extension WallpierTests {
+    // Batch 2 captures: preview sources and notices for difficult shapes, and Discover's pending state,
+    // in light and dark and at the minimum window size. Written only when WALLPIER_CAPTURE_DIR is set.
+    @MainActor
+    func testCaptureBatch2Scenarios() async throws {
+        try XCTSkipIf(Self.captureDirectory == nil, "Set WALLPIER_CAPTURE_DIR to write captures")
+        CompositionFixtures.framesEdges = true
+        defer { CompositionFixtures.framesEdges = false }
+        for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+            let network = Batch2Network(), thumbnails = CompositionThumbnails()
+            var items = CompositionFixtures.shapeListings()
+            items.append(CompositionFixtures.listing(id: "cmpmiss", width: 3440, height: 1440, original: false))
+            let (c, window, root) = try await batch2Controller(network, thumbnails, items: items)
+            window.appearance = NSAppearance(named: appearance)
+            try CompositionFixtures.writeOriginal(CGSize(width: 2560, height: 1600), to: root.appendingPathComponent("Originals")
+                .appendingPathComponent(RemoteWallpaperCache.filename(for: c.remoteResults[1])))
+            func show(_ id: String, _ scaling: ScalingMode, _ name: String) async {
+                for _ in 0..<items.count where c.previewTitleLabel.stringValue != id { c.nextWallpaper(nil) }
+                c.scalingPopUp.selectItem(at: ScalingMode.allCases.firstIndex(of: scaling)!)
+                c.scalingSelectionChanged()
+                _ = await eventually { c.stageView.image != nil }
+                await pause(0.3)
+                captureWindow(window, named: "b2-\(name)-\(suffix)")
+            }
+            c.showDiscover(nil)
+            c.toggleViewer(nil)
+            await show("cmp169", .fill, "01-preview-16x9-large-thumbnail")
+            await show("cmpport", .fit, "02-preview-portrait-fit")
+            await show("cmp329", .fit, "03-preview-32x9-fit")
+            await show("cmp329", .fill, "04-preview-32x9-fill")
+            await show("cmpsq", .center, "05-preview-square-center")
+            await show("cmpmiss", .fit, "06-preview-21x9-cropped-fallback")
+            await show("cmp1610", .fit, "07-preview-16x10-cached-original")
+            c.toggleViewer(nil)
+            c.searchField.stringValue = "forest"
+            c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+            captureWindow(window, named: "b2-08-discover-pending-query-\(suffix)")
+            window.setFrame(NSRect(origin: window.frame.origin, size: window.minSize), display: true)
+            captureWindow(window, named: "b2-09-discover-pending-minimum-\(suffix)")
+            c.toggleViewer(nil)
+            await show("cmp329", .fit, "10-preview-32x9-minimum")
+            c.toggleViewer(nil)
+            window.setFrame(NSRect(origin: window.frame.origin, size: NSSize(width: 1120, height: 720)), display: true)
+            c.searchField.stringValue = ""
+            c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+            c.search(nil)
+            _ = await eventually { window.subtitle.hasPrefix("Top This Month") }
+            await pause(0.3)
+            captureWindow(window, named: "b2-11-discover-empty-query-top-list-\(suffix)")
+            c.showFavorites(nil)
+            c.searchField.stringValue = "forest"
+            c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+            captureWindow(window, named: "b2-12-search-scope-outside-discover-\(suffix)")
+        }
     }
 }

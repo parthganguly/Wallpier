@@ -1,9 +1,10 @@
 import AppKit
 import ImageIO
 
-/// Shows a wallpaper the way the desktop will: inside a frame with the target display's
+/// Estimates how the desktop will show a wallpaper: inside a frame with the target display's
 /// proportions, scaled by the chosen mode. The image may be a downsampled preview, so
-/// geometry always comes from the original's pixel size, never the preview bitmap's.
+/// geometry always comes from the original's pixel size, never the preview bitmap's; the
+/// preview must therefore hold the whole original (see `WallpaperReference.remotePreview`).
 final class DesktopPreviewView: NSView {
     static let desktopColor = NSColor(calibratedWhite: 0.11, alpha: 1)
 
@@ -66,7 +67,8 @@ final class DesktopPreviewView: NSView {
         outline.stroke()
     }
 
-    /// Previews can be cropped (Wallhaven's are 3:2); centre-crop them to the original's shape.
+    /// Trims a preview's rounding difference from the original's shape. A thumbnail that was cropped
+    /// (Wallhaven's 16:9 `thumbs.large` of another shape) can't be restored this way; it is labelled instead.
     static func cropRect(of size: CGSize, toAspectOf target: CGSize) -> CGRect {
         guard size.width > 0, size.height > 0, target.width > 0, target.height > 0 else { return CGRect(origin: .zero, size: size) }
         let aspect = target.width / target.height

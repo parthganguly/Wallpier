@@ -119,6 +119,14 @@ struct WallhavenSearchOptions: Codable, Equatable {
         return "\(minimumWidth)x\(minimumHeight)"
     }
 
+    var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// Wallhaven returns nothing for relevance without search text, so that request asks for this month's top list.
+    var effectiveSorting: WallhavenSorting { trimmedQuery.isEmpty && sorting == .relevance ? .toplist : sorting }
+
+    /// What results for these options are, in a few words: “forest”, or Top This Month.
+    var resultsDescription: String { trimmedQuery.isEmpty ? effectiveSorting.displayName : "“\(trimmedQuery)”" }
+
     private enum CodingKeys: String, CodingKey {
         case query, category, minimumWidth, minimumHeight, usesDisplayMinimum
         case aspectRatio, sorting
@@ -166,10 +174,45 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     var uploader: String?
     var tags: [String]
     var cachedLocalPath: String?
+    /// Wallhaven's `thumbs.original`: small, but in the original's proportions. Absent from older saved references.
+    var uncroppedPreviewURL: URL? = nil
 
     var id: String { identityKey }
     var identityKey: String { "\(providerIdentifier):\(wallpaperID)" }
     var resolution: String { "\(width)×\(height)" }
+
+    var orientation: String { width == height ? "square" : width > height ? "landscape" : "portrait" }
+
+    /// The remote image the desktop preview draws until an original is cached, and how faithful it is.
+    /// `previewURL` (Wallhaven's `thumbs.large`) is a 432×243 centre crop, so it holds the whole picture
+    /// only for 16:9 originals (within a pixel of rounding); other shapes need the uncropped thumbnail.
+    var remotePreview: (url: URL, fidelity: PreviewFidelity) {
+        guard width > 0, height > 0 else { return (previewURL, .croppedThumbnail) }
+        if abs(Double(height) * 432 / Double(width) - 243) <= 1 { return (previewURL, .lowResolution) }
+        if let uncroppedPreviewURL { return (uncroppedPreviewURL, .lowResolution) }
+        return (previewURL, .croppedThumbnail)
+    }
+}
+
+/// How faithfully the desktop preview's image represents the original; a better one may replace a
+/// worse one for the same wallpaper, never the reverse.
+enum PreviewFidelity: Int, Comparable {
+    case none, croppedThumbnail, lowResolution, original
+
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    /// The caption under the preview; nil when the picture is drawn from the original's own pixels.
+    var notice: (symbol: String, text: String, help: String)? {
+        switch self {
+        case .none, .original: return nil
+        case .lowResolution:
+            return ("photo", "Low-resolution preview; detail may differ.",
+                    "The framing follows the original's proportions, but this is a small Wallhaven thumbnail, so sharpness and fine detail can differ. Set Wallpaper downloads and uses the full original.")
+        case .croppedThumbnail:
+            return ("crop", "Cropped thumbnail; framing is approximate and detail may differ.",
+                    "Wallhaven's larger thumbnail is cut to 16:9, so parts of this wallpaper are missing here. Set Wallpaper downloads and uses the full original.")
+        }
+    }
 }
 
 struct WallpaperCollection: Codable, Equatable, Identifiable {

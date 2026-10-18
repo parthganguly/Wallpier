@@ -23,6 +23,9 @@ enum RemoteProviderError: Error, Equatable, LocalizedError {
     case rateLimited(retryAfter: TimeInterval?)
     case originalUnavailable
 
+    /// The longest wait a throttle header may ask for; longer, non-finite or negative values are malformed.
+    static let maximumRetryDelay: TimeInterval = 3600
+
     var errorDescription: String? {
         switch self {
         case .invalidResponse:
@@ -32,8 +35,9 @@ enum RemoteProviderError: Error, Equatable, LocalizedError {
         case .httpStatus(let status):
             return "The wallpaper source returned HTTP \(status)."
         case .rateLimited(let retryAfter):
-            if let retryAfter {
-                return "Wallhaven is temporarily rate-limiting requests. Try again in about \(max(1, Int(retryAfter.rounded()))) seconds."
+            if let retryAfter, retryAfter.isFinite {
+                let seconds = Int(min(max(1, retryAfter), Self.maximumRetryDelay).rounded())
+                return "Wallhaven is temporarily rate-limiting requests. Try again in about \(seconds) seconds."
             }
             return "Wallhaven is temporarily rate-limiting requests. Try again shortly."
         case .originalUnavailable:
