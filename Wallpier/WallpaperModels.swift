@@ -386,6 +386,23 @@ struct WallpaperState: Codable, Equatable {
     }
 }
 
+/// Gallery thumbnails crop every wallpaper to the display's shape, so captions name the shapes that
+/// crop noticeably. Ordinary landscape (3:2 to 16:9 and a little wider) needs no word.
+enum WallpaperShape {
+    static func name(width: Int, height: Int) -> String? {
+        guard width > 0, height > 0 else { return nil }
+        let ratio = Double(width) / Double(height)
+        if ratio < 0.95 { return "Portrait" }
+        if ratio <= 1.05 { return "Square" }
+        return ratio >= 2 ? "Ultrawide" : nil
+    }
+
+    /// "3840 × 2160", with the shape's name when it has one.
+    static func summary(width: Int, height: Int) -> String {
+        ["\(width) × \(height)", name(width: width, height: height)].compactMap { $0 }.joined(separator: " · ")
+    }
+}
+
 enum WallpaperNavigation {
     static func index(after currentIndex: Int?, direction: Int, count: Int) -> Int? {
         guard count > 0 else { return nil }

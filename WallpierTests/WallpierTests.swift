@@ -1533,7 +1533,9 @@ final class CaptureScreen: NSScreen {
 
 /// Behaves as the key window without the test app having to activate.
 final class KeyTestWindow: NSWindow {
-    override var isKeyWindow: Bool { true }
+    /// Tests may set this false to model the window losing key status, then post the matching notification.
+    var isKey = true
+    override var isKeyWindow: Bool { isKey }
 }
 
 /// Requests never answer until cancelled: a search that is still loading.
@@ -2043,28 +2045,80 @@ extension WallpierTests {
         XCTAssertTrue(app.desktop.calls.isEmpty)
     }
 
-    // D2: a blank click keeps the ring and the Set target together.
+    // D2: a blank click keeps the ring and the Set target together, and arrow keys then follow AppKit's
+    // own navigation over the gallery as actually laid out: Right moves within a row and stops at its end,
+    // Down moves one row. Expectations come from the laid-out columns, exercised at two, three and four or
+    // more of them (window width and thumbnail size are set directly, so no preference is written), in two
+    // sources so navigation is also checked after a source change. Down is only asserted into complete rows.
     @MainActor
     func testBlankGalleryClickKeepsTheVisibleSetTarget() throws {
         let app = try activeApp()
         let c = app.controller
-        c.showFavorites(nil)
-        app.select(1)
-        c.window?.contentView?.layoutSubtreeIfNeeded()
-        let scroll = c.galleryScrollForTesting
-        let visible = scroll.documentVisibleRect
-        let blank = NSPoint(x: visible.midX, y: visible.maxY - 6)   // flipped: just above the bottom edge
-        XCTAssertNil(c.collectionView.indexPathForItem(at: blank), "The click point must be empty gallery space")
-        app.click(c.collectionView.convert(blank, to: nil))
-        XCTAssertTrue(c.window?.firstResponder === c.collectionView, "The click reached the gallery")
-        XCTAssertEqual(c.collectionView.selectionIndexPaths, [IndexPath(item: 1, section: 0)])
-        assertHonestSelection(c, "after blank click")
-        XCTAssertTrue(c.setWallpaperButton.isEnabled)
-        // Arrow keys still move the one selection.
-        app.press(124, expecting: String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)))
-        XCTAssertEqual(c.collectionView.selectionIndexPaths, [IndexPath(item: 2, section: 0)])
-        XCTAssertEqual(c.state.selectedRemoteIdentity, c.state.favorites[2].identityKey)
-        assertHonestSelection(c, "after arrow")
+        let view = c.collectionView
+        let right = String(Character(UnicodeScalar(NSRightArrowFunctionKey)!))
+        let down = String(Character(UnicodeScalar(NSDownArrowFunctionKey)!))
+        var columnCounts: [Int] = []
+        let configurations = [(app.window.minSize.width, GalleryLayout.thumbnailWidths[2]),
+                              (app.window.minSize.width, GalleryLayout.thumbnailWidths[1]),
+                              (CGFloat(1120), GalleryLayout.thumbnailWidths[0])]
+        for (width, thumbnail) in configurations {
+            app.window.setFrame(NSRect(origin: app.window.frame.origin, size: NSSize(width: width, height: 720)), display: true)
+            c.galleryLayoutForTesting.targetWidth = thumbnail
+            for source in [LibrarySource.favorites, .discover] {
+                if source == .favorites { c.showFavorites(nil) } else { c.showDiscover(nil) }
+                c.window?.contentView?.layoutSubtreeIfNeeded()
+                let identities = source == .favorites ? c.state.favorites.map(\.identityKey) : c.remoteResults.map(\.identityKey)
+                let count = view.numberOfItems(inSection: 0)
+                let firstRow = view.frameForItem(at: 0).minY
+                let columns = (0..<count).filter { view.frameForItem(at: $0).minY == firstRow }.count
+                let context = "\(columns) columns in \(source.rawValue) (window \(Int(app.window.frame.width)) pt, thumbnails \(Int(thumbnail)) pt)"
+                columnCounts.append(columns)
+                XCTAssertGreaterThanOrEqual(columns, 2, context)
+                view.scrollToItems(at: [IndexPath(item: 0, section: 0)], scrollPosition: .top)
+                app.select(1)
+                func expectSelection(_ index: Int, _ step: String, file: StaticString = #filePath, line: UInt = #line) {
+                    XCTAssertEqual(view.selectionIndexPaths, [IndexPath(item: index, section: 0)], "\(context): \(step)", file: file, line: line)
+                    XCTAssertEqual(c.state.selectedRemoteIdentity, identities[index], "\(context): \(step)", file: file, line: line)
+                    assertHonestSelection(c, "\(context): \(step)", file: file, line: line)
+                }
+
+                // The gutter between the first two pictures is empty space at every column count.
+                let first = view.frameForItem(at: 0), second = view.frameForItem(at: 1)
+                let blank = NSPoint(x: (first.maxX + second.minX) / 2, y: first.midY)
+                XCTAssertNil(view.indexPathForItem(at: blank), "\(context): the click point must be empty gallery space")
+                app.click(view.convert(blank, to: nil))
+                XCTAssertTrue(c.window?.firstResponder === view, "\(context): the click reached the gallery")
+                expectSelection(1, "blank click keeps the Set target")
+                XCTAssertTrue(c.setWallpaperButton.isEnabled, context)
+
+                // Right moves within the first row and stops at its end (item 1 ends a two-column row).
+                app.press(124, expecting: right)
+                let afterRight = columns > 2 ? 2 : 1
+                expectSelection(afterRight, "Right")
+
+                // Down moves exactly one row, when that row is complete.
+                let below = afterRight + columns
+                if (below / columns + 1) * columns <= count {
+                    app.press(125, expecting: down)
+                    expectSelection(below, "Down")
+                }
+
+                // The ring is accent exactly while keys reach the gallery (first responder in the key window) and
+                // stays, in gray, otherwise. Key status belongs to the window server and can move mid-run, so it
+                // is read rather than assumed; testSelectionRingIsEmphasizedOnlyWhileTheGalleryHasKeyboardFocus
+                // drives both states deterministically.
+                let ring = { (view.selectionIndexPaths.first.flatMap { view.item(at: $0) }) as? WallpaperCollectionViewItem }
+                XCTAssertEqual(ring()?.isEmphasized, app.window.isKeyWindow, "\(context): gallery focused, key \(app.window.isKeyWindow)")
+                app.focus(c.searchField)
+                XCTAssertEqual(ring()?.isEmphasized, false, "\(context): search field focused")
+                XCTAssertEqual(ring()?.showsSelectionRing, true, context)
+                app.focus(view)
+                XCTAssertEqual(ring()?.isEmphasized, app.window.isKeyWindow, "\(context): gallery refocused, key \(app.window.isKeyWindow)")
+            }
+        }
+        XCTAssertTrue(columnCounts.contains(2), "Exercised \(columnCounts)")
+        XCTAssertTrue(columnCounts.contains(3), "Exercised \(columnCounts)")
+        XCTAssertTrue(columnCounts.contains { $0 >= 4 }, "Exercised \(columnCounts)")
     }
 
     @MainActor
@@ -4087,5 +4141,442 @@ extension WallpierTests {
         let relaunched = h.relaunch()
         XCTAssertEqual(relaunched.displayPopUp.indexOfSelectedItem, 1)
         XCTAssertEqual(relaunched.scalingPopUp.indexOfSelectedItem, 1)
+    }
+}
+
+// MARK: - Visual craft captures
+//
+// One offline fixture for matched before/after captures: photographic stand-ins in every shape the
+// gallery meets (16:9 to 32:9, square, portrait), a cached original, long and short names, empty,
+// loading and offline states, at the default, minimum and a large window size, in light and dark.
+// Written only when WALLPIER_CAPTURE_DIR is set; nothing reaches the network or the desktop.
+
+enum CraftFixtures {
+    static let shapes: [(Int, Int)] = [(3840, 2160), (2560, 1600), (3440, 1440), (1200, 2133), (5120, 2880), (2000, 2000), (2880, 1800),
+                                       (5120, 1440), (3840, 2160), (3000, 2000), (2560, 1440), (1440, 2560), (3840, 2400), (1920, 1080)]
+    static let tags = [["sunset", "mountains"], ["lake", "morning"], ["night", "stars"], ["desert", "dunes"], ["coast", "mist"],
+                       ["dusk", "valley", "long exposure", "patagonia", "torres del paine", "golden hour"], ["moonrise"], ["snow", "minimal"],
+                       ["twilight", "peaks"], ["meadow", "spring"], ["canyon"], ["ocean", "blue hour"], ["aurora"], ["fog", "forest"]]
+
+    static func references() -> [WallpaperReference] {
+        shapes.enumerated().map { index, shape in
+            let id = String(format: "cr%02d", index + 1)
+            return WallpaperReference(
+                providerIdentifier: "wallhaven", wallpaperID: id,
+                sourcePageURL: URL(string: "https://wallhaven.cc/w/\(id)")!,
+                originalURL: URL(string: "https://w.wallhaven.cc/full/cr/wallhaven-\(id).jpg")!,
+                previewURL: URL(string: "https://th.wallhaven.cc/lg/cr/\(id).jpg")!,
+                thumbnailURL: URL(string: "https://th.wallhaven.cc/small/cr/\(id).jpg")!,
+                width: shape.0, height: shape.1,
+                uploader: ["northlight", "aleksandra.wisniewska-kowalczyk", "m.k.", "atlas_studio"][index % 4],
+                tags: tags[index], cachedLocalPath: nil,
+                uncroppedPreviewURL: URL(string: "https://th.wallhaven.cc/orig/cr/\(id).jpg")!)
+        }
+    }
+
+    static func png(index: Int, size: NSSize) -> Data {
+        let image = CaptureFixtures.image(index: index, size: size)
+        return NSBitmapImageRep(cgImage: image.cgImage(forProposedRect: nil, context: nil, hints: nil)!).representation(using: .png, properties: [:])!
+    }
+}
+
+/// Serves each thumbnail kind in the proportions Wallhaven serves it, drawn as the fixture's landscape.
+final class CraftThumbnails: RemoteThumbnailProvider {
+    override func requestThumbnail(for url: URL, maximumPixelSize: Int = 420, completion: @escaping (NSImage?) -> Void) {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard let number = Int(name.dropFirst(2)), CraftFixtures.shapes.indices.contains(number - 1) else { return completion(nil) }
+        let shape = CraftFixtures.shapes[number - 1]
+        let canvas = CompositionFixtures.canvas(for: url, original: CGSize(width: shape.0, height: shape.1))
+        completion(CaptureFixtures.image(index: number - 1, size: canvas))
+    }
+    override func reset() {}
+}
+
+extension WallpierTests {
+    func testShapeNamesOnlyTheShapesThatThumbnailsCrop() {
+        XCTAssertEqual(WallpaperShape.summary(width: 3840, height: 2160), "3840 × 2160")
+        XCTAssertEqual(WallpaperShape.summary(width: 2560, height: 1600), "2560 × 1600")
+        XCTAssertEqual(WallpaperShape.summary(width: 1200, height: 2133), "1200 × 2133 · Portrait")
+        XCTAssertEqual(WallpaperShape.summary(width: 2000, height: 2000), "2000 × 2000 · Square")
+        XCTAssertEqual(WallpaperShape.summary(width: 3440, height: 1440), "3440 × 1440 · Ultrawide")
+        XCTAssertEqual(WallpaperShape.summary(width: 5120, height: 1440), "5120 × 1440 · Ultrawide")
+        XCTAssertNil(WallpaperShape.name(width: 0, height: 1080))
+    }
+
+    /// The ring is accent-colored only while arrow keys reach the gallery; elsewhere it stays, in gray.
+    @MainActor
+    func testSelectionRingIsEmphasizedOnlyWhileTheGalleryHasKeyboardFocus() throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                windowClass: KeyTestWindow.self) { _ in }
+        defer { window.close() }
+        c.showFavorites(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        func selected() -> WallpaperCollectionViewItem? {
+            c.collectionView.selectionIndexPaths.first.flatMap { c.collectionView.item(at: $0) as? WallpaperCollectionViewItem }
+        }
+        XCTAssertTrue(window.makeFirstResponder(c.collectionView))
+        XCTAssertEqual(selected()?.isEmphasized, true)
+        XCTAssertEqual(selected()?.showsSelectionRing, true)
+        XCTAssertTrue(window.makeFirstResponder(c.searchField))
+        XCTAssertEqual(selected()?.isEmphasized, false)
+        XCTAssertEqual(selected()?.showsSelectionRing, true, "Losing focus never hides which wallpaper Set applies")
+        c.showCollections(nil)  // Reloads the gallery with new, reused cells while focus stays in the search field.
+        window.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertEqual(selected()?.isEmphasized, false, "Reused cells take the gallery's current focus state")
+        XCTAssertTrue(window.makeFirstResponder(c.collectionView))
+        XCTAssertEqual(selected()?.isEmphasized, true)
+        // An inactive window: the gallery keeps first responder, but keys go to another window.
+        let keyWindow = try XCTUnwrap(window as? KeyTestWindow)
+        keyWindow.isKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        XCTAssertEqual(selected()?.isEmphasized, false)
+        XCTAssertEqual(selected()?.showsSelectionRing, true)
+        keyWindow.isKey = true
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        XCTAssertEqual(selected()?.isEmphasized, true)
+    }
+}
+
+/// A tiling window manager (an Accessibility client) may resize standard windows as they appear, which
+/// would make matched captures differ in size. Window managers float dialogs, so captures present as one.
+final class FloatingCaptureWindow: NSWindow {
+    override func accessibilitySubrole() -> NSAccessibility.Subrole? { .dialog }
+}
+
+extension WallpierTests {
+    @MainActor
+    func testCaptureVisualCraftScenarios() async throws {
+        try XCTSkipIf(Self.captureDirectory == nil, "Set WALLPIER_CAPTURE_DIR to write captures")
+        let refs = CraftFixtures.references()
+        let page = RemoteSearchPage(wallpapers: refs, currentPage: 1, lastPage: 92, total: 2_196,
+                                    rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil))
+        for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+            let root = try historyTestFolder()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let folder = root.appendingPathComponent("Pictures")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for (index, (name, size)) in [("IMG_20250914_183022_HDR_portrait_edited_edited", NSSize(width: 540, height: 960)),
+                                          ("Torres del Paine at first light", NSSize(width: 960, height: 600)),
+                                          ("dune", NSSize(width: 960, height: 540)),
+                                          ("Lofoten blue hour — final export v12 [approved]", NSSize(width: 1280, height: 360)),
+                                          ("Quiet harbour", NSSize(width: 800, height: 800)),
+                                          ("Kyoto, Arashiyama — bamboo grove", NSSize(width: 960, height: 640))].enumerated() {
+                try CraftFixtures.png(index: index + 3, size: size).write(to: folder.appendingPathComponent("\(name).png"))
+            }
+            let originals = root.appendingPathComponent("Originals")
+            try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+            try CraftFixtures.png(index: 0, size: NSSize(width: 1920, height: 1080))
+                .write(to: originals.appendingPathComponent(RemoteWallpaperCache.filename(for: refs[0])))
+            let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: appearance,
+                                                    windowClass: FloatingCaptureWindow.self, thumbnails: CraftThumbnails(), page: page) { state in
+                state.selectedRemoteIdentity = refs[0].identityKey
+                state.favorites = [1, 3, 5, 6, 9, 11].map { refs[$0] }
+                state.collections = [WallpaperCollection(name: "Evening Light", wallpapers: [0, 4, 7, 8, 2].map { refs[$0] }),
+                                     WallpaperCollection(name: "Long Exposure Studies from Patagonia and Tierra del Fuego", wallpapers: [3, 11, 5].map { refs[$0] }),
+                                     WallpaperCollection(name: "Solo", wallpapers: [refs[12]])]
+                state.selectedCollectionID = state.collections[0].id
+            }
+            defer { window.close() }
+            var size = NSSize(width: 1120, height: 720)
+            func shot(_ name: String) async {
+                resize(size)
+                await pause(0.25)
+                XCTAssertEqual(window.frame.size, size, "vc-\(name)")
+                captureWindow(window, named: "vc-\(name)-\(suffix)")
+            }
+            func show(_ id: String, _ scaling: ScalingMode) async {
+                for _ in 0..<c.remoteResults.count where c.previewTitleLabel.stringValue != id { c.nextWallpaper(nil) }
+                c.scalingPopUp.selectItem(at: ScalingMode.allCases.firstIndex(of: scaling)!)
+                c.scalingSelectionChanged()
+                _ = await eventually { c.stageView.image != nil }
+            }
+            func resize(_ newSize: NSSize) {
+                size = newSize
+                window.setFrame(NSRect(origin: NSPoint(x: 20, y: 30), size: newSize), display: true)
+            }
+            c.showDiscover(nil)
+            window.makeFirstResponder(c.collectionView)
+            await shot("01-discover")
+            for _ in refs where c.previewTitleLabel.stringValue != "cr04" { c.nextWallpaper(nil) }
+            await shot("02-discover-portrait-selected")
+            c.toggleViewer(nil)
+            await show("cr01", .fill); await shot("03-preview-cached-original")
+            await show("cr04", .fit); await shot("04-preview-portrait-fit")
+            await show("cr06", .fit); await shot("05-preview-square-fit")
+            await show("cr08", .fill); await shot("06-preview-ultrawide-fill")
+            await show("cr06", .fill)
+            c.toggleViewer(nil)
+            c.showFavorites(nil); await shot("07-favorites")
+            c.showCollections(nil); await shot("08-collection")
+            let sidebar = c.sidebarForTesting
+            let long = sidebar.rows.first { $0.title.hasPrefix("Long Exposure") }
+            sidebar.outlineView.selectRowIndexes([sidebar.outlineView.row(forItem: long)], byExtendingSelection: false)
+            await shot("09-collection-long-name")
+            c.showDiscover(nil)
+            resize(NSSize(width: 1400, height: 800)); await shot("10-discover-large")
+            c.toggleViewer(nil); await shot("11-preview-large"); c.toggleViewer(nil)
+            resize(window.minSize); await shot("12-discover-minimum")
+            c.toggleViewer(nil); await shot("13-preview-minimum"); c.toggleViewer(nil)
+            resize(NSSize(width: 1120, height: 720))
+            c.openFolder(folder)
+            _ = await eventually { c.statusLabel.stringValue.hasPrefix("Loaded") }
+            await pause(0.5); await shot("14-folder")
+            for _ in 0..<6 where !c.previewTitleLabel.stringValue.hasPrefix("IMG_") { c.nextWallpaper(nil) }
+            c.toggleViewer(nil)
+            _ = await eventually { c.stageView.image != nil }
+            await shot("15-folder-preview-long-name")
+            c.toggleViewer(nil)
+
+            let emptyRoot = try historyTestFolder()
+            defer { try? FileManager.default.removeItem(at: emptyRoot) }
+            let (e, emptyWindow) = makeCaptureController(root: emptyRoot, size: NSSize(width: 1120, height: 720), appearance: appearance,
+                                                         windowClass: FloatingCaptureWindow.self, thumbnails: CraftThumbnails(), page: page) { state in
+                state.favorites = []
+                state.collections = []
+            }
+            defer { emptyWindow.close() }
+            func emptyShot(_ name: String) async {
+                emptyWindow.setFrame(NSRect(x: 20, y: 30, width: 1120, height: 720), display: true)
+                await pause(0.25); captureWindow(emptyWindow, named: "vc-\(name)-\(suffix)")
+            }
+            await emptyShot("16-empty-favorites")
+            e.showLocal(nil); await emptyShot("17-empty-folder")
+            e.search(nil)
+            _ = await eventually { e.emptyStateView.title.hasPrefix("Couldn") }
+            await emptyShot("18-offline")
+
+            let loadingRoot = try historyTestFolder()
+            defer { try? FileManager.default.removeItem(at: loadingRoot) }
+            let (l, loadingWindow) = makeCaptureController(root: loadingRoot, size: NSSize(width: 1120, height: 720), appearance: appearance,
+                                                           network: HangingNetwork(), windowClass: FloatingCaptureWindow.self,
+                                                           thumbnails: CraftThumbnails(), page: page) { _ in }
+            defer { loadingWindow.close() }
+            l.search(nil)
+            loadingWindow.setFrame(NSRect(x: 20, y: 30, width: 1120, height: 720), display: true)
+            await pause(0.25); captureWindow(loadingWindow, named: "vc-19-loading-\(suffix)")
+            l.searchTask?.cancel()
+        }
+    }
+}
+
+extension WallpierTests {
+    // Matched captures for the preview's caption contrast and display rim: landscape (16:9, cached original),
+    // portrait, square and 32:9 in Fill, Fit and Center, light and dark. Written only when WALLPIER_CAPTURE_DIR is set.
+    @MainActor
+    func testCaptureContrastCorrections() async throws {
+        try XCTSkipIf(Self.captureDirectory == nil, "Set WALLPIER_CAPTURE_DIR to write captures")
+        let refs = CraftFixtures.references()
+        let page = RemoteSearchPage(wallpapers: refs, currentPage: 1, lastPage: 92, total: 2_196,
+                                    rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil))
+        for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+            let root = try historyTestFolder()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let originals = root.appendingPathComponent("Originals")
+            try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+            try CraftFixtures.png(index: 0, size: NSSize(width: 1920, height: 1080))
+                .write(to: originals.appendingPathComponent(RemoteWallpaperCache.filename(for: refs[0])))
+            let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: appearance,
+                                                    windowClass: FloatingCaptureWindow.self, thumbnails: CraftThumbnails(), page: page) { _ in }
+            defer { window.close() }
+            c.showDiscover(nil)
+            c.toggleViewer(nil)
+            for (id, shape) in [("cr01", "landscape"), ("cr04", "portrait"), ("cr06", "square"), ("cr08", "ultrawide")] {
+                for _ in refs where c.previewTitleLabel.stringValue != id { c.nextWallpaper(nil) }
+                for scaling in ScalingMode.allCases {
+                    c.scalingPopUp.selectItem(at: ScalingMode.allCases.firstIndex(of: scaling)!)
+                    c.scalingSelectionChanged()
+                    // cr01's cached original replaces its thumbnail asynchronously and retires the notice; wait for it.
+                    _ = await eventually { c.stageView.image != nil && (id != "cr01" || c.approximatePreviewNotice.isHidden) }
+                    window.setFrame(NSRect(x: 20, y: 30, width: 1120, height: 720), display: true)
+                    await pause(0.25)
+                    XCTAssertEqual(window.frame.size, NSSize(width: 1120, height: 720))
+                    captureWindow(window, named: "cc-\(shape)-\(scaling.rawValue)-\(suffix)")
+                }
+            }
+        }
+    }
+}
+
+extension WallpierTests {
+    // Matched captures for small secondary text outside the preview caption: apply-bar detail, informational and
+    // error status, folder path, and empty-state explanations, light and dark, plus a live appearance switch.
+    // Written only when WALLPIER_CAPTURE_DIR is set.
+    @MainActor
+    func testCaptureSecondaryTextContrast() async throws {
+        try XCTSkipIf(Self.captureDirectory == nil, "Set WALLPIER_CAPTURE_DIR to write captures")
+        let refs = CraftFixtures.references()
+        let page = RemoteSearchPage(wallpapers: refs, currentPage: 1, lastPage: 92, total: 2_196,
+                                    rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil))
+        for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+            let root = try historyTestFolder()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let folder = root.appendingPathComponent("Pictures")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for (index, name) in ["Torres del Paine at first light", "dune", "Quiet harbour"].enumerated() {
+                try CraftFixtures.png(index: index + 3, size: NSSize(width: 960, height: 600)).write(to: folder.appendingPathComponent("\(name).png"))
+            }
+            func shot(_ window: NSWindow, _ name: String) async {
+                window.setFrame(NSRect(x: 20, y: 30, width: 1120, height: 720), display: true)
+                await pause(0.25)
+                captureWindow(window, named: "st-\(name)-\(suffix)")
+            }
+            func typeSearch(_ c: MainWindowController, _ text: String) {
+                c.searchField.stringValue = text
+                c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+            }
+
+            let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: appearance,
+                                                    windowClass: FloatingCaptureWindow.self, thumbnails: CraftThumbnails(), page: page) { state in
+                state.favorites = [1, 3, 5, 7].map { refs[$0] }
+                state.selectedRemoteIdentity = refs[1].identityKey
+            }
+            defer { window.close() }
+            c.showFavorites(nil)
+            c.nextWallpaper(nil)                       // Apply-bar detail after a selection change: "1200 × 2133 · Portrait".
+            typeSearch(c, "forest")                    // Informational status outside Discover.
+            await shot(window, "01-applybar-detail-and-info-status")
+            typeSearch(c, "")
+            c.openFolder(folder)
+            _ = await eventually { c.statusLabel.stringValue.hasPrefix("Loaded") }
+            await shot(window, "02-folder-path-and-info-status")
+            if appearance == .aqua {
+                window.appearance = NSAppearance(named: .darkAqua)   // Switched while the views stay open.
+                await shot(window, "03-folder-live-switch-to-dark")
+            }
+
+            let emptyRoot = try historyTestFolder()
+            defer { try? FileManager.default.removeItem(at: emptyRoot) }
+            let (e, emptyWindow) = makeCaptureController(root: emptyRoot, size: NSSize(width: 1120, height: 720), appearance: appearance,
+                                                         windowClass: FloatingCaptureWindow.self, thumbnails: CraftThumbnails(), page: page) { state in
+                state.favorites = []
+                state.collections = []
+            }
+            defer { emptyWindow.close() }
+            e.showFavorites(nil)
+            await shot(emptyWindow, "04-empty-favorites")
+            e.setWallpaper(nil)                         // Nothing selected: an error status.
+            await shot(emptyWindow, "05-error-status")
+            typeSearch(e, "forest")                     // Informational status after an error.
+            await shot(emptyWindow, "06-info-status-after-error")
+            typeSearch(e, "")
+            e.showCollections(nil)
+            await shot(emptyWindow, "07-empty-collections")
+            e.search(nil)
+            _ = await eventually { e.emptyStateView.title.hasPrefix("Couldn") }
+            await shot(emptyWindow, "08-discover-offline")
+        }
+    }
+}
+
+extension WallpierTests {
+    /// WCAG 2 contrast of a (possibly translucent) foreground composited over an opaque background, resolved in `appearance`.
+    private func contrast(_ foreground: NSColor, on background: NSColor, in appearance: NSAppearance.Name) -> CGFloat {
+        var ratio: CGFloat = 0
+        NSAppearance(named: appearance)!.performAsCurrentDrawingAppearance {
+            let f = foreground.usingColorSpace(.sRGB)!, b = background.usingColorSpace(.sRGB)!, a = f.alphaComponent
+            func luminance(_ r: CGFloat, _ g: CGFloat, _ bl: CGFloat) -> CGFloat {
+                func channel(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+                return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(bl)
+            }
+            let top = luminance(f.redComponent * a + b.redComponent * (1 - a), f.greenComponent * a + b.greenComponent * (1 - a),
+                                f.blueComponent * a + b.blueComponent * (1 - a))
+            let bottom = luminance(b.redComponent, b.greenComponent, b.blueComponent)
+            ratio = (max(top, bottom) + 0.05) / (min(top, bottom) + 0.05)
+        }
+        return ratio
+    }
+
+    func testSecondaryTextMeetsSmallTextContrastOnItsBackgrounds() {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            // Bars (apply bar, status, folder bar) sit on the window background; empty states and captions on the content background.
+            XCTAssertGreaterThanOrEqual(contrast(.secondaryText, on: .windowBackgroundColor, in: appearance), 5, "\(appearance.rawValue) bars")
+            XCTAssertGreaterThanOrEqual(contrast(.secondaryText, on: .controlBackgroundColor, in: appearance), 5, "\(appearance.rawValue) content")
+            // Hierarchy: still clearly secondary to the primary label.
+            XCTAssertGreaterThan(contrast(.labelColor, on: .controlBackgroundColor, in: appearance),
+                                 contrast(.secondaryText, on: .controlBackgroundColor, in: appearance) * 1.8, appearance.rawValue)
+        }
+        // Dark keeps the native secondary label.
+        var dark: (NSColor, NSColor)!
+        NSAppearance(named: .darkAqua)!.performAsCurrentDrawingAppearance {
+            dark = (NSColor.secondaryText.usingColorSpace(.sRGB)!, NSColor.secondaryLabelColor.usingColorSpace(.sRGB)!)
+        }
+        XCTAssertEqual(dark.0, dark.1)
+    }
+
+    @MainActor
+    func testSmallSecondaryTextUsesTheReadableColorThroughNormalOperations() throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Pictures")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try writeTestImage(to: folder.appendingPathComponent("a.png"))
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua) { state in
+            state.favorites = []
+            state.collections = []
+        }
+        defer { window.close() }
+        func typeSearch(_ text: String) {
+            c.searchField.stringValue = text
+            c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+        }
+        func detailColor() -> NSColor? {
+            let text = c.selectionLabel.attributedStringValue
+            guard text.length > 0 else { return nil }
+            return text.attribute(.foregroundColor, at: text.length - 1, effectiveRange: nil) as? NSColor
+        }
+        func labels(in view: NSView) -> [NSTextField] { view.subviews.flatMap { ($0 as? NSTextField).map { [$0] } ?? labels(in: $0) } }
+        func emptyMessageColor() -> NSColor? {
+            labels(in: c.emptyStateView).first { $0.stringValue == c.emptyStateView.message }?.textColor
+        }
+
+        // Apply-bar detail, before and after a selection change.
+        c.showDiscover(nil)
+        XCTAssertTrue(detailColor() === NSColor.secondaryText)
+        c.nextWallpaper(nil)
+        XCTAssertTrue(detailColor() === NSColor.secondaryText, "after a selection change")
+        // Informational status, then an error, then information again: the error keeps its red, information never
+        // falls back to the under-contrast system secondary label.
+        c.showCollections(nil)                      // Empty: nothing selected. Search text outside Discover is informational.
+        typeSearch("forest")
+        XCTAssertFalse(c.statusLabel.isHidden)
+        XCTAssertTrue(c.statusLabel.textColor === NSColor.secondaryText)
+        c.setWallpaper(nil)
+        XCTAssertEqual(c.statusLabel.stringValue, "Select a wallpaper first.")
+        XCTAssertEqual(c.statusLabel.textColor, .systemRed)
+        typeSearch("forest dusk")
+        XCTAssertTrue(c.statusLabel.textColor === NSColor.secondaryText, "information after an error")
+        typeSearch("")
+        // Empty-state explanations.
+        XCTAssertEqual(c.emptyStateView.title, "No Collections")
+        XCTAssertTrue(emptyMessageColor() === NSColor.secondaryText, "empty Collections")
+        c.showFavorites(nil)
+        XCTAssertEqual(c.emptyStateView.title, "No Favorites Yet")
+        XCTAssertTrue(emptyMessageColor() === NSColor.secondaryText, "empty Favorites")
+        // Folder path after choosing, and after reloading, a folder.
+        for pass in ["chosen", "reloaded"] {
+            c.openFolder(folder)
+            let loaded = expectation(description: "folder \(pass)")
+            let poll = Task { @MainActor in
+                while !c.statusLabel.stringValue.hasPrefix("Loaded") { await Task.yield() }
+                loaded.fulfill()
+            }
+            wait(for: [loaded], timeout: 5); poll.cancel()
+            XCTAssertTrue(c.statusLabel.textColor === NSColor.secondaryText, "folder \(pass) status")
+            let path = labels(in: try XCTUnwrap(window.contentView)).first { $0.toolTip == folder.standardizedFileURL.path }
+            XCTAssertNotNil(path, "folder bar shows the \(pass) folder")
+            XCTAssertTrue(path?.textColor === NSColor.secondaryText, "folder path, \(pass)")
+            c.statusLabel.stringValue = ""
+        }
+        // Appearance changes while the views stay open: the same color object resolves to each appearance's value.
+        for (name, expected) in [(NSAppearance.Name.darkAqua, NSColor.secondaryLabelColor), (.aqua, NSColor(white: 0, alpha: 0.62))] {
+            window.appearance = NSAppearance(named: name)
+            var resolved: (NSColor, NSColor)!
+            window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                resolved = (c.statusLabel.textColor!.usingColorSpace(.sRGB)!, expected.usingColorSpace(.sRGB)!)
+            }
+            XCTAssertEqual(resolved.0, resolved.1, name.rawValue)
+        }
     }
 }

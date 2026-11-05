@@ -7,6 +7,12 @@ import ImageIO
 /// preview must therefore hold the whole original (see `WallpaperReference.remotePreview`).
 final class DesktopPreviewView: NSView {
     static let desktopColor = NSColor(calibratedWhite: 0.11, alpha: 1)
+    /// The display's edge, which shows how much of the screen Fit and Center leave empty. In dark
+    /// appearances the desktop fill is within 1.1:1 of the backdrop, so the rim alone carries the
+    /// boundary: a neutral mid-gray hairline at ≥ 3:1 against both. In light the dark fill already does.
+    static let rimColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.42) : NSColor(white: 0, alpha: 0.16)
+    }
 
     var image: NSImage? { didSet { needsDisplay = true } }
     var imagePixelSize: CGSize = .zero { didSet { needsDisplay = true } }
@@ -62,9 +68,11 @@ final class DesktopPreviewView: NSView {
             image.draw(in: target, from: Self.cropRect(of: image.size, toAspectOf: target.size), operation: .sourceOver, fraction: 1)
             NSGraphicsContext.restoreGraphicsState()
         }
-        NSColor.separatorColor.setStroke()
-        outline.lineWidth = 1
-        outline.stroke()
+        let scale = window?.backingScaleFactor ?? 2
+        let rim = NSBezierPath(roundedRect: stage.insetBy(dx: -0.5 / scale, dy: -0.5 / scale), xRadius: 6, yRadius: 6)
+        Self.rimColor.setStroke()
+        rim.lineWidth = 1 / scale
+        rim.stroke()
     }
 
     /// Trims a preview's rounding difference from the original's shape. A thumbnail that was cropped

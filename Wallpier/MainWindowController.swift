@@ -397,7 +397,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let folderIcon = NSImageView(image: NSImage(systemSymbolName: "folder", accessibilityDescription: nil) ?? NSImage())
         folderIcon.contentTintColor = .secondaryLabelColor
         folderPathLabel.lineBreakMode = .byTruncatingMiddle
-        folderPathLabel.textColor = .secondaryLabelColor
+        folderPathLabel.allowsExpansionToolTips = true
+        folderPathLabel.textColor = .secondaryText
         folderPathLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         folderPathLabel.isSelectable = true
         folderPathLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -459,19 +460,20 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     private func configureViewer() {
         previewTitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        previewMetadataLabel.textColor = .secondaryLabelColor
-        previewTagsLabel.textColor = .tertiaryLabelColor
+        previewMetadataLabel.textColor = .secondaryText
+        previewTagsLabel.textColor = .secondaryText
         previewTagsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         for label in [previewTitleLabel, previewMetadataLabel, previewTagsLabel] {
             label.alignment = .center
             label.lineBreakMode = .byTruncatingTail
+            label.allowsExpansionToolTips = true
             label.isSelectable = true
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
         previewNoticeIcon.symbolConfiguration = .init(pointSize: NSFont.smallSystemFontSize, weight: .regular)
-        previewNoticeIcon.contentTintColor = .secondaryLabelColor
+        previewNoticeIcon.contentTintColor = .secondaryText
         previewNoticeLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        previewNoticeLabel.textColor = .secondaryLabelColor
+        previewNoticeLabel.textColor = .secondaryText
         previewNoticeLabel.lineBreakMode = .byTruncatingTail
         previewNoticeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         approximatePreviewNotice.setViews([previewNoticeIcon, previewNoticeLabel], in: .leading)
@@ -511,9 +513,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         busyIndicator.controlSize = .small
         busyIndicator.isDisplayedWhenStopped = false
         selectionLabel.lineBreakMode = .byTruncatingTail
+        selectionLabel.allowsExpansionToolTips = true
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.allowsExpansionToolTips = true
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = .secondaryText
         statusLabel.isHidden = true
         let text = NSStackView(views: [selectionLabel, statusLabel])
         text.orientation = .vertical
@@ -527,10 +531,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         displayPopUp.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
         displayPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         setWallpaperButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 118).isActive = true
-        applyBar.setViews([busyIndicator, text, favoriteButton, moreButton], in: .leading)
-        applyBar.setViews([displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
-        applyBar.setCustomSpacing(10, after: text)
+        // The heart and ⋯ keep one place whatever the selection's name or status line, so they never
+        // shift while browsing; a wider gap separates them from the three controls that apply.
+        applyBar.setViews([busyIndicator, text], in: .leading)
+        applyBar.setViews([favoriteButton, moreButton, displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
         applyBar.setCustomSpacing(4, after: favoriteButton)
+        applyBar.setCustomSpacing(14, after: moreButton)
         applyBar.spacing = 8
         applyBar.edgeInsets = NSEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
         applyBar.setAccessibilityLabel("Selected wallpaper")
@@ -1039,14 +1045,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch item {
         case .local(let url):
             stageView.imagePixelSize = .zero
-            previewMetadataLabel.stringValue = (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
+            // The folder is already named by the window title and folder bar; the caption describes the picture.
+            previewMetadataLabel.stringValue = ""
             previewTagsLabel.stringValue = url.pathExtension.uppercased()
             Task.detached(priority: .utility) {
                 let size = DesktopPreviewView.pixelSize(of: url)
                 await MainActor.run { [weak self] in
                     guard let self, case .local(let selectedURL) = self.selectedItem, selectedURL == url, let size else { return }
                     self.stageView.imagePixelSize = size
-                    self.previewMetadataLabel.stringValue = "\(Int(size.width)) × \(Int(size.height)) · " + self.previewMetadataLabel.stringValue
+                    self.previewMetadataLabel.stringValue = WallpaperShape.summary(width: Int(size.width), height: Int(size.height))
                 }
             }
         case .remote(let ref):
@@ -1120,7 +1127,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func configureRemoteMetadata(_ reference: WallpaperReference) {
-        let parts = ["\(reference.width) × \(reference.height)", reference.uploader.map { "by \($0)" },
+        let parts = [WallpaperShape.summary(width: reference.width, height: reference.height), reference.uploader.map { "by \($0)" },
                      reference.cachedLocalPath == nil ? nil : "Original downloaded"]
         previewMetadataLabel.stringValue = parts.compactMap { $0 }.joined(separator: " · ")
         previewTagsLabel.stringValue = reference.tags.isEmpty ? "Wallhaven · SFW" : reference.tags.joined(separator: " · ")
@@ -1159,7 +1166,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch selectedItem {
         case nil: title = "No Wallpaper Selected"; detail = ""
         case .local(let url)?: title = url.deletingPathExtension().lastPathComponent; detail = url.pathExtension.uppercased()
-        case .remote(let ref)?: title = ref.wallpaperID; detail = "\(ref.width) × \(ref.height)"
+        case .remote(let ref)?: title = ref.wallpaperID; detail = WallpaperShape.summary(width: ref.width, height: ref.height)
         }
         let text = NSMutableAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium),
@@ -1167,7 +1174,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         if !detail.isEmpty {
             text.append(NSAttributedString(string: "  " + detail, attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
-                .foregroundColor: NSColor.secondaryLabelColor]))
+                .foregroundColor: NSColor.secondaryText]))
         }
         selectionLabel.attributedStringValue = text
         let isFavorite = selectedReference.map(state.isFavorite) ?? false
@@ -1211,6 +1218,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             target.alphaValue = 0
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
                 target.animator().alphaValue = 1
             }
         } else {
@@ -1880,7 +1888,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             }
         }
         statusLabel.stringValue = text
-        statusLabel.textColor = isError ? .systemRed : .secondaryLabelColor
+        statusLabel.textColor = isError ? .systemRed : .secondaryText
         statusLabel.toolTip = text
         statusLabel.isHidden = text.isEmpty
         statusLabel.setAccessibilityLabel(text)
@@ -2052,6 +2060,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let reusable = collectionView.makeItem(withIdentifier: WallpaperCollectionViewItem.reuseIdentifier, for: indexPath)
         guard let item = reusable as? WallpaperCollectionViewItem, currentItems.indices.contains(indexPath.item) else { return reusable }
         let represented = currentItems[indexPath.item]
+        item.isEmphasized = self.collectionView.isSelectionEmphasized
         item.configure(identifier: represented.identifier, title: represented.title, toolTip: represented.toolTip)
         // Decode at the cell's pixel size; switch to Wallhaven's larger thumbnail only when cells need it.
         let pixels = galleryLayout.fittedItemSize.width * (window?.backingScaleFactor ?? 2)
