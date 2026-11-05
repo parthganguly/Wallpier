@@ -955,7 +955,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             guard let self else { return }
             defer { downloadTask = nil; updateControlAvailability() }
             do {
-                let url = try await localOriginal(for: reference)
+                let url = await historyStore.retain(try await localOriginal(for: reference))
                 try Task.checkCancellation()
                 await applyWallpaper(url, to: screen, scaling: scaling, source: source)
             } catch is CancellationError {
@@ -1667,7 +1667,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                     let url = try await localOriginal(for: ref)
                     try Task.checkCancellation()
                     guard state.activeRotationCollectionID == id, state.rotationInterval != .off else { return }
-                    await applyWallpaper(url, to: screen, scaling: scaling, source: .rotation)
+                    await applyWallpaper(await historyStore.retain(url), to: screen, scaling: scaling, source: .rotation)
                 } catch {
                     if !Task.isCancelled { showStatus("Automatic rotation failed: \(friendlyMessage(for: error))", isError: true) }
                 }

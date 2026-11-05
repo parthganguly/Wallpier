@@ -417,25 +417,44 @@ final class WallpierTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: rollback)), bytes)
     }
 
-    func testOwnedRemoteOriginalIsProtectedWithoutRollbackCopy() async throws {
+    // Caches is purgeable, so a previous wallpaper still in the remote cache (state saved before RC1,
+    // or a retain that fell back) gets an owned rollback copy like any external file.
+    func testCachedRemoteOriginalGetsOwnedRollbackCopy() async throws {
         let folder = try historyTestFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
         let originals = folder.appendingPathComponent("Originals")
         try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
         let source = originals.appendingPathComponent("remote.png")
         try writeTestImage(to: source)
-        let rollback = folder.appendingPathComponent("Rollback")
-        let store = WallpaperHistoryStore(root: rollback, originalsRoot: originals)
+        let bytes = try Data(contentsOf: source)
+        let store = WallpaperHistoryStore(root: folder.appendingPathComponent("Rollback"))
         let entry = await store.prepare(previous: assignment(path: source.path), replacement: assignment(path: "next.png"))
-        XCTAssertNil(entry.rollbackPath); XCTAssertNil(entry.undoUnavailableReason)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: rollback.path))
-        var state = WallpaperState(); state.appendHistory(entry)
-        XCTAssertTrue(state.protectedCachePaths.contains(source.path))
-        let cache = RemoteWallpaperCache(rootURL: originals, maximumSizeBytes: 1)
-        let removed = try await cache.evictIfNeeded(protectedPaths: state.protectedCachePaths)
-        XCTAssertTrue(removed.isEmpty)
+        XCTAssertNil(entry.undoUnavailableReason)
+        let rollback = try XCTUnwrap(entry.rollbackPath)
+        try FileManager.default.removeItem(at: originals)
         let restored = await store.undoAssignment(for: entry)
-        XCTAssertEqual(restored?.imagePath, source.path)
+        XCTAssertEqual(restored?.imagePath, rollback)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: rollback)), bytes)
+    }
+
+    func testRetainedOriginalIsReusedBoundedAndCleanedUp() async throws {
+        let folder = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let cached = folder.appendingPathComponent("wallhaven-a.png")
+        try writeTestImage(to: cached)
+        let root = folder.appendingPathComponent("Rollback")
+        let store = WallpaperHistoryStore(root: root)
+        let owned = await store.retain(cached)
+        XCTAssertEqual(owned, root.appendingPathComponent("wallhaven-a.png"))
+        let reused = await store.retain(cached)
+        XCTAssertEqual(reused, owned)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["wallhaven-a.png"])
+        // Over the limit, the cached file is used as before rather than failing the change.
+        let full = WallpaperHistoryStore(root: folder.appendingPathComponent("Full"), maximumSizeBytes: 1)
+        let fallback = await full.retain(cached)
+        XCTAssertEqual(fallback, cached)
+        await store.cleanup(protectedPaths: [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
     }
 
     func testRollbackDeduplicatesBytesAndNeverOverwritesChangedSource() async throws {
@@ -571,7 +590,7 @@ final class WallpierTests: XCTestCase {
         try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
         let link = originals.appendingPathComponent("external-link.png")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: original)
-        let store = WallpaperHistoryStore(root: folder.appendingPathComponent("Rollback"), originalsRoot: originals)
+        let store = WallpaperHistoryStore(root: folder.appendingPathComponent("Rollback"))
         let entry = await store.prepare(previous: assignment(path: link.path), replacement: assignment(path: "next.png"))
         let rollback = URL(fileURLWithPath: try XCTUnwrap(entry.rollbackPath))
         XCTAssertFalse(try rollback.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
@@ -790,7 +809,7 @@ private final class SetAuditHarness {
         displayList.screens = [x, y]
         controller = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
             provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
-            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")),
             remoteThumbnailProvider: thumbnails, availableScreens: { displayList.screens })
         self.displayList = displayList
         desktop.current = prior
@@ -803,6 +822,8 @@ private final class SetAuditHarness {
     private final class DisplayList { var screens: [NSScreen] = [] }
     func removeX() { displayList.screens = [y]; controller.refreshDisplays() }
     func cached(_ reference: WallpaperReference) -> URL { root.appendingPathComponent("Originals").appendingPathComponent(RemoteWallpaperCache.filename(for: reference)) }
+    /// Where a set remote original lives once Wallpier owns it outside purgeable Caches.
+    func owned(_ reference: WallpaperReference) -> URL { root.appendingPathComponent("Rollback").appendingPathComponent(RemoteWallpaperCache.filename(for: reference)) }
 }
 
 extension WallpierTests {
@@ -1207,10 +1228,10 @@ extension WallpierTests {
         h.controller.scalingSelectionChanged()
         h.network.downloadGate.release(.success(h.incoming))
         try await finishAuditTask(h.controller.downloadTask)
-        XCTAssertEqual(h.desktop.calls, [.init(image: h.cached(a), display: "101", scaling: .fill)])
+        XCTAssertEqual(h.desktop.calls, [.init(image: h.owned(a), display: "101", scaling: .fill)])
         XCTAssertEqual(h.controller.state.selectedRemoteIdentity, h.controller.state.favorites[1].identityKey)
         let entry = try XCTUnwrap(h.store.load().history.last)
-        XCTAssertEqual(entry.replacement.imagePath, h.cached(a).path)
+        XCTAssertEqual(entry.replacement.imagePath, h.owned(a).path)
         XCTAssertEqual(entry.replacement.displayID, "101")
         XCTAssertEqual(entry.replacement.scaling, .fill)
         XCTAssertEqual(entry.previous.imagePath, h.prior.path)
@@ -1262,13 +1283,13 @@ extension WallpierTests {
         XCTAssertEqual(h.desktop.calls.count, 1)
         h.network.downloadGate.release(.success(h.incoming))
         try await finishAuditTask(h.controller.downloadTask)
-        XCTAssertEqual(h.desktop.calls.map(\.image), h.controller.state.favorites.map(h.cached))
+        XCTAssertEqual(h.desktop.calls.map(\.image), h.controller.state.favorites.map(h.owned))
         XCTAssertEqual(h.store.load().history.count, 2)
         XCTAssertEqual(h.store.load().history.last?.previous.imagePath, h.desktop.calls[0].image.path)
         // The previously rejected A request is accepted now, using its cached original.
         h.controller.setWallpaper(nil)
         try await finishAuditTask(h.controller.downloadTask)
-        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(h.controller.state.favorites[0]), h.cached(h.controller.state.favorites[1]), h.cached(h.controller.state.favorites[0])])
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(h.controller.state.favorites[0]), h.owned(h.controller.state.favorites[1]), h.owned(h.controller.state.favorites[0])])
         XCTAssertEqual(h.network.downloads.count, 2)
         XCTAssertEqual(h.store.load().history.count, 3)
     }
@@ -1411,7 +1432,7 @@ extension WallpierTests {
         XCTAssertFalse(h.controller.stageView.image === obsoleteImage)
         XCTAssertTrue(h.controller.remoteResults.isEmpty)
         XCTAssertEqual(h.controller.statusLabel.stringValue, success)
-        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(h.controller.state.favorites[0])])
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(h.controller.state.favorites[0])])
         XCTAssertEqual(h.store.load().history.count, 1)
     }
 }
@@ -1629,7 +1650,7 @@ extension WallpierTests {
         let originals = root.appendingPathComponent("Originals")
         let controller = MainWindowController(window: window, wallpaperService: desktop ?? SetAuditWallpaperService(), stateStore: store,
             provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
-            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")),
             remoteThumbnailProvider: thumbnails ?? CaptureThumbnails(), availableScreens: { screens ?? [CaptureScreen()] })
         let page = page ?? RemoteSearchPage(wallpapers: references, currentPage: 1, lastPage: 54, total: 1_284,
             rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil))
@@ -3479,7 +3500,7 @@ private final class RotationHarness {
         displayList.screens = [x, y]
         controller = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
             provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
-            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")),
             remoteThumbnailProvider: thumbnails, availableScreens: { displayList.screens })
         self.displayList = displayList
         desktop.current = prior
@@ -3508,12 +3529,15 @@ private final class RotationHarness {
     func cached(_ reference: WallpaperReference) -> URL {
         originals.appendingPathComponent(RemoteWallpaperCache.filename(for: reference))
     }
+    func owned(_ reference: WallpaperReference) -> URL {
+        rollbackRoot.appendingPathComponent(RemoteWallpaperCache.filename(for: reference))
+    }
 
     /// A new controller over the same persisted state and isolated dependencies, through the real startup path.
     func relaunch() -> MainWindowController {
         let relaunched = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
             provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
-            historyStore: WallpaperHistoryStore(root: rollbackRoot, originalsRoot: originals),
+            historyStore: WallpaperHistoryStore(root: rollbackRoot),
             remoteThumbnailProvider: thumbnails, availableScreens: { [displayList] in displayList.screens })
         relaunched.rotationTimerFactoryForTesting = controller.rotationTimerFactoryForTesting
         relaunched.scalingPopUp.addItems(withTitles: ScalingMode.allCases.map(\.displayName))
@@ -3664,7 +3688,7 @@ extension WallpierTests {
         h.network.downloadGate.release(.success(h.incoming))
         try await finishAuditTask(h.controller.rotationTask)
         XCTAssertEqual(h.network.downloads.count, 1, "No eager downloads of the remaining collection items")
-        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(refs[1])])
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(refs[1])])
         // The following tick downloads exactly the next selected original and nothing else.
         h.network.downloadGate = SetAuditGate<URL>()
         try writeTestImage(to: h.incoming, width: 5)
@@ -3674,7 +3698,7 @@ extension WallpierTests {
         h.network.downloadGate.release(.success(h.incoming))
         try await finishAuditTask(h.controller.rotationTask)
         XCTAssertEqual(h.network.downloads.count, 2)
-        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(refs[1]), h.cached(refs[2])])
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(refs[1]), h.owned(refs[2])])
     }
 
     // MARK: E — download failure keeps wallpaper and history intact and recovers
@@ -3748,14 +3772,14 @@ extension WallpierTests {
         await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
         h.network.downloadGate.release(.success(h.incoming))
         try await finishAuditTask(h.controller.rotationTask)
-        XCTAssertEqual(h.desktop.calls, [SetAuditWallpaperService.Call(image: h.cached(next), display: "101", scaling: .fit)])
+        XCTAssertEqual(h.desktop.calls, [SetAuditWallpaperService.Call(image: h.owned(next), display: "101", scaling: .fit)])
         let entry = try XCTUnwrap(h.store.load().history.last)
-        XCTAssertEqual(entry.replacement.imagePath, h.cached(next).path)
+        XCTAssertEqual(entry.replacement.imagePath, h.owned(next).path)
         XCTAssertEqual(entry.replacement.displayID, "101")
         XCTAssertEqual(entry.replacement.scaling, .fit)
         XCTAssertEqual(entry.previous.imagePath, h.prior.path, "The prior image is captured through the shared path")
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(entry.rollbackPath))), try Data(contentsOf: h.prior))
-        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.cached(next).path)
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.owned(next).path)
         // Batch 3 supersedes GLM's `selectedRemoteIdentity == next`: rotation advances its own
         // cursor and leaves the browsing selection where the user left it.
         XCTAssertEqual(h.controller.state.rotationCursor, next.identityKey)
@@ -3855,7 +3879,7 @@ extension WallpierTests {
             applied.append(try XCTUnwrap(h.desktop.calls.last?.image))
         }
         // With two members the shuffled result is always the other item: fully deterministic.
-        XCTAssertEqual(applied, [h.cached(refs[1]), h.cached(refs[0]), h.cached(refs[1]), h.cached(refs[0])])
+        XCTAssertEqual(applied, [h.owned(refs[1]), h.owned(refs[0]), h.owned(refs[1]), h.owned(refs[0])])
         XCTAssertTrue(h.network.downloads.isEmpty, "Cached members rotate without downloads")
         XCTAssertEqual(h.store.load().history.count, 4)
     }
@@ -3872,7 +3896,7 @@ extension WallpierTests {
             h.scheduledTimers[0].fire()
             try await finishAuditTask(h.controller.rotationTask)
             let appliedPath = try XCTUnwrap(h.desktop.calls.last?.image).path
-            let member = refs.first { h.cached($0).path == appliedPath }
+            let member = refs.first { h.owned($0).path == appliedPath }
             XCTAssertNotNil(member, "The applied wallpaper must be a valid collection member")
             XCTAssertNotEqual(member?.identityKey, previous?.identityKey, "Shuffle never repeats the current member")
             previous = member
@@ -3932,7 +3956,7 @@ extension WallpierTests {
         h.controller.previousWallpaper(nil)
         h.network.downloadGate.release(.success(h.incoming))
         try await finishAuditTask(h.controller.rotationTask)
-        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(refs[1])])
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(refs[1])])
         XCTAssertEqual(visibleSelection(h.controller), [2], "Rotation must not move the visible selection")
         XCTAssertEqual(h.controller.state.selectedRemoteIdentity, refs[2].identityKey, "…nor the remembered one")
         // Browse an unrelated favorite: the next tick continues after the last rotated member.
@@ -3940,11 +3964,11 @@ extension WallpierTests {
         XCTAssertEqual(h.controller.state.selectedRemoteIdentity, favorite.identityKey)
         try await tick(h, .success(h.incoming))
         XCTAssertEqual(h.network.downloads, [refs[1].originalURL, refs[2].originalURL])
-        XCTAssertEqual(h.desktop.calls.map(\.image), [h.cached(refs[1]), h.cached(refs[2])])
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(refs[1]), h.owned(refs[2])])
         XCTAssertEqual(h.controller.state.selectedRemoteIdentity, favorite.identityKey)
         XCTAssertEqual(visibleSelection(h.controller), [0])
         try await tick(h, .success(h.incoming))
-        XCTAssertEqual(h.desktop.calls.last?.image, h.cached(refs[0]), "The sequence wraps around")
+        XCTAssertEqual(h.desktop.calls.last?.image, h.owned(refs[0]), "The sequence wraps around")
         XCTAssertEqual(h.store.load().history.count, 3)
     }
 
@@ -3963,7 +3987,7 @@ extension WallpierTests {
             h.controller.showFavorites(nil)
         }
         // With two members, never repeating the last rotated one fully determines the order.
-        XCTAssertEqual(applied, [1, 0, 1, 0, 1, 0].map { h.cached(refs[$0]) })
+        XCTAssertEqual(applied, [1, 0, 1, 0, 1, 0].map { h.owned(refs[$0]) })
     }
 
     @MainActor
@@ -4005,7 +4029,7 @@ extension WallpierTests {
         use(first) // Choosing the active source again keeps its place.
         try await cachedTick(h)
         XCTAssertEqual(h.desktop.calls.map(\.image),
-                       [refs[1], other.wallpapers[0], other.wallpapers[1], refs[0], refs[1]].map(h.cached))
+                       [refs[1], other.wallpapers[0], other.wallpapers[1], refs[0], refs[1]].map(h.owned))
         XCTAssertTrue(h.network.downloads.isEmpty)
     }
 
@@ -4027,7 +4051,7 @@ extension WallpierTests {
         h.controller.removeSelected(nil)
         XCTAssertEqual(h.controller.state.collections[0].wallpapers.map(\.identityKey), [refs[0], refs[2]].map(\.identityKey))
         try await cachedTick(h)
-        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[1], refs[2], refs[0]].map(h.cached))
+        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[1], refs[2], refs[0]].map(h.owned))
     }
 
     @MainActor
@@ -4044,9 +4068,9 @@ extension WallpierTests {
         try await tick(h, .success(h.incoming))
         h.desktop.failure = nil
         try await tick(h, .success(h.incoming))
-        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[2], refs[0], refs[1]].map(h.cached))
-        XCTAssertEqual(h.store.load().history.map(\.replacement.imagePath), [refs[2], refs[1]].map { h.cached($0).path })
-        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.cached(refs[1]).path)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[2], refs[0], refs[1]].map(h.owned))
+        XCTAssertEqual(h.store.load().history.map(\.replacement.imagePath), [refs[2], refs[1]].map { h.owned($0).path })
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.owned(refs[1]).path)
     }
 
     @MainActor
@@ -4062,7 +4086,7 @@ extension WallpierTests {
         XCTAssertEqual(h.scheduledTimers.filter(\.isValid).count, 1, "Startup restores exactly one schedule")
         XCTAssertEqual(relaunched.state.currentSource, .favorites)
         try await cachedTick(h, relaunched)
-        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[1], refs[2]].map(h.cached))
+        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[1], refs[2]].map(h.owned))
         XCTAssertEqual(relaunched.state.selectedRemoteIdentity, h.controller.state.favorites[0].identityKey)
     }
 
@@ -4155,7 +4179,7 @@ extension WallpierTests {
         let relaunched = h.relaunch()
         await waitUntil("relaunched folder loaded") { relaunched.statusLabel.stringValue == "Loaded 2 local wallpapers." }
         try await cachedTick(h, relaunched)
-        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[1], refs[2], refs[0]].map(h.cached))
+        XCTAssertEqual(h.desktop.calls.map(\.image), [refs[1], refs[2], refs[0]].map(h.owned))
         XCTAssertTrue(h.network.downloads.isEmpty)
     }
 
@@ -4174,7 +4198,7 @@ extension WallpierTests {
         h.network.downloadGate.release(.success(h.incoming))
         try await finishAuditTask(h.controller.downloadTask)
         // The change applied, assigned and recorded what it captured…
-        XCTAssertEqual(h.desktop.calls, [.init(image: h.cached(a), display: "101", scaling: .fill)])
+        XCTAssertEqual(h.desktop.calls, [.init(image: h.owned(a), display: "101", scaling: .fill)])
         let saved = h.store.load()
         XCTAssertEqual(saved.assignment(for: "101")?.scaling, .fill)
         XCTAssertNil(saved.assignment(for: "202"))
@@ -4190,13 +4214,13 @@ extension WallpierTests {
         // The next Set uses them.
         h.controller.setWallpaper(nil)
         try await finishAuditTask(h.controller.downloadTask)
-        XCTAssertEqual(h.desktop.calls.last, .init(image: h.cached(a), display: "202", scaling: .fit))
+        XCTAssertEqual(h.desktop.calls.last, .init(image: h.owned(a), display: "202", scaling: .fit))
         // A relaunch restores them.
         let screens: [NSScreen] = [h.x, h.y]
         let originals = h.root.appendingPathComponent("Originals")
         let relaunched = MainWindowController(window: nil, wallpaperService: h.desktop, stateStore: h.store,
             provider: WallhavenProvider(client: h.network), originalCache: RemoteWallpaperCache(rootURL: originals),
-            historyStore: WallpaperHistoryStore(root: h.root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            historyStore: WallpaperHistoryStore(root: h.root.appendingPathComponent("Rollback")),
             remoteThumbnailProvider: h.thumbnails, availableScreens: { screens })
         // The harness state rotates hourly; an unscheduled Timer keeps that schedule inert.
         relaunched.rotationTimerFactoryForTesting = { interval, _ in Timer(timeInterval: interval, repeats: true) { _ in } }
@@ -4221,7 +4245,7 @@ extension WallpierTests {
         h.controller.scalingSelectionChanged()
         h.network.downloadGate.release(.success(h.incoming))
         try await finishAuditTask(h.controller.rotationTask)
-        XCTAssertEqual(h.desktop.calls, [.init(image: h.cached(refs[1]), display: "101", scaling: .fill)])
+        XCTAssertEqual(h.desktop.calls, [.init(image: h.owned(refs[1]), display: "101", scaling: .fill)])
         XCTAssertEqual(h.store.load().history.last?.replacement.displayID, "101")
         XCTAssertEqual(h.store.load().history.last?.replacement.scaling, .fill)
         for state in [h.controller.state, h.store.load()] {
@@ -4232,7 +4256,7 @@ extension WallpierTests {
         XCTAssertEqual(h.controller.scalingPopUp.indexOfSelectedItem, 1)
         // The next tick targets the newer choices.
         try await tick(h, .success(h.incoming))
-        XCTAssertEqual(h.desktop.calls.last, .init(image: h.cached(refs[2]), display: "202", scaling: .fit))
+        XCTAssertEqual(h.desktop.calls.last, .init(image: h.owned(refs[2]), display: "202", scaling: .fit))
         let relaunched = h.relaunch()
         XCTAssertEqual(relaunched.displayPopUp.indexOfSelectedItem, 1)
         XCTAssertEqual(relaunched.scalingPopUp.indexOfSelectedItem, 1)
@@ -4988,7 +5012,7 @@ extension WallpierTests {
         gate.release(.success(()))
         try await finishAuditTask(c.downloadTask)
         XCTAssertEqual(desktop.calls.map(\.image.path),
-                       [root.appendingPathComponent("Originals").appendingPathComponent(RemoteWallpaperCache.filename(for: captured)).path],
+                       [root.appendingPathComponent("Rollback").appendingPathComponent(RemoteWallpaperCache.filename(for: captured)).path],
                        "the Set applies the wallpaper it captured")
         XCTAssertEqual(c.state.selectedRemoteIdentity, c.remoteResults[2].identityKey, "and leaves the browsed one selected")
         XCTAssertEqual(c.previewPositionLabel.stringValue, "3 of 6 loaded")
@@ -5121,7 +5145,7 @@ extension WallpierTests {
         let controller = MainWindowController(window: window, wallpaperService: desktop,
             stateStore: WallpaperStateStore(stateURL: root.appendingPathComponent("state.json")),
             provider: WallhavenProvider(client: OfflineNetwork()), originalCache: RemoteWallpaperCache(rootURL: originals),
-            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")),
             remoteThumbnailProvider: CaptureThumbnails(), availableScreens: { [CaptureScreen()] })
         controller.prepareForVisualCapture(discoverPage: RemoteSearchPage(wallpapers: [], currentPage: 1, lastPage: 1, total: 0,
             rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil)))
@@ -5431,5 +5455,53 @@ extension WallpierTests {
             let state = try? JSONDecoder().decode(WallpaperState.self, from: Data(#"{"scalingMode":"\#(saved)"}"#.utf8))
             XCTAssertEqual(state?.scalingMode.rawValue, saved)
         }
+    }
+}
+
+extension WallpierTests {
+    // MARK: Release Candidate 1: wallpaper durability
+    //
+    // ~/Library/Caches is purgeable. Removing the Originals folder simulates macOS reclaiming it.
+
+    @MainActor
+    func testActiveRemoteWallpaperAndUndoSurviveCachePurge() async throws {
+        let h = try setAuditHarness()
+        let originals = h.root.appendingPathComponent("Originals")
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        let first = try XCTUnwrap(h.desktop.calls.last?.image)
+        let firstBytes = try Data(contentsOf: first)
+        XCTAssertFalse(first.path.hasPrefix(originals.path), "The desktop must not reference purgeable cache storage")
+        XCTAssertEqual(first.lastPathComponent, h.cached(h.controller.state.favorites[0]).lastPathComponent)
+
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        h.controller.nextWallpaper(nil)
+        h.controller.setWallpaper(nil)
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.downloadTask)
+        let second = try XCTUnwrap(h.desktop.calls.last?.image)
+        XCTAssertNotEqual(first, second)
+
+        try FileManager.default.removeItem(at: originals)
+        XCTAssertTrue(FileManager.default.isReadableFile(atPath: second.path), "The active wallpaper survives a cache purge")
+        XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, second.path)
+
+        // A relaunch reads the same state; Undo still restores the first wallpaper's bytes.
+        try await finishAuditTask(h.controller.undoValidationTask)
+        XCTAssertTrue(h.controller.undoButton.isEnabled)
+        h.controller.undoWallpaperChange(nil)
+        try await finishAuditTask(h.controller.downloadTask)
+        let restored = try XCTUnwrap(h.desktop.calls.last?.image)
+        XCTAssertEqual(try Data(contentsOf: restored), firstBytes)
+
+        // Only what the saved assignments and history reference stays owned; nothing else accumulates.
+        let rollback = h.root.appendingPathComponent("Rollback")
+        let referenced = h.store.load().protectedCachePaths.filter { $0.hasPrefix(rollback.path + "/") }
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: rollback.path)),
+                       Set(referenced.map { URL(fileURLWithPath: $0).lastPathComponent }))
     }
 }
