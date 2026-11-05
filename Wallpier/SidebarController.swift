@@ -177,8 +177,9 @@ final class SidebarCell: NSTableCellView {
         self.identifier = identifier
         let label = NSTextField(labelWithString: "")
         label.lineBreakMode = .byTruncatingTail
+        label.allowsExpansionToolTips = true
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        countLabel.textColor = .tertiaryLabelColor
+        countLabel.textColor = .secondaryLabelColor
         countLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
         rotationBadge.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Rotating")
         rotationBadge.symbolConfiguration = .init(pointSize: 10, weight: .semibold)

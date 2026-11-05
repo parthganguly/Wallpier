@@ -1,5 +1,14 @@
 import AppKit
 
+extension NSColor {
+    /// Small secondary text (11–13 pt): captions, details, status and explanations. The system secondary
+    /// label is 3.8–4.0:1 on light backgrounds, short of 4.5:1, so light appearances use black at 62%
+    /// (6.2:1 on white, 5.9:1 on the window background); dark appearances keep the system color (5.1–5.9:1).
+    static let secondaryText = NSColor(name: "WallpierSecondaryText") { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .secondaryLabelColor : NSColor(white: 0, alpha: 0.62)
+    }
+}
+
 /// Flow layout whose display-shaped (16:10) cells always divide the available width exactly,
 /// so the grid never leaves a ragged gap on the right at any window size. The collection view's
 /// delegate returns `fittedItemSize`; setting `itemSize` during `prepare()` leaves cells stale.
@@ -11,11 +20,14 @@ final class GalleryLayout: NSCollectionViewFlowLayout {
     private var preparedWidth: CGFloat = 0
     private(set) var fittedItemSize = NSSize(width: 240, height: 150)
 
+    // With the cells' 4 pt ring inset, pictures sit 16 pt apart and 16 pt from the edges: one rhythm,
+    // enough air for each wallpaper to read as its own picture, and still three columns at the
+    // default size in a minimum-width (or tiled) window.
     override init() {
         super.init()
         sectionInset = NSEdgeInsets(top: 12, left: 12, bottom: 16, right: 12)
-        minimumInteritemSpacing = 4
-        minimumLineSpacing = 4
+        minimumInteritemSpacing = 8
+        minimumLineSpacing = 8
     }
 
     required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
@@ -56,6 +68,39 @@ final class GalleryCollectionView: NSCollectionView {
     var onActivate: (() -> Void)?
     var onDelete: (() -> Void)?
     var contextMenu: (() -> NSMenu?)?
+    /// True while arrow keys and Space act on the gallery (first responder in the key window);
+    /// selection rings are accent-colored only then, so the ring also says where typing goes.
+    private(set) var isSelectionEmphasized = false
+
+    private func setSelectionEmphasized(_ emphasized: Bool) {
+        isSelectionEmphasized = emphasized
+        for case let item as WallpaperCollectionViewItem in visibleItems() { item.isEmphasized = emphasized }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { setSelectionEmphasized(window?.isKeyWindow ?? false) }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { setSelectionEmphasized(false) }
+        return resigned
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+        guard let newWindow else { return }
+        NotificationCenter.default.addObserver(self, selector: #selector(keyStateChanged), name: NSWindow.didBecomeKeyNotification, object: newWindow)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyStateChanged), name: NSWindow.didResignKeyNotification, object: newWindow)
+    }
+
+    @objc private func keyStateChanged() {
+        setSelectionEmphasized(window?.isKeyWindow == true && window?.firstResponder === self)
+    }
 
     override func keyDown(with event: NSEvent) {
         let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
@@ -97,10 +142,11 @@ final class EmptyStateView: NSView {
         spinner.style = .spinning
         spinner.controlSize = .regular
         spinner.isDisplayedWhenStopped = false
+        // The title leads at full contrast; the symbol and message stay quiet beneath it.
         titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.textColor = .labelColor
         messageLabel.font = .systemFont(ofSize: 13)
-        messageLabel.textColor = .secondaryLabelColor
+        messageLabel.textColor = .secondaryText
         messageLabel.alignment = .center
         messageLabel.preferredMaxLayoutWidth = 340
         messageLabel.isSelectable = true

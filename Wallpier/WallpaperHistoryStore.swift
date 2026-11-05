@@ -3,21 +3,42 @@ import Foundation
 import ImageIO
 import os.log
 
-/// Only owns rollback copies. Remote originals keep their existing cache ownership.
+/// Owns every file the desktop or Undo depends on: rollback copies of external wallpapers, and copies of
+/// remote originals taken out of purgeable ~/Library/Caches when they are set. Cleanup keeps only what
+/// the saved assignments and bounded history reference, so this never grows into a second cache.
 actor WallpaperHistoryStore {
     static let maximumSizeBytes: Int64 = 250 * 1_024 * 1_024
     private let root: URL
-    private let originalsRoot: URL
     private let limit: Int64
     private let files = FileManager()
     private let logger = Logger(subsystem: "com.parth.Wallpier", category: "History")
 
-    init(root: URL? = nil, originalsRoot: URL? = nil, maximumSizeBytes: Int64 = WallpaperHistoryStore.maximumSizeBytes) {
+    init(root: URL? = nil, maximumSizeBytes: Int64 = WallpaperHistoryStore.maximumSizeBytes) {
         self.root = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Wallpier/Rollback", isDirectory: true)
-        self.originalsRoot = originalsRoot ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Wallpier/Originals", isDirectory: true)
         limit = maximumSizeBytes
+    }
+
+    /// An owned copy of a cached remote original, under the same name, for the desktop to reference.
+    /// Falls back to the cached file (the earlier behavior) if the copy can't be made within the limit.
+    func retain(_ original: URL) -> URL {
+        let destination = root.appendingPathComponent(original.lastPathComponent)
+        if Self.validImage(destination) { return destination }
+        do {
+            let size = Int64(try original.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+            try files.createDirectory(at: root, withIntermediateDirectories: true)
+            guard try ownedBytes() + size <= limit else { throw CocoaError(.fileWriteOutOfSpace) }
+            // An invalid file here was never a usable desktop; replace it.
+            try? files.removeItem(at: destination)
+            // On APFS this is a clone: no extra space until the cache copy is evicted.
+            try files.copyItem(at: original, to: destination)
+            guard Self.validImage(destination) else { throw CocoaError(.fileReadCorruptFile) }
+            return destination
+        } catch {
+            try? files.removeItem(at: destination)
+            logger.error("Could not retain \(original.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return original
+        }
     }
 
     func prepare(previous: DisplayAssignment, replacement: DisplayAssignment) -> HistoryEntry {
@@ -29,8 +50,9 @@ actor WallpaperHistoryStore {
             return entry
         }
         // Resolve symlinks before deciding ownership: an external symlink isn't owned storage.
+        // Cached remote originals aren't owned either: Caches is purgeable.
         let resolved = source.resolvingSymlinksInPath()
-        if isDirectChild(source, of: originalsRoot) || isDirectChild(source, of: root) {
+        if isDirectChild(source, of: root) {
             if resolved.path != source.standardizedFileURL.path { entry.rollbackPath = resolved.path }
             return entry
         }
@@ -57,7 +79,7 @@ actor WallpaperHistoryStore {
         do {
             guard files.fileExists(atPath: root.path) else { return }
             for url in try files.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isRegularFileKey]) {
-                guard url.lastPathComponent.hasPrefix("rollback-"), isDirectChild(url, of: root),
+                guard isDirectChild(url, of: root),
                       !protected.contains(url.resolvingSymlinksInPath().path),
                       try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { continue }
                 try files.removeItem(at: url)
@@ -77,10 +99,7 @@ actor WallpaperHistoryStore {
             if Self.validImage(destination), try contentHash(destination) == hash { return destination }
             destination = root.appendingPathComponent("rollback-\(hash)-\(UUID()).\(suffix)")
         }
-        let existing = try files.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey])
-        let bytes = try existing.reduce(Int64(0)) { sum, url in
-            sum + Int64(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-        }
+        let bytes = try ownedBytes()
         guard bytes + Int64(size) <= limit else { throw CocoaError(.fileWriteOutOfSpace) }
         try Task.checkCancellation()
         do {
@@ -94,6 +113,12 @@ actor WallpaperHistoryStore {
             // This fresh, unique destination has never been referenced by a desktop/history.
             try? files.removeItem(at: destination)
             throw error
+        }
+    }
+
+    private func ownedBytes() throws -> Int64 {
+        try files.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey]).reduce(Int64(0)) { sum, url in
+            sum + Int64(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
         }
     }
 

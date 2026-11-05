@@ -278,7 +278,9 @@ struct WallpaperState: Codable, Equatable {
     var folderPath: String? { didSet { if folderPath != oldValue, activeRotationCollectionID == nil { rotationCursor = nil } } }
     var selectedImagePath: String?
     var selectedDisplayID: String?
-    var scalingMode: ScalingMode = .fill
+    /// Fit shows the whole wallpaper, leaving the desktop color around it rather than cropping. Older state files
+    /// always saved this value, so a saved Fill can't be told from the old default and is kept as a choice.
+    var scalingMode: ScalingMode = .fit
     var rotationInterval: RotationInterval = .off
     var shuffleEnabled = false
     var displayAssignments: [DisplayAssignment] = []
@@ -368,7 +370,7 @@ struct WallpaperState: Codable, Equatable {
         folderPath = decodedFolderPath
         selectedImagePath = try container.decodeIfPresent(String.self, forKey: .selectedImagePath)
         selectedDisplayID = try container.decodeIfPresent(String.self, forKey: .selectedDisplayID)
-        scalingMode = try container.decodeIfPresent(ScalingMode.self, forKey: .scalingMode) ?? .fill
+        scalingMode = try container.decodeIfPresent(ScalingMode.self, forKey: .scalingMode) ?? .fit
         rotationInterval = try container.decodeIfPresent(RotationInterval.self, forKey: .rotationInterval) ?? .off
         shuffleEnabled = try container.decodeIfPresent(Bool.self, forKey: .shuffleEnabled) ?? false
         displayAssignments = try container.decodeIfPresent([DisplayAssignment].self, forKey: .displayAssignments) ?? []
@@ -383,6 +385,23 @@ struct WallpaperState: Codable, Equatable {
         selectedCollectionID = try container.decodeIfPresent(UUID.self, forKey: .selectedCollectionID)
         activeRotationCollectionID = try container.decodeIfPresent(UUID.self, forKey: .activeRotationCollectionID)
         rotationCursor = try container.decodeIfPresent(String.self, forKey: .rotationCursor)
+    }
+}
+
+/// Gallery thumbnails crop every wallpaper to the display's shape, so captions name the shapes that
+/// crop noticeably. Ordinary landscape (3:2 to 16:9 and a little wider) needs no word.
+enum WallpaperShape {
+    static func name(width: Int, height: Int) -> String? {
+        guard width > 0, height > 0 else { return nil }
+        let ratio = Double(width) / Double(height)
+        if ratio < 0.95 { return "Portrait" }
+        if ratio <= 1.05 { return "Square" }
+        return ratio >= 2 ? "Ultrawide" : nil
+    }
+
+    /// "3840 × 2160", with the shape's name when it has one.
+    static func summary(width: Int, height: Int) -> String {
+        ["\(width) × \(height)", name(width: width, height: height)].compactMap { $0 }.joined(separator: " · ")
     }
 }
 

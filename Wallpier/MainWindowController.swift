@@ -86,8 +86,17 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private var resultOptions: WallhavenSearchOptions?
     private var searchErrorText: String?
     private var lastAppendFailure: Date?
+    /// After a failed page, further pages wait this long; Next is re-enabled when it ends.
+    private let appendRetryCooldown: TimeInterval = 5
+    private var appendRetryTask: Task<Void, Never>?
+    /// Next at the last loaded result asked for a page; it completes when that page arrives, if nothing changed meanwhile.
+    private struct PendingAdvance { let generation: UUID; let identity: String; let revision: Int; let query: WallhavenSearchOptions? }
+    private var pendingAdvance: PendingAdvance?
+    /// Bumped by every selection change, so a pending move can tell the user went elsewhere and came back.
+    private var selectionRevision = 0
+    private static let loadingMoreStatus = "Loading more results from Wallhaven…"
     /// Closing the preview, by any path, cancels its pending detail request so reopening can ask again.
-    private(set) var isViewerVisible = false { didSet { if oldValue && !isViewerVisible { cancelDetails() } } }
+    private(set) var isViewerVisible = false { didSet { if oldValue && !isViewerVisible { endPreviewSession() } } }
     /// How faithful the stage's image is. Completions may only replace it with an equal or better one.
     private var stageFidelity = PreviewFidelity.none
     /// The wallpaper whose preview details were requested; reselecting it doesn't request them again.
@@ -124,6 +133,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     let viewerView = ViewerView()
     let stageView = DesktopPreviewView()
     let previewTitleLabel = NSTextField(labelWithString: "No Wallpaper Selected")
+    /// Pointer navigation for the preview, beside the position in the browsable items. Same commands as ←/→ and ⌘[ ⌘].
+    let previewPreviousButton = NSButton()
+    let previewNextButton = NSButton()
+    let previewPositionLabel = NSTextField(labelWithString: "")
     let previewMetadataLabel = NSTextField(labelWithString: "")
     private let previewTagsLabel = NSTextField(labelWithString: "")
     /// Says what the stage is drawn from when it isn't the original: a low-resolution or a cropped thumbnail.
@@ -240,6 +253,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         rotationTask?.cancel()
         undoValidationTask?.cancel()
         statusClearTask?.cancel()
+        appendRetryTask?.cancel()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -397,7 +411,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let folderIcon = NSImageView(image: NSImage(systemSymbolName: "folder", accessibilityDescription: nil) ?? NSImage())
         folderIcon.contentTintColor = .secondaryLabelColor
         folderPathLabel.lineBreakMode = .byTruncatingMiddle
-        folderPathLabel.textColor = .secondaryLabelColor
+        folderPathLabel.allowsExpansionToolTips = true
+        folderPathLabel.textColor = .secondaryText
         folderPathLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         folderPathLabel.isSelectable = true
         folderPathLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -459,19 +474,20 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     private func configureViewer() {
         previewTitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        previewMetadataLabel.textColor = .secondaryLabelColor
-        previewTagsLabel.textColor = .tertiaryLabelColor
+        previewMetadataLabel.textColor = .secondaryText
+        previewTagsLabel.textColor = .secondaryText
         previewTagsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         for label in [previewTitleLabel, previewMetadataLabel, previewTagsLabel] {
             label.alignment = .center
             label.lineBreakMode = .byTruncatingTail
+            label.allowsExpansionToolTips = true
             label.isSelectable = true
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
         previewNoticeIcon.symbolConfiguration = .init(pointSize: NSFont.smallSystemFontSize, weight: .regular)
-        previewNoticeIcon.contentTintColor = .secondaryLabelColor
+        previewNoticeIcon.contentTintColor = .secondaryText
         previewNoticeLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        previewNoticeLabel.textColor = .secondaryLabelColor
+        previewNoticeLabel.textColor = .secondaryText
         previewNoticeLabel.lineBreakMode = .byTruncatingTail
         previewNoticeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         approximatePreviewNotice.setViews([previewNoticeIcon, previewNoticeLabel], in: .leading)
@@ -481,10 +497,31 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         approximatePreviewNotice.isHidden = true
         // Even the original's pixels only estimate the desktop: macOS's own rendering isn't reproduced.
         stageView.toolTip = "An estimate of how the selected display and scaling show this wallpaper."
-        let caption = NSStackView(views: [previewTitleLabel, previewMetadataLabel, previewTagsLabel, approximatePreviewNotice])
+        for (button, symbol, label, key) in [(previewPreviousButton, "chevron.left", "Previous Wallpaper", "←"),
+                                             (previewNextButton, "chevron.right", "Next Wallpaper", "→")] {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+            button.isBordered = false
+            button.imagePosition = .imageOnly
+            button.symbolConfiguration = .init(pointSize: 12, weight: .semibold)
+            button.contentTintColor = .secondaryText
+            // Clicking keeps keyboard focus in the preview, so ←/→ go on working after a click.
+            button.refusesFirstResponder = true
+            button.target = self; button.action = #selector(previewPagerClicked(_:))
+            button.toolTip = "\(label) (\(key))"
+            button.setAccessibilityLabel(label)
+            button.widthAnchor.constraint(equalToConstant: 28).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        }
+        previewPositionLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        previewPositionLabel.textColor = .secondaryText
+        previewPositionLabel.alignment = .center
+        let pager = NSStackView(views: [previewPreviousButton, previewPositionLabel, previewNextButton])
+        pager.spacing = 4
+        let caption = NSStackView(views: [pager, previewTitleLabel, previewMetadataLabel, previewTagsLabel, approximatePreviewNotice])
         caption.orientation = .vertical
         caption.spacing = 3
         caption.setHuggingPriority(.required, for: .vertical)
+        caption.setCustomSpacing(4, after: pager)
         caption.setCustomSpacing(5, after: previewTitleLabel)
         for subview in [stageView, caption] {
             subview.translatesAutoresizingMaskIntoConstraints = false
@@ -494,7 +531,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             stageView.topAnchor.constraint(equalTo: viewerView.topAnchor, constant: 20),
             stageView.leadingAnchor.constraint(equalTo: viewerView.leadingAnchor, constant: 28),
             stageView.trailingAnchor.constraint(equalTo: viewerView.trailingAnchor, constant: -28),
-            caption.topAnchor.constraint(equalTo: stageView.bottomAnchor, constant: 14),
+            caption.topAnchor.constraint(equalTo: stageView.bottomAnchor, constant: 8),
             caption.centerXAnchor.constraint(equalTo: viewerView.centerXAnchor),
             caption.leadingAnchor.constraint(greaterThanOrEqualTo: viewerView.leadingAnchor, constant: 28),
             caption.bottomAnchor.constraint(equalTo: viewerView.bottomAnchor, constant: -16)
@@ -511,9 +548,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         busyIndicator.controlSize = .small
         busyIndicator.isDisplayedWhenStopped = false
         selectionLabel.lineBreakMode = .byTruncatingTail
+        selectionLabel.allowsExpansionToolTips = true
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.allowsExpansionToolTips = true
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = .secondaryText
         statusLabel.isHidden = true
         let text = NSStackView(views: [selectionLabel, statusLabel])
         text.orientation = .vertical
@@ -527,10 +566,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         displayPopUp.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
         displayPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         setWallpaperButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 118).isActive = true
-        applyBar.setViews([busyIndicator, text, favoriteButton, moreButton], in: .leading)
-        applyBar.setViews([displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
-        applyBar.setCustomSpacing(10, after: text)
+        // The heart and ⋯ keep one place whatever the selection's name or status line, so they never
+        // shift while browsing; a wider gap separates them from the three controls that apply.
+        applyBar.setViews([busyIndicator, text], in: .leading)
+        applyBar.setViews([favoriteButton, moreButton, displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
         applyBar.setCustomSpacing(4, after: favoriteButton)
+        applyBar.setCustomSpacing(14, after: moreButton)
         applyBar.spacing = 8
         applyBar.edgeInsets = NSEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
         applyBar.setAccessibilityLabel("Selected wallpaper")
@@ -624,7 +665,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
     private var selectedScalingMode: ScalingMode {
         let index = scalingPopUp.indexOfSelectedItem
-        return ScalingMode.allCases.indices.contains(index) ? ScalingMode.allCases[index] : .fill
+        return ScalingMode.allCases.indices.contains(index) ? ScalingMode.allCases[index] : state.scalingMode
     }
     private var selectedRotationInterval: RotationInterval {
         let index = rotationPopUp.indexOfSelectedItem
@@ -654,6 +695,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         isSearching = false
         state.currentSource = source
         stateStore.save(state)
+        pendingAdvance = nil
         remoteThumbnailProvider.reset(); cancelDetails()
         isViewerVisible = false
         updateSourceUI()
@@ -681,16 +723,19 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         else { window?.makeFirstResponder(searchField) }
     }
 
+    // A new search or filter replaces the results being browsed, so it returns to the gallery that shows them,
+    // rather than leaving the preview to vanish and its wallpaper to change when the request completes.
     @objc func search(_ sender: Any?) {
+        isViewerVisible = false
         if state.currentSource != .discover {
-            state.currentSource = .discover; isViewerVisible = false; updateSourceUI()
+            state.currentSource = .discover; updateSourceUI()
         }
         persistSearchOptions(); performSearch(page: 1, appending: false)
     }
 
     @objc private func searchOptionChanged(_ sender: Any?) {
         persistSearchOptions()
-        if state.currentSource == .discover { performSearch(page: 1, appending: false) } else { invalidateSearch() }
+        if state.currentSource == .discover { isViewerVisible = false; performSearch(page: 1, appending: false) } else { invalidateSearch() }
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -703,6 +748,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func invalidateSearch() {
+        pendingAdvance = nil
         searchTask?.cancel()
         searchGeneration = UUID()
         isSearching = false
@@ -751,6 +797,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         searchGeneration = generation
         searchErrorText = nil
         if !appending {
+            pendingAdvance = nil
             remoteThumbnailProvider.reset()
             remoteResults = []
             currentPage = 0; lastPage = 0; totalResults = 0
@@ -783,9 +830,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 currentPage = result.currentPage; lastPage = result.lastPage; totalResults = result.total
                 isSearching = false
                 updateEmptyAndPagination(); updateControlAvailability(); stateStore.save(state)
+                if appending, statusLabel.stringValue == Self.loadingMoreStatus { showStatus("", isError: false) }
                 if let remaining = result.rateLimit.remaining, remaining < 10 {
                     showStatus("Wallhaven allows \(remaining) more requests this minute.", isError: false)
                 }
+                if appending { finishPendingAdvance(generation) }
                 DispatchQueue.main.async { [weak self] in self?.loadMoreIfNeeded() }
             } catch is CancellationError {
                 return
@@ -793,7 +842,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 guard !Task.isCancelled, searchGeneration == generation else { return }
                 isSearching = false
                 if appending {
-                    lastAppendFailure = Date()
+                    pendingAdvance = nil
+                    let failure = Date()
+                    lastAppendFailure = failure
+                    appendRetryTask?.cancel()
+                    appendRetryTask = Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: UInt64(((self?.appendRetryCooldown ?? 5) + 0.1) * 1_000_000_000))
+                        guard let self, !Task.isCancelled, lastAppendFailure == failure else { return }
+                        updateControlAvailability()
+                    }
                     showStatus("Couldn’t load more results. \(friendlyMessage(for: error))", isError: true)
                 } else {
                     searchErrorText = friendlyMessage(for: error)
@@ -808,9 +865,14 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     /// Loads the next Discover page when the user nears the end of the grid. A failed page waits
     /// a few seconds before scrolling can retry it, so an outage never turns into a request loop.
+    /// Discover has result pages that aren't loaded yet: the loaded results aren't the whole set.
+    private var hasUnloadedResults: Bool { state.currentSource == .discover && currentPage < lastPage }
+    private var canLoadMoreResults: Bool {
+        hasUnloadedResults && !isSearching && Date().timeIntervalSince(lastAppendFailure ?? .distantPast) > appendRetryCooldown
+    }
+
     private func loadMoreIfNeeded() {
-        guard state.currentSource == .discover, !isSearching, currentPage < lastPage,
-              !galleryScroll.isHidden, Date().timeIntervalSince(lastAppendFailure ?? .distantPast) > 5 else { return }
+        guard canLoadMoreResults, !galleryScroll.isHidden else { return }
         let visible = galleryScroll.documentVisibleRect
         guard visible.maxY >= collectionView.frame.height - max(visible.height * 0.5, 200) else { return }
         performSearch(page: currentPage + 1, appending: true)
@@ -893,7 +955,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             guard let self else { return }
             defer { downloadTask = nil; updateControlAvailability() }
             do {
-                let url = try await localOriginal(for: reference)
+                let url = await historyStore.retain(try await localOriginal(for: reference))
                 try Task.checkCancellation()
                 await applyWallpaper(url, to: screen, scaling: scaling, source: source)
             } catch is CancellationError {
@@ -989,9 +1051,67 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     @objc func previousWallpaper(_ sender: Any?) { moveSelection(direction: -1) }
     @objc func nextWallpaper(_ sender: Any?) { moveSelection(direction: 1) }
 
+    /// Where Previous (−1) or Next (+1) leads. Complete sources wrap around; Discover doesn't while more results
+    /// remain on Wallhaven, since wrapping would present the loaded pages as the whole result set.
+    private func navigationIndex(_ direction: Int) -> Int? {
+        guard let next = WallpaperNavigation.index(after: selectedIndex, direction: direction, count: currentItems.count),
+              next != selectedIndex else { return nil }
+        if hasUnloadedResults, let current = selectedIndex, direction > 0 ? next < current : next > current { return nil }
+        return next
+    }
+
+    private func canNavigate(_ direction: Int) -> Bool {
+        navigationIndex(direction) != nil || (direction > 0 && selectedIndex != nil && canLoadMoreResults)
+    }
+
+    /// The one navigation path for arrow keys, ⌘[ ⌘] and the preview's buttons. Next past the last loaded result
+    /// loads the next page, as scrolling the gallery would, and stays put: arriving results never move the selection.
     private func moveSelection(direction: Int) {
-        guard let next = WallpaperNavigation.index(after: selectedIndex, direction: direction, count: currentItems.count) else { NSSound.beep(); return }
-        selectItem(at: next)
+        if let next = navigationIndex(direction) { selectItem(at: next); return }
+        if direction > 0, let identity = selectedItem?.identifier, canLoadMoreResults {
+            showStatus(Self.loadingMoreStatus, isError: false)
+            performSearch(page: currentPage + 1, appending: true)
+            pendingAdvance = PendingAdvance(generation: searchGeneration, identity: identity, revision: selectionRevision, query: resultOptions)
+            return
+        }
+        NSSound.beep()
+    }
+
+    /// The page a boundary Next asked for has arrived: finish that move only if it still means the same thing —
+    /// same request, preview still open, same wallpaper selected with no selection change since, same applied query.
+    private func finishPendingAdvance(_ generation: UUID) {
+        guard let pending = pendingAdvance, pending.generation == generation else { return }
+        pendingAdvance = nil
+        guard isViewerVisible, pending.revision == selectionRevision, selectedItem?.identifier == pending.identity,
+              resultOptions == pending.query, let index = selectedIndex, currentItems.indices.contains(index + 1) else { return }
+        selectItem(at: index + 1)
+    }
+
+    /// Clicking the pager gives the keyboard back to the preview, ending any search-field editing (its draft is kept).
+    @objc private func previewPagerClicked(_ sender: NSButton) {
+        window?.makeFirstResponder(viewerView)
+        moveSelection(direction: sender === previewPreviousButton ? -1 : 1)
+    }
+
+    /// Closing the preview ends everything it was waiting for: details, a pending boundary move, the loading state.
+    private func endPreviewSession() {
+        cancelDetails()
+        pendingAdvance = nil
+        stageView.placeholder = .none
+    }
+
+    private func updatePreviewNavigation() {
+        let count = currentItems.count
+        if let index = selectedIndex {
+            previewPositionLabel.stringValue = "\((index + 1).formatted()) of \(count.formatted())" + (hasUnloadedResults ? " loaded" : "")
+        } else {
+            previewPositionLabel.stringValue = ""
+        }
+        previewPositionLabel.toolTip = hasUnloadedResults
+            ? "\(count.formatted()) of \(totalResults.formatted()) Wallhaven results are loaded. Next at the last one loads more." : nil
+        previewPositionLabel.setAccessibilityLabel(previewPositionLabel.stringValue.isEmpty ? nil : "Wallpaper \(previewPositionLabel.stringValue)")
+        previewPreviousButton.isEnabled = canNavigate(-1)
+        previewNextButton.isEnabled = canNavigate(1)
     }
 
     private func selectItem(at index: Int) {
@@ -1004,6 +1124,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func rememberSelection(_ item: BrowserItem) {
+        selectionRevision += 1
         switch item {
         case .local(let url): state.selectedImagePath = url.path
         case .remote(let ref): state.selectedRemoteIdentity = ref.identityKey
@@ -1025,6 +1146,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func updatePreview(for item: BrowserItem?) {
         if item?.identifier != detailIdentity { cancelDetails() }
         stageView.image = nil
+        stageView.placeholder = .none
         stageFidelity = .none
         updatePreviewNotice()
         guard let item else {
@@ -1039,14 +1161,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch item {
         case .local(let url):
             stageView.imagePixelSize = .zero
-            previewMetadataLabel.stringValue = (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath
+            // The folder is already named by the window title and folder bar; the caption describes the picture.
+            previewMetadataLabel.stringValue = ""
             previewTagsLabel.stringValue = url.pathExtension.uppercased()
             Task.detached(priority: .utility) {
                 let size = DesktopPreviewView.pixelSize(of: url)
                 await MainActor.run { [weak self] in
                     guard let self, case .local(let selectedURL) = self.selectedItem, selectedURL == url, let size else { return }
                     self.stageView.imagePixelSize = size
-                    self.previewMetadataLabel.stringValue = "\(Int(size.width)) × \(Int(size.height)) · " + self.previewMetadataLabel.stringValue
+                    self.previewMetadataLabel.stringValue = WallpaperShape.summary(width: Int(size.width), height: Int(size.height))
                 }
             }
         case .remote(let ref):
@@ -1061,6 +1184,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     /// Draws the selected wallpaper on the stage and fetches the details the preview shows. Only while
     /// the preview is visible: the gallery shows neither, so browsing it costs no requests.
     private func loadPreviewContent(for item: BrowserItem) {
+        if stageView.image == nil { stageView.placeholder = .loading }
         switch item {
         case .local(let url): loadLocalPreview(url, identity: item.identifier)
         case .remote(let ref):
@@ -1080,7 +1204,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func loadLocalPreview(_ url: URL, identity: String, onFailure: (() -> Void)? = nil) {
         thumbnailProvider.requestThumbnail(for: url, maximumPixelSize: 1800) { [weak self] image in
             guard let self, selectedItem?.identifier == identity else { return }
-            guard let image else { onFailure?(); return }
+            guard let image else {
+                if let onFailure { onFailure() } else if isViewerVisible, stageFidelity == .none { stageView.placeholder = .unavailable }
+                return
+            }
             showOnStage(image, fidelity: .original, identity: identity)
         }
     }
@@ -1088,7 +1215,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func loadRemotePreview(_ ref: WallpaperReference) {
         let (url, fidelity) = ref.remotePreview
         remoteThumbnailProvider.requestThumbnail(for: url, maximumPixelSize: 1000) { [weak self] image in
-            guard let self, let image else { return }
+            guard let self else { return }
+            guard let image else {
+                if isViewerVisible, selectedItem?.identifier == ref.identityKey, stageFidelity == .none { stageView.placeholder = .unavailable }
+                return
+            }
             showOnStage(image, fidelity: fidelity, identity: ref.identityKey)
         }
     }
@@ -1120,7 +1251,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func configureRemoteMetadata(_ reference: WallpaperReference) {
-        let parts = ["\(reference.width) × \(reference.height)", reference.uploader.map { "by \($0)" },
+        let parts = [WallpaperShape.summary(width: reference.width, height: reference.height), reference.uploader.map { "by \($0)" },
                      reference.cachedLocalPath == nil ? nil : "Original downloaded"]
         previewMetadataLabel.stringValue = parts.compactMap { $0 }.joined(separator: " · ")
         previewTagsLabel.stringValue = reference.tags.isEmpty ? "Wallhaven · SFW" : reference.tags.joined(separator: " · ")
@@ -1159,7 +1290,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch selectedItem {
         case nil: title = "No Wallpaper Selected"; detail = ""
         case .local(let url)?: title = url.deletingPathExtension().lastPathComponent; detail = url.pathExtension.uppercased()
-        case .remote(let ref)?: title = ref.wallpaperID; detail = "\(ref.width) × \(ref.height)"
+        case .remote(let ref)?: title = ref.wallpaperID; detail = WallpaperShape.summary(width: ref.width, height: ref.height)
         }
         let text = NSMutableAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium),
@@ -1167,7 +1298,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         if !detail.isEmpty {
             text.append(NSAttributedString(string: "  " + detail, attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
-                .foregroundColor: NSColor.secondaryLabelColor]))
+                .foregroundColor: NSColor.secondaryText]))
         }
         selectionLabel.attributedStringValue = text
         let isFavorite = selectedReference.map(state.isFavorite) ?? false
@@ -1204,6 +1335,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let changed = target.isHidden
         viewerView.isHidden = !showViewer
         galleryScroll.isHidden = showViewer || !hasItems
+        updateScopeBar()
         viewModeControl.selectedSegment = showViewer ? 1 : 0
         viewModeControl.setEnabled(hasItems, forSegment: 1)
         if !showViewer, window?.firstResponder === viewerView { window?.makeFirstResponder(collectionView) }
@@ -1211,6 +1343,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             target.alphaValue = 0
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
                 target.animator().alphaValue = 1
             }
         } else {
@@ -1534,7 +1667,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                     let url = try await localOriginal(for: ref)
                     try Task.checkCancellation()
                     guard state.activeRotationCollectionID == id, state.rotationInterval != .off else { return }
-                    await applyWallpaper(url, to: screen, scaling: scaling, source: .rotation)
+                    await applyWallpaper(await historyStore.retain(url), to: screen, scaling: scaling, source: .rotation)
                 } catch {
                     if !Task.isCancelled { showStatus("Automatic rotation failed: \(friendlyMessage(for: error))", isError: true) }
                 }
@@ -1726,11 +1859,16 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     // MARK: - Presentation updates
 
-    private func updateSourceUI() {
+    /// Filters and the folder bar act on the gallery's results; the preview inspects one wallpaper, so they step aside.
+    private func updateScopeBar() {
         discoverBar.isHidden = state.currentSource != .discover
         localBar.isHidden = state.currentSource != .local || state.folderPath == nil
-        scopeBar.isHidden = discoverBar.isHidden && localBar.isHidden
+        scopeBar.isHidden = (discoverBar.isHidden && localBar.isHidden) || !viewerView.isHidden
         scopeBarCollapsed.isActive = scopeBar.isHidden
+    }
+
+    private func updateSourceUI() {
+        updateScopeBar()
         if let path = state.folderPath, folderPathLabel.stringValue.isEmpty {
             folderPathLabel.stringValue = (path as NSString).abbreviatingWithTildeInPath; folderPathLabel.toolTip = path
         }
@@ -1818,7 +1956,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             }
         case .favorites:
             emptyStateView.show(symbolName: "heart", title: "No Favorites Yet",
-                                message: "Click the heart or press ⌘D on any Wallhaven wallpaper to keep it here.")
+                                message: "Click the heart or press ⌘D on any Wallhaven wallpaper to keep it here.",
+                                action: ("Browse Discover", #selector(showDiscover(_:)), self))
         case .collections:
             if let collection = selectedCollection {
                 emptyStateView.show(symbolName: "rectangle.stack", title: "“\(collection.name)” Is Empty",
@@ -1839,6 +1978,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         undoButton.toolTip = canUndoWallpaper ? "Undo Wallpaper Change" : "No restorable wallpaper change"
         favoriteButton.isHidden = selectedReference == nil
         moreButton.isHidden = !hasSelection
+        updatePreviewNavigation()
         // An empty gallery shows its own spinner; the bar's is for work behind visible content.
         let busy = !canMutate || ((isSearching || isLoadingFolder) && !currentItems.isEmpty)
         if busy { busyIndicator.startAnimation(nil) } else { busyIndicator.stopAnimation(nil) }
@@ -1880,7 +2020,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             }
         }
         statusLabel.stringValue = text
-        statusLabel.textColor = isError ? .systemRed : .secondaryLabelColor
+        statusLabel.textColor = isError ? .systemRed : .secondaryText
         statusLabel.toolTip = text
         statusLabel.isHidden = text.isEmpty
         statusLabel.setAccessibilityLabel(text)
@@ -1892,9 +2032,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let alert = NSAlert(); alert.alertStyle = .warning; alert.messageText = title; alert.informativeText = message; alert.addButton(withTitle: "OK"); alert.beginSheetModal(for: window)
     }
 
-    @objc func showHelp(_ sender: Any?) {
-        let alert = NSAlert(); alert.messageText = "Wallpier Help"
-        alert.informativeText = """
+    // Saved scaling choices are never rewritten: an old saved Fill can't be told from a deliberate one.
+    static let helpText = """
         Discover searches safe-for-work wallpapers on Wallhaven. Your folder, Favorites and collections are in the sidebar.
 
         Select a wallpaper and press Space to preview it on your display’s shape; ← and → browse, Esc returns. \
@@ -1902,8 +2041,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         Undo Wallpaper Change, in the toolbar and Wallpaper menu, restores the previous wallpaper; \
         ⌘Z undoes removing a wallpaper from Favorites or a collection.
 
+        Fit to Screen is the default for new installations. Existing scaling choices are preserved. \
+        If your wallpapers are cropped, select Fit to Screen once; Wallpier remembers your choice.
+
         Drag wallpapers onto Favorites or a collection to keep them. The rotation button in the toolbar changes the wallpaper on a schedule while Wallpier is open.
         """
+
+    @objc func showHelp(_ sender: Any?) {
+        let alert = NSAlert(); alert.messageText = "Wallpier Help"
+        alert.informativeText = Self.helpText
         alert.addButton(withTitle: "OK")
         if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
     }
@@ -2008,7 +2154,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         case #selector(makeThumbnailsLarger(_:)): return thumbnailSizeIndex < GalleryLayout.thumbnailWidths.count - 1
         case #selector(makeThumbnailsSmaller(_:)): return thumbnailSizeIndex > 0
         case #selector(setWallpaper(_:)): return selectedItem != nil && selectedScreen != nil && canMutate
-        case #selector(previousWallpaper(_:)), #selector(nextWallpaper(_:)): return !currentItems.isEmpty
+        case #selector(previousWallpaper(_:)): return canNavigate(-1)
+        case #selector(nextWallpaper(_:)): return canNavigate(1)
         case #selector(undoWallpaperChange(_:)): return canUndoWallpaper && canMutate
         case #selector(toggleFavorite(_:)):
             menuItem.title = selectedReference.map(state.isFavorite) == true ? "Remove from Favorites" : "Add to Favorites"
@@ -2052,6 +2199,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let reusable = collectionView.makeItem(withIdentifier: WallpaperCollectionViewItem.reuseIdentifier, for: indexPath)
         guard let item = reusable as? WallpaperCollectionViewItem, currentItems.indices.contains(indexPath.item) else { return reusable }
         let represented = currentItems[indexPath.item]
+        item.isEmphasized = self.collectionView.isSelectionEmphasized
         item.configure(identifier: represented.identifier, title: represented.title, toolTip: represented.toolTip)
         // Decode at the cell's pixel size; switch to Wallhaven's larger thumbnail only when cells need it.
         let pixels = galleryLayout.fittedItemSize.width * (window?.backingScaleFactor ?? 2)
