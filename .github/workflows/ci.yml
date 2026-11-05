@@ -1,0 +1,94 @@
+name: macOS CI
+
+on:
+  pull_request:
+    branches: [main, 'release/**', codex/opus/rc1-import]
+  push:
+    branches: [main, 'release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15-intel, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcrun swift --version
+          uname -m
+      - name: Deterministic tests (reviewed allowlist only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests=()
+          while IFS= read -r name; do
+            [[ -z "$name" || "$name" == \#* ]] && continue
+            tests+=("-only-testing:WallpierTests/WallpierTests/$name")
+          done < Scripts/ci-core-tests.txt
+          test "${#tests[@]}" -gt 0
+          env -u WALLPIER_CAPTURE_DIR -u TEST_RUNNER_WALLPIER_CAPTURE_DIR \
+            xcodebuild -project Wallpier.xcodeproj -scheme Wallpier \
+            -configuration Debug -destination "platform=macOS,arch=$(uname -m)" \
+            -derivedDataPath "$RUNNER_TEMP/wallpier-core" \
+            -resultBundlePath "$RUNNER_TEMP/core.xcresult" \
+            -parallel-testing-enabled NO -enableCodeCoverage NO \
+            "${tests[@]}" CODE_SIGNING_ALLOWED=NO test
+
+  release-audit:
+    name: Release artifact audit
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build actual private test package
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          mkdir -p "$RUNNER_TEMP/package"
+          bash Scripts/package-test-build.sh "$RUNNER_TEMP/package"
+      - name: Inspect the shipped binary (expected to fail before RC1 P2 is fixed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          archives=("$RUNNER_TEMP/package/"*.zip)
+          test "${#archives[@]}" -eq 1
+          mkdir -p "$RUNNER_TEMP/shipped"
+          ditto -x -k "${archives[0]}" "$RUNNER_TEMP/shipped"
+          app="$RUNNER_TEMP/shipped/Wallpier.app"
+          codesign --verify --strict --deep "$app"
+          codesign -d --entitlements :- "$app" > "$RUNNER_TEMP/entitlements.plist" 2> "$RUNNER_TEMP/signature.log"
+          python3 - <<'PY'
+          import os, pathlib, plistlib, re, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          app = root / 'shipped/Wallpier.app'
+          binary = app / 'Contents/MacOS/Wallpier'
+          raw_entitlements = (root / 'entitlements.plist').read_bytes().strip()
+          entitlements = plistlib.loads(raw_entitlements) if raw_entitlements else {}
+          assert not entitlements.get('com.apple.security.get-task-allow', False), 'Debug entitlement is enabled'
+          signature = subprocess.run(['codesign', '-dvvv', str(app)], capture_output=True, text=True, check=True).stderr
+          assert re.search(r'flags=.*runtime', signature), 'Hardened runtime is missing'
+          arches = set(subprocess.check_output(['xcrun', 'lipo', '-archs', str(binary)], text=True).split())
+          assert arches == {'arm64', 'x86_64'}, f'Unexpected architecture slices: {arches}'
+          for arch in sorted(arches):
+              symbols = subprocess.check_output(['xcrun', 'nm', '-arch', arch, str(binary)], text=True)
+              sections = subprocess.check_output(['xcrun', 'otool', '-arch', arch, '-l', str(binary)], text=True)
+              assert not re.search(r'__llvm_(profile|prf|cov)', symbols + sections), f'Coverage instrumentation in {arch}'
+          PY
