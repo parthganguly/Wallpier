@@ -278,7 +278,9 @@ struct WallpaperState: Codable, Equatable {
     var folderPath: String? { didSet { if folderPath != oldValue, activeRotationCollectionID == nil { rotationCursor = nil } } }
     var selectedImagePath: String?
     var selectedDisplayID: String?
-    var scalingMode: ScalingMode = .fill
+    /// Fit shows the whole wallpaper, leaving the desktop color around it rather than cropping. Older state files
+    /// always saved this value, so a saved Fill can't be told from the old default and is kept as a choice.
+    var scalingMode: ScalingMode = .fit
     var rotationInterval: RotationInterval = .off
     var shuffleEnabled = false
     var displayAssignments: [DisplayAssignment] = []
@@ -368,7 +370,7 @@ struct WallpaperState: Codable, Equatable {
         folderPath = decodedFolderPath
         selectedImagePath = try container.decodeIfPresent(String.self, forKey: .selectedImagePath)
         selectedDisplayID = try container.decodeIfPresent(String.self, forKey: .selectedDisplayID)
-        scalingMode = try container.decodeIfPresent(ScalingMode.self, forKey: .scalingMode) ?? .fill
+        scalingMode = try container.decodeIfPresent(ScalingMode.self, forKey: .scalingMode) ?? .fit
         rotationInterval = try container.decodeIfPresent(RotationInterval.self, forKey: .rotationInterval) ?? .off
         shuffleEnabled = try container.decodeIfPresent(Bool.self, forKey: .shuffleEnabled) ?? false
         displayAssignments = try container.decodeIfPresent([DisplayAssignment].self, forKey: .displayAssignments) ?? []

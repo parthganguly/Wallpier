@@ -14,15 +14,60 @@ final class DesktopPreviewView: NSView {
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.42) : NSColor(white: 0, alpha: 0.16)
     }
 
-    var image: NSImage? { didSet { needsDisplay = true } }
+    var image: NSImage? { didSet { needsDisplay = true; if image != nil { placeholder = .none } } }
     var imagePixelSize: CGSize = .zero { didSet { needsDisplay = true } }
-    var displayPixelSize = CGSize(width: 2880, height: 1800) { didSet { needsDisplay = true } }
+    var displayPixelSize = CGSize(width: 2880, height: 1800) { didSet { needsDisplay = true; needsLayout = true } }
     var scaling: ScalingMode = .fill { didSet { needsDisplay = true } }
+
+    /// What the empty stage says while it has no picture. Never a substitute image: a spinner once loading
+    /// has taken a moment (cached pictures arrive first, so browsing them never flickers), or a note that
+    /// the preview couldn't be loaded, so an empty display isn't mistaken for a dark wallpaper.
+    enum Placeholder { case none, loading, unavailable }
+    static let loadingIndicatorDelay: TimeInterval = 0.2
+    var placeholder: Placeholder = .none { didSet { if placeholder != oldValue { updatePlaceholder() } } }
+    private let spinner = NSProgressIndicator()
+    private let unavailableLabel = NSTextField(labelWithString: "Preview Unavailable")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         setAccessibilityElement(true)
         setAccessibilityRole(.image)
+        // Both sit on the desktop fill, which is dark in either appearance.
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.appearance = NSAppearance(named: .darkAqua)
+        unavailableLabel.appearance = NSAppearance(named: .darkAqua)
+        unavailableLabel.textColor = .secondaryLabelColor
+        unavailableLabel.isHidden = true
+        addSubview(spinner)
+        addSubview(unavailableLabel)
+    }
+
+    private(set) var isShowingLoadingIndicator = false
+
+    private func updatePlaceholder() {
+        NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(startSpinner), object: nil)
+        spinner.stopAnimation(nil); isShowingLoadingIndicator = false
+        unavailableLabel.isHidden = placeholder != .unavailable
+        setAccessibilityValue(placeholder == .unavailable ? "Preview unavailable" : nil)
+        // Common modes, so the spinner still appears while the run loop tracks a drag, a live resize or a menu.
+        if placeholder == .loading { perform(#selector(startSpinner), with: nil, afterDelay: Self.loadingIndicatorDelay, inModes: [.common]) }
+    }
+
+    @objc private func startSpinner() {
+        guard placeholder == .loading else { return }
+        spinner.startAnimation(nil); isShowingLoadingIndicator = true
+    }
+
+    override func layout() {
+        super.layout()
+        let stage = stageRect
+        spinner.sizeToFit()
+        spinner.setFrameOrigin(NSPoint(x: stage.midX - spinner.frame.width / 2, y: stage.midY - spinner.frame.height / 2))
+        unavailableLabel.sizeToFit()
+        unavailableLabel.setFrameOrigin(NSPoint(x: (stage.midX - unavailableLabel.frame.width / 2).rounded(),
+                                                y: (stage.midY - unavailableLabel.frame.height / 2).rounded()))
     }
 
     required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }

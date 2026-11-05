@@ -14,7 +14,7 @@ class WallpaperService {
         try NSWorkspace.shared.setDesktopImageURL(
             imageURL,
             for: screen,
-            options: options(for: scaling)
+            options: Self.desktopImageOptions(for: scaling)
         )
         return WallpaperSetResult(
             elapsedTime: ProcessInfo.processInfo.systemUptime - start
@@ -26,10 +26,11 @@ class WallpaperService {
             return nil
         }
         let options = NSWorkspace.shared.desktopImageOptions(for: screen) ?? [:]
-        return (imageURL, scalingMode(from: options))
+        return (imageURL, Self.scalingMode(from: options))
     }
 
-    private func options(for scaling: ScalingMode) -> [NSWorkspace.DesktopImageOptionKey: Any] {
+    /// What NSWorkspace is asked for. Fit and Fill both scale proportionally up or down; only Fill may clip.
+    static func desktopImageOptions(for scaling: ScalingMode) -> [NSWorkspace.DesktopImageOptionKey: Any] {
         switch scaling {
         case .fill:
             return [
@@ -49,7 +50,7 @@ class WallpaperService {
         }
     }
 
-    private func scalingMode(
+    static func scalingMode(
         from options: [NSWorkspace.DesktopImageOptionKey: Any]
     ) -> ScalingMode {
         let scalingValue = (options[.imageScaling] as? NSNumber)?.uintValue

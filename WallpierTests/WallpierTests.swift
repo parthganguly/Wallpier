@@ -968,8 +968,10 @@ extension WallpierTests {
         XCTAssertTrue(controller.viewerView.isHidden)
     }
 
-    /// Return goes through the real event path (key equivalents → menu bar → first responder chain),
-    /// not a direct keyDown call, so key-equivalent and responder interception are both exercised.
+    /// Deterministic dispatch: each key goes to the window's sendEvent (first responder → responder chain →
+    /// default button), not a direct keyDown call, so responder and default-button interception are exercised.
+    /// window.sendEvent skips the menu bar; Return through the activated app and production menu bar is
+    /// covered separately by testActivatedReturnSpaceArrowsAndEscapeKeepTheirMeanings.
     @MainActor
     func testReturnSetsFromGalleryAndPreviewButSearchesFromSearchField() throws {
         let root = try historyTestFolder()
@@ -984,9 +986,9 @@ extension WallpierTests {
             let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
                                          windowNumber: window.windowNumber, context: nil, characters: characters,
                                          charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!
-            // NSApplication hands a plain key to the key window's sendEvent, which dispatches it to
-            // the first responder, up the responder chain, and finally to the default button.
-            // A hosted test app cannot activate, so the window reports itself key.
+            // The key window's sendEvent dispatches a plain key to the first responder, up the responder
+            // chain, and finally to the default button. KeyTestWindow reports itself key, so this doesn't
+            // depend on the test app being active.
             window.sendEvent(event)
             // A button's key equivalent highlights the button first and sends its action afterwards.
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
@@ -1154,7 +1156,8 @@ extension WallpierTests {
         XCTAssertEqual(sidebar.rows.filter(\.isRotating).map(\.title), ["Quiet Mornings"])
         XCTAssertTrue(controller.validateMenuItem(interval))
         XCTAssertEqual(interval.state, .on)
-        XCTAssertTrue(controller.rotationSummaryLabel.stringValue.contains("“Quiet Mornings” on Studio Display using Fill Screen"))
+        // The fixture never chooses a scaling mode, so it has the default: Fit (formerly Fill).
+        XCTAssertTrue(controller.rotationSummaryLabel.stringValue.contains("“Quiet Mornings” on Studio Display using Fit to Screen"))
         interval.tag = 0
         controller.setRotationInterval(interval)
         XCTAssertEqual(controller.state.rotationInterval, .off)
@@ -1732,12 +1735,44 @@ private final class ActiveApp {
         }
         AppDelegate().configureMainMenu(for: controller)
         _ = controller.perform(NSSelectorFromString("refreshUndoAvailability"))
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        pump(5) { NSApp.isActive && NSApp.keyWindow === self.window && self.controller.undoButton.isEnabled }
+        activate()
+        pump(5) { self.controller.undoButton.isEnabled }       // Undo history is validated asynchronously.
     }
 
-    var isActiveAndKey: Bool { NSApp.isActive && NSApp.keyWindow === window }
+    /// Active, with the fixture window or a sheet attached to it (a naming prompt, say) as the key window.
+    var isActiveAndKey: Bool { NSApp.isActive && ownsKeyWindow }
+    private var ownsKeyWindow: Bool {
+        var candidate = NSApp.keyWindow
+        while let current = candidate { if current === window { return true }; candidate = current.sheetParent }
+        return false
+    }
+
+    // Activation and the key window belong to the window server: another app, the user or a tiling window manager
+    // can take them at any moment. Native events are only meaningful while this app is active with its window key.
+    var environment: String {
+        "frontmost app \(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"), Wallpier active \(NSApp.isActive), " +
+        "key window \(NSApp.keyWindow.map { $0 === window ? "fixture" : ownsKeyWindow ? "fixture sheet" : "other: \($0.title)" } ?? "none")"
+    }
+
+    /// Bounded re-activation, waiting on the observable condition itself: up to three attempts of two seconds.
+    @discardableResult
+    func activate() -> Bool {
+        for _ in 0..<3 where !isActiveAndKey {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            pump(2) { self.isActiveAndKey }
+        }
+        return isActiveAndKey
+    }
+
+    /// Before each native event: if the session can't give this app activation, say so explicitly as an environmental
+    /// limitation (and post nothing), rather than letting a misdirected event look like a product failure.
+    func ensureReady(_ step: String, file: StaticString, line: UInt) -> Bool {
+        if isActiveAndKey || activate() { return true }
+        XCTFail("ENVIRONMENT: the test app isn't active with its window key before \(step) (\(environment)). " +
+                "Native menu and key dispatch can't be verified in this GUI session.", file: file, line: line)
+        return false
+    }
 
     func close() {
         [controller.downloadTask, controller.searchTask, controller.detailTask, controller.undoValidationTask].forEach { $0?.cancel() }
@@ -1760,6 +1795,7 @@ private final class ActiveApp {
     /// One key press on the ANSI layout (z 6, Delete 51, Return 36, Space 49, Escape 53, → 124, ← 123).
     func press(_ key: CGKeyCode, _ flags: CGEventFlags = [], expecting characters: String? = nil,
                file: StaticString = #filePath, line: UInt = #line) {
+        guard ensureReady("key \(key)", file: file, line: line) else { return }
         let source = CGEventSource(stateID: .privateState)
         for down in [true, false] {
             let quartz = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: down)!
@@ -1772,11 +1808,12 @@ private final class ActiveApp {
         pump()
     }
 
-    func commandZ() { press(6, .maskCommand, expecting: "z") }
-    func shiftCommandZ() { press(6, [.maskCommand, .maskShift]) }
-    func commandDelete() { press(51, .maskCommand, expecting: "\u{7f}") }
+    func commandZ(file: StaticString = #filePath, line: UInt = #line) { press(6, .maskCommand, expecting: "z", file: file, line: line) }
+    func shiftCommandZ(file: StaticString = #filePath, line: UInt = #line) { press(6, [.maskCommand, .maskShift], file: file, line: line) }
+    func commandDelete(file: StaticString = #filePath, line: UInt = #line) { press(51, .maskCommand, expecting: "\u{7f}", file: file, line: line) }
 
-    func type(_ text: String) {
+    func type(_ text: String, file: StaticString = #filePath, line: UInt = #line) {
+        guard ensureReady("typing", file: file, line: line) else { return }
         let source = CGEventSource(stateID: .privateState)
         for character in text {
             let units = Array(String(character).utf16)
@@ -1789,7 +1826,8 @@ private final class ActiveApp {
         pump()
     }
 
-    func click(_ point: NSPoint) {
+    func click(_ point: NSPoint, file: StaticString = #filePath, line: UInt = #line) {
+        guard ensureReady("click", file: file, line: line) else { return }
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             NSApp.postEvent(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
@@ -1828,7 +1866,11 @@ extension WallpierTests {
             await MainActor.run { app.close() }
             try? FileManager.default.removeItem(at: root)
         }
-        _ = try XCTUnwrap(app.isActiveAndKey ? app : nil, "The test app must be active with a key window")
+        // An environmental failure stops the test at once, instead of cascading into misleading product assertions.
+        continueAfterFailure = false
+        _ = try XCTUnwrap(app.isActiveAndKey ? app : nil,
+                          "ENVIRONMENT: the test app couldn't become active with its window key (\(app.environment)). " +
+                          "Native menu and key dispatch can't be verified in this GUI session.")
         XCTAssertTrue(app.controller.undoButton.isEnabled, "Fixture needs restorable wallpaper history")
         return app
     }
@@ -2051,18 +2093,29 @@ extension WallpierTests {
     // more of them (window width and thumbnail size are set directly, so no preference is written), in two
     // sources so navigation is also checked after a source change. Down is only asserted into complete rows.
     @MainActor
+    // Deterministic dispatch: real mouse and key NSEvents through window.sendEvent to a window that reports itself key
+    // (never ordered on screen, so no window manager can tile or defocus it). The gallery's own native navigation
+    // handles them; no menu-bar semantics are under test here, so no activated application is needed.
     func testBlankGalleryClickKeepsTheVisibleSetTarget() throws {
-        let app = try activeApp()
-        let c = app.controller
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                windowClass: KeyTestWindow.self) { _ in }
+        defer { window.close() }
         let view = c.collectionView
+        func select(_ index: Int) {
+            view.selectionIndexPaths = [IndexPath(item: index, section: 0)]
+            c.collectionView(view, didSelectItemsAt: [IndexPath(item: index, section: 0)])
+            XCTAssertTrue(window.makeFirstResponder(view))
+        }
         let right = String(Character(UnicodeScalar(NSRightArrowFunctionKey)!))
         let down = String(Character(UnicodeScalar(NSDownArrowFunctionKey)!))
         var columnCounts: [Int] = []
-        let configurations = [(app.window.minSize.width, GalleryLayout.thumbnailWidths[2]),
-                              (app.window.minSize.width, GalleryLayout.thumbnailWidths[1]),
+        let configurations = [(window.minSize.width, GalleryLayout.thumbnailWidths[2]),
+                              (window.minSize.width, GalleryLayout.thumbnailWidths[1]),
                               (CGFloat(1120), GalleryLayout.thumbnailWidths[0])]
         for (width, thumbnail) in configurations {
-            app.window.setFrame(NSRect(origin: app.window.frame.origin, size: NSSize(width: width, height: 720)), display: true)
+            window.setFrame(NSRect(origin: window.frame.origin, size: NSSize(width: width, height: 720)), display: true)
             c.galleryLayoutForTesting.targetWidth = thumbnail
             for source in [LibrarySource.favorites, .discover] {
                 if source == .favorites { c.showFavorites(nil) } else { c.showDiscover(nil) }
@@ -2071,11 +2124,11 @@ extension WallpierTests {
                 let count = view.numberOfItems(inSection: 0)
                 let firstRow = view.frameForItem(at: 0).minY
                 let columns = (0..<count).filter { view.frameForItem(at: $0).minY == firstRow }.count
-                let context = "\(columns) columns in \(source.rawValue) (window \(Int(app.window.frame.width)) pt, thumbnails \(Int(thumbnail)) pt)"
+                let context = "\(columns) columns in \(source.rawValue) (window \(Int(window.frame.width)) pt, thumbnails \(Int(thumbnail)) pt)"
                 columnCounts.append(columns)
                 XCTAssertGreaterThanOrEqual(columns, 2, context)
                 view.scrollToItems(at: [IndexPath(item: 0, section: 0)], scrollPosition: .top)
-                app.select(1)
+                select(1)
                 func expectSelection(_ index: Int, _ step: String, file: StaticString = #filePath, line: UInt = #line) {
                     XCTAssertEqual(view.selectionIndexPaths, [IndexPath(item: index, section: 0)], "\(context): \(step)", file: file, line: line)
                     XCTAssertEqual(c.state.selectedRemoteIdentity, identities[index], "\(context): \(step)", file: file, line: line)
@@ -2086,34 +2139,33 @@ extension WallpierTests {
                 let first = view.frameForItem(at: 0), second = view.frameForItem(at: 1)
                 let blank = NSPoint(x: (first.maxX + second.minX) / 2, y: first.midY)
                 XCTAssertNil(view.indexPathForItem(at: blank), "\(context): the click point must be empty gallery space")
-                app.click(view.convert(blank, to: nil))
+                click(at: view.convert(blank, to: nil), in: window)
                 XCTAssertTrue(c.window?.firstResponder === view, "\(context): the click reached the gallery")
                 expectSelection(1, "blank click keeps the Set target")
                 XCTAssertTrue(c.setWallpaperButton.isEnabled, context)
 
                 // Right moves within the first row and stops at its end (item 1 ends a two-column row).
-                app.press(124, expecting: right)
+                key(right, code: 124, in: window)
                 let afterRight = columns > 2 ? 2 : 1
                 expectSelection(afterRight, "Right")
 
                 // Down moves exactly one row, when that row is complete.
                 let below = afterRight + columns
                 if (below / columns + 1) * columns <= count {
-                    app.press(125, expecting: down)
+                    key(down, code: 125, in: window)
                     expectSelection(below, "Down")
                 }
 
                 // The ring is accent exactly while keys reach the gallery (first responder in the key window) and
-                // stays, in gray, otherwise. Key status belongs to the window server and can move mid-run, so it
-                // is read rather than assumed; testSelectionRingIsEmphasizedOnlyWhileTheGalleryHasKeyboardFocus
-                // drives both states deterministically.
+                // stays, in gray, otherwise. This window is always key; the window losing key status is driven
+                // deterministically by testSelectionRingIsEmphasizedOnlyWhileTheGalleryHasKeyboardFocus.
                 let ring = { (view.selectionIndexPaths.first.flatMap { view.item(at: $0) }) as? WallpaperCollectionViewItem }
-                XCTAssertEqual(ring()?.isEmphasized, app.window.isKeyWindow, "\(context): gallery focused, key \(app.window.isKeyWindow)")
-                app.focus(c.searchField)
+                XCTAssertEqual(ring()?.isEmphasized, true, "\(context): gallery focused")
+                XCTAssertTrue(window.makeFirstResponder(c.searchField))
                 XCTAssertEqual(ring()?.isEmphasized, false, "\(context): search field focused")
                 XCTAssertEqual(ring()?.showsSelectionRing, true, context)
-                app.focus(view)
-                XCTAssertEqual(ring()?.isEmphasized, app.window.isKeyWindow, "\(context): gallery refocused, key \(app.window.isKeyWindow)")
+                XCTAssertTrue(window.makeFirstResponder(view))
+                XCTAssertEqual(ring()?.isEmphasized, true, "\(context): gallery refocused")
             }
         }
         XCTAssertTrue(columnCounts.contains(2), "Exercised \(columnCounts)")
@@ -2468,7 +2520,31 @@ final class Batch2Network: NetworkClient {
     var downloadHeaders: [String: String] = [:]
     var originalFile: URL?
     fileprivate var downloadGate: SetAuditGate<Void>?
+    /// Every search request, in order: its page and where it is. With `holdsSearches`, requests wait (with no hidden
+    /// timeout) until the test releases them, so a test can tell "never started" from "held" from "answered".
+    enum SearchState: Equatable { case held, answered, failed }
+    private(set) var searchJournal: [(page: Int, state: SearchState)] = []
+    var holdsSearches = false
+    /// Filled synchronously by the continuation's body before the request suspends, so a held request can always be released.
+    private final class Hold { var continuation: CheckedContinuation<Void, Error>? }
+    private var heldSearches: [Int: Hold] = [:]
     private(set) var searches: [URLComponents] = []
+
+    func searchState(page: Int) -> SearchState? { searchJournal.last { $0.page == page }?.state }
+
+    /// Answers the held request for `page` (normally, or with `error`); false when none is held.
+    @discardableResult
+    func releaseSearch(page: Int, failingWith error: Error? = nil) -> Bool {
+        guard let entry = searchJournal.lastIndex(where: { $0.page == page && $0.state == .held }),
+              let continuation = heldSearches.removeValue(forKey: entry)?.continuation else { return false }
+        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+        return true
+    }
+
+    func releaseAllHeldSearches() {
+        let pending = heldSearches; heldSearches = [:]
+        pending.values.forEach { $0.continuation?.resume(throwing: CancellationError()) }
+    }
     private(set) var detailRequests: [String] = []
     private(set) var downloads: [URL] = []
 
@@ -2479,6 +2555,19 @@ final class Batch2Network: NetworkClient {
             let components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
             searches.append(components)
             let page = Int(components.queryItems?.first { $0.name == "page" }?.value ?? "1") ?? 1
+            let entry = searchJournal.count
+            searchJournal.append((page, holdsSearches ? .held : .answered))
+            if holdsSearches {
+                do {
+                    let hold = Hold()
+                    heldSearches[entry] = hold
+                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in hold.continuation = continuation }
+                    searchJournal[entry].state = .answered
+                } catch {
+                    searchJournal[entry].state = .failed
+                    throw error
+                }
+            }
             let items = pageItems.map { item -> [String: Any] in
                 var copy = item
                 if page > 1 { copy["id"] = "\(item["id"]!)p\(page)" }
@@ -2536,6 +2625,7 @@ extension WallpierTests {
                 let tasks = [controller.downloadTask, controller.searchTask, controller.detailTask, controller.undoValidationTask].compactMap { $0 }
                 tasks.forEach { $0.cancel() }
                 network.downloadGate?.release(.failure(CancellationError()))
+                network.releaseAllHeldSearches()
                 while let sheet = window.attachedSheet { window.endSheet(sheet) }
                 window.close()
                 return tasks
@@ -2776,8 +2866,10 @@ extension WallpierTests {
     @MainActor
     func testRapidSelectionStartsDetailRequestsOnlyForTheSettledPreview() async throws {
         let network = Batch2Network()
-        network.details = Dictionary(uniqueKeysWithValues: CompositionFixtures.shapes.map {
-            ($0.id, CompositionFixtures.listing(id: $0.id, width: $0.width, height: $0.height, tags: []))
+        // Details for both result pages: Discover's preview stops at the loaded results and loads the next page
+        // instead of wrapping, so browsing reaches page 2 (whose wallpaper IDs end in "p2").
+        network.details = Dictionary(uniqueKeysWithValues: CompositionFixtures.shapes.flatMap { shape in
+            [shape.id, "\(shape.id)p2"].map { ($0, CompositionFixtures.listing(id: $0, width: shape.width, height: shape.height, tags: [])) }
         })
         let (c, _, _) = try await batch2Controller(network)
         c.showDiscover(nil)
@@ -3690,7 +3782,10 @@ extension WallpierTests {
         XCTAssertEqual(applied.image.deletingLastPathComponent().resolvingSymlinksInPath().path,
                        URL(fileURLWithPath: try XCTUnwrap(h.controller.state.folderPath)).resolvingSymlinksInPath().path)
         XCTAssertEqual(applied.display, "101")
-        XCTAssertEqual(applied.scaling, .fill)
+        // Fit by default supersedes GLM's `applied.scaling == .fill`: restoreState() loads the default (now Fit), and
+        // rotation applies the mode the controls show. Deliberate Fill and Center are covered by the scaling-choice test.
+        XCTAssertEqual(applied.scaling, .fit)
+        XCTAssertEqual(applied.scaling, h.controller.state.scalingMode)
         let entry = try XCTUnwrap(h.store.load().history.last)
         XCTAssertEqual(entry.replacement.imagePath, applied.image.path)
         XCTAssertEqual(entry.previous.imagePath, h.prior.path)
@@ -4577,6 +4672,764 @@ extension WallpierTests {
                 resolved = (c.statusLabel.textColor!.usingColorSpace(.sRGB)!, expected.usingColorSpace(.sRGB)!)
             }
             XCTAssertEqual(resolved.0, resolved.1, name.rawValue)
+        }
+    }
+}
+
+// MARK: - Preview experience captures
+//
+// Real wallpaper imagery for matched captures: the macOS system wallpapers (read-only, local, not user state),
+// each cropped to a different wallpaper shape so the gallery and preview meet 16:9 through 32:9, portrait and
+// square. Decoded once at no more than 1,000 px. Skipped where the system set differs (captures only).
+
+enum SystemWallpaperFixtures {
+    static let directory = URL(fileURLWithPath: "/System/Library/Desktop Pictures")
+    static let entries: [(file: String, width: Int, height: Int)] = [
+        ("Monterey Graphic", 3840, 2160), ("Chroma Red", 1440, 2560), ("Motion Green", 5120, 1440), ("Ventura Graphic", 2560, 1600),
+        ("Radial Purple", 2000, 2000), ("Big Sur Graphic", 3440, 1440), ("Hello Metallic Orange", 3840, 2160), ("Chroma Blue", 2880, 1800),
+        ("Studio Color", 3000, 2000), ("Grid Magenta", 3840, 2160), ("hello Blue", 2560, 1440), ("Radial Green", 3840, 2400)]
+    static var isAvailable: Bool { entries.allSatisfy { FileManager.default.fileExists(atPath: url($0.file).path) } }
+    static func url(_ file: String) -> URL { directory.appendingPathComponent("\(file).heic") }
+
+    static func references() -> [WallpaperReference] {
+        entries.enumerated().map { index, entry in
+            let id = String(format: "sw%02d", index + 1)
+            return WallpaperReference(
+                providerIdentifier: "wallhaven", wallpaperID: id,
+                sourcePageURL: URL(string: "https://wallhaven.cc/w/\(id)")!,
+                originalURL: URL(string: "https://w.wallhaven.cc/full/sw/wallhaven-\(id).jpg")!,
+                previewURL: URL(string: "https://th.wallhaven.cc/lg/sw/\(id).jpg")!,
+                thumbnailURL: URL(string: "https://th.wallhaven.cc/small/sw/\(id).jpg")!,
+                width: entry.width, height: entry.height,
+                uploader: ["northlight", "atlas_studio", "m.k."][index % 3],
+                tags: [entry.file.lowercased(), "abstract"], cachedLocalPath: nil,
+                uncroppedPreviewURL: URL(string: "https://th.wallhaven.cc/orig/sw/\(id).jpg")!)
+        }
+    }
+
+    private static var decoded: [Int: CGImage] = [:]
+
+    /// The wallpaper itself: the system image centre-cropped to the entry's shape.
+    static func wallpaper(_ index: Int) -> CGImage {
+        if let image = decoded[index] { return image }
+        let entry = entries[index]
+        let source = CGImageSourceCreateWithURL(url(entry.file) as CFURL, nil)!
+        let full = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1_000, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)!
+        let crop = DesktopPreviewView.cropRect(of: CGSize(width: full.width, height: full.height),
+                                               toAspectOf: CGSize(width: entry.width, height: entry.height))
+        let image = full.cropping(to: crop.integral)!
+        decoded[index] = image
+        return image
+    }
+
+    /// Wallhaven's thumbnail kinds: `lg` is a 16:9 crop, `small` a 3:2 crop, `orig` the whole picture.
+    static func thumbnail(_ index: Int, for url: URL) -> NSImage {
+        let entry = entries[index], picture = wallpaper(index)
+        let canvas = CompositionFixtures.canvas(for: url, original: CGSize(width: entry.width, height: entry.height))
+        let crop = DesktopPreviewView.cropRect(of: CGSize(width: picture.width, height: picture.height), toAspectOf: canvas)
+        return NSImage(cgImage: picture.cropping(to: crop.integral)!, size: canvas)
+    }
+
+    static func writeOriginal(_ index: Int, to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, wallpaper(index), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+    }
+}
+
+/// Serves system-wallpaper thumbnails; can hold callbacks (a slow network) or fail chosen wallpapers.
+final class SystemWallpaperThumbnails: RemoteThumbnailProvider {
+    var holds = false
+    var failing: Set<String> = []
+    private var held: [(URL, (NSImage?) -> Void)] = []
+    override func requestThumbnail(for url: URL, maximumPixelSize: Int = 420, completion: @escaping (NSImage?) -> Void) {
+        if holds { held.append((url, completion)); return }
+        let id = url.deletingPathExtension().lastPathComponent
+        guard !failing.contains(id), let number = Int(id.dropFirst(2)), SystemWallpaperFixtures.entries.indices.contains(number - 1)
+        else { return completion(nil) }
+        completion(SystemWallpaperFixtures.thumbnail(number - 1, for: url))
+    }
+    func releaseHeld() { let pending = held; held = []; holds = false; pending.forEach { requestThumbnail(for: $0.0, completion: $0.1) } }
+    override func reset() {}
+}
+
+extension WallpierTests {
+    @MainActor
+    func testCapturePreviewExperience() async throws {
+        try XCTSkipIf(Self.captureDirectory == nil, "Set WALLPIER_CAPTURE_DIR to write captures")
+        try XCTSkipUnless(SystemWallpaperFixtures.isAvailable, "This macOS has a different system wallpaper set")
+        let refs = SystemWallpaperFixtures.references()
+        let page = RemoteSearchPage(wallpapers: refs, currentPage: 1, lastPage: 92, total: 2_196,
+                                    rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil))
+        for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
+            let root = try historyTestFolder()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let originals = root.appendingPathComponent("Originals")
+            for index in [0, 1, 2] { try SystemWallpaperFixtures.writeOriginal(index, to: originals.appendingPathComponent(RemoteWallpaperCache.filename(for: refs[index]))) }
+            let thumbnails = SystemWallpaperThumbnails()
+            let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: appearance,
+                                                    windowClass: FloatingCaptureWindow.self, thumbnails: thumbnails, page: page) { state in
+                state.favorites = [3, 4, 7, 8, 9, 11].map { refs[$0] }
+                state.selectedRemoteIdentity = refs[0].identityKey
+            }
+            defer { window.close() }
+            var size = NSSize(width: 1120, height: 720)
+            func shot(_ name: String) async {
+                window.setFrame(NSRect(origin: NSPoint(x: 20, y: 30), size: size), display: true)
+                await pause(0.3)
+                captureWindow(window, named: "pe-\(name)-\(suffix)")
+            }
+            func show(_ id: String, _ scaling: ScalingMode, settled: Bool = true) async {
+                // Step towards the wallpaper: Discover doesn't wrap while Wallhaven has more pages.
+                func position(_ wallpaperID: String) -> Int { c.remoteResults.firstIndex { $0.wallpaperID == wallpaperID } ?? 0 }
+                for _ in refs where c.previewTitleLabel.stringValue != id {
+                    if position(c.previewTitleLabel.stringValue) < position(id) { c.nextWallpaper(nil) } else { c.previousWallpaper(nil) }
+                }
+                c.scalingPopUp.selectItem(at: ScalingMode.allCases.firstIndex(of: scaling)!)
+                c.scalingSelectionChanged()
+                if settled { _ = await eventually { c.stageView.image != nil && (Int(id.dropFirst(2))! > 3 || c.approximatePreviewNotice.isHidden) } }
+            }
+            c.showDiscover(nil)
+            window.makeFirstResponder(c.collectionView)
+            await shot("01-discover-gallery")
+            c.toggleViewer(nil)
+            await show("sw01", .fill); await shot("02-preview-landscape-original")
+            await show("sw02", .fit); await shot("03-preview-portrait-fit")
+            await show("sw03", .fill); await shot("04-preview-ultrawide-fill")
+            await show("sw12", .fill); await shot("05-preview-last-loaded")
+            size = window.minSize
+            await show("sw04", .fill); await shot("06-preview-minimum")
+            size = NSSize(width: 1120, height: 720)
+            thumbnails.holds = true
+            c.nextWallpaper(nil)                         // sw05, not yet cached: the slow first frame.
+            await pause(0.5); await shot("07-preview-slow-first-frame")
+            thumbnails.releaseHeld()
+            thumbnails.failing = ["sw06"]
+            c.nextWallpaper(nil)                         // sw06: its preview thumbnail fails.
+            await pause(0.5); await shot("08-preview-thumbnail-failed")
+            c.toggleViewer(nil)
+            c.showFavorites(nil)
+            c.toggleViewer(nil)
+            c.nextWallpaper(nil)
+            _ = await eventually { c.stageView.image != nil }
+            await shot("09-favorites-preview")
+
+            let emptyRoot = try historyTestFolder()
+            defer { try? FileManager.default.removeItem(at: emptyRoot) }
+            let (e, emptyWindow) = makeCaptureController(root: emptyRoot, size: NSSize(width: 1120, height: 720), appearance: appearance,
+                                                         windowClass: FloatingCaptureWindow.self, thumbnails: SystemWallpaperThumbnails(), page: page) { state in
+                state.favorites = []
+            }
+            defer { emptyWindow.close() }
+            e.showFavorites(nil)
+            emptyWindow.setFrame(NSRect(x: 20, y: 30, width: 1120, height: 720), display: true)
+            await pause(0.3); captureWindow(emptyWindow, named: "pe-10-empty-favorites-\(suffix)")
+        }
+    }
+}
+
+// MARK: - Preview experience: pointer navigation, gallery controls, first frame, empty Favorites
+
+extension WallpierTests {
+    /// A real click on a view's centre.
+    @MainActor
+    private func click(_ view: NSView, in window: NSWindow) {
+        click(at: view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil), in: window)
+    }
+
+    /// A real click at a window point: the view's own mouse handling receives the queued mouse-up, as with a user's click.
+    @MainActor
+    private func click(at point: NSPoint, in window: NSWindow) {
+        func event(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                               pressure: type == .leftMouseDown ? 1 : 0)!
+        }
+        NSApp.postEvent(event(.leftMouseUp), atStart: false)
+        window.sendEvent(event(.leftMouseDown))
+        // The button's tracking loop consumes the mouse-up; never leave one behind for a later test.
+        while NSApp.nextEvent(matching: .leftMouseUp, until: Date(), inMode: .default, dequeue: true) != nil {}
+    }
+
+    @MainActor
+    private func key(_ characters: String, code: UInt16, in window: NSWindow) {
+        window.sendEvent(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: window.windowNumber, context: nil, characters: characters,
+                                          charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!)
+    }
+
+    @MainActor
+    func testPreviewButtonsAndKeysShareOneNavigationPathInCompleteSources() throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                windowClass: KeyTestWindow.self) { state in
+            state.collections[1] = WallpaperCollection(name: "Solo", wallpapers: [state.favorites[0]])   // One wallpaper.
+        }
+        defer { window.close() }
+        window.orderFront(nil)
+        let favorites = c.state.favorites
+        let right = String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)), left = String(Character(UnicodeScalar(NSLeftArrowFunctionKey)!))
+        let previous = NSMenuItem(title: "", action: #selector(MainWindowController.previousWallpaper(_:)), keyEquivalent: "")
+        let next = NSMenuItem(title: "", action: #selector(MainWindowController.nextWallpaper(_:)), keyEquivalent: "")
+        func expect(_ index: Int, _ step: String, file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertEqual(c.collectionView.selectionIndexPaths, [IndexPath(item: index, section: 0)], step, file: file, line: line)
+            XCTAssertEqual(c.state.selectedRemoteIdentity, favorites[index].identityKey, step, file: file, line: line)
+            XCTAssertEqual(c.previewTitleLabel.stringValue, favorites[index].wallpaperID, step, file: file, line: line)
+            XCTAssertEqual(c.previewPositionLabel.stringValue, "\(index + 1) of \(favorites.count)", step, file: file, line: line)
+        }
+
+        c.showFavorites(nil)
+        c.toggleViewer(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertTrue(window.firstResponder === c.viewerView)
+        expect(1, "opened")
+        // Pointer: the visible buttons. Keyboard focus stays in the preview, so arrow keys keep working.
+        XCTAssertTrue(c.previewNextButton.refusesFirstResponder)
+        click(c.previewNextButton, in: window); expect(2, "clicked Next")
+        XCTAssertTrue(window.firstResponder === c.viewerView, "a click doesn't take keyboard focus")
+        key(right, code: 124, in: window); expect(3, "→ after a click")
+        c.nextWallpaper(next); expect(4, "⌘]")
+        click(c.previewNextButton, in: window); expect(5, "clicked Next")
+        // A complete source wraps at both ends, by pointer and by key alike.
+        click(c.previewNextButton, in: window); expect(0, "Next wraps after the last")
+        click(c.previewPreviousButton, in: window); expect(5, "Previous wraps before the first")
+        key(left, code: 123, in: window); expect(4, "←")
+        XCTAssertTrue(c.previewPreviousButton.isEnabled && c.previewNextButton.isEnabled)
+        XCTAssertTrue(c.validateMenuItem(previous) && c.validateMenuItem(next))
+        // Return still sets the wallpaper on show, from the preview, after pointer navigation.
+        XCTAssertTrue(window.defaultButtonCell === c.setWallpaperButton.cell)
+
+        // A source switch closes the preview; the one-wallpaper collection has nowhere to go.
+        let only = c.state.collections[1]
+        let row = c.sidebarForTesting.outlineView.row(forItem: c.sidebarForTesting.rows.first { $0.title == only.name })
+        c.sidebarForTesting.outlineView.selectRowIndexes([row], byExtendingSelection: false)
+        XCTAssertFalse(c.isViewerVisible, "switching sources returns to the gallery")
+        c.toggleViewer(nil)
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "1 of 1")
+        XCTAssertFalse(c.previewPreviousButton.isEnabled); XCTAssertFalse(c.previewNextButton.isEnabled)
+        XCTAssertFalse(c.validateMenuItem(previous)); XCTAssertFalse(c.validateMenuItem(next))
+        key(right, code: 124, in: window)
+        XCTAssertEqual(c.state.selectedRemoteIdentity, only.wallpapers[0].identityKey)
+
+        // An empty source: no preview, no target, nothing to navigate.
+        c.showLocal(nil)
+        XCTAssertFalse(c.isViewerVisible)
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "")
+        XCTAssertFalse(c.previewPreviousButton.isEnabled); XCTAssertFalse(c.previewNextButton.isEnabled)
+        XCTAssertFalse(c.validateMenuItem(previous)); XCTAssertFalse(c.validateMenuItem(next))
+    }
+
+    @MainActor
+    func testDiscoverPreviewStopsAtLoadedResultsAndFinishesTheMoveWhenThePageArrives() async throws {
+        let network = Batch2Network()
+        network.lastPage = 2
+        let (c, window, _) = try await batch2Controller(network)
+        let previous = NSMenuItem(title: "", action: #selector(MainWindowController.previousWallpaper(_:)), keyEquivalent: "")
+        c.showDiscover(nil)
+        c.toggleViewer(nil)
+        let first = c.remoteResults.map(\.identityKey)
+        XCTAssertEqual(first.count, 6)
+        XCTAssertEqual(network.searchJournal.count, 0, "precondition: no page request before the boundary")
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "1 of 6 loaded", "loaded results are not the whole Wallhaven set")
+        XCTAssertNotNil(c.previewPositionLabel.toolTip)
+        // No wrapping while Wallhaven has more: Previous at the first result is unavailable.
+        XCTAssertFalse(c.previewPreviousButton.isEnabled)
+        XCTAssertFalse(c.validateMenuItem(previous))
+        c.previousWallpaper(nil)
+        XCTAssertEqual(c.state.selectedRemoteIdentity, first[0])
+        for _ in 0..<5 { c.previewNextButton.performClick(nil) }
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "6 of 6 loaded")
+        XCTAssertTrue(c.previewNextButton.isEnabled, "Next at the last loaded result loads more")
+        let searches = network.searches.count
+        c.previewNextButton.performClick(nil)
+        XCTAssertFalse(c.previewNextButton.isEnabled, "one page request at a time")
+        XCTAssertEqual(c.state.selectedRemoteIdentity, first[5], "Next waits while the page loads")
+        let loaded = await eventually { c.remoteResults.count == 12 }
+        XCTAssertEqual(network.searches.count, searches + 1)
+        XCTAssertEqual(network.searches.last?.queryItems?.first { $0.name == "page" }?.value, "2")
+        XCTAssertTrue(loaded)
+        XCTAssertTrue(c.isViewerVisible)
+        // The Next that asked for the page completes once it arrives (guards: see the cancellation test).
+        XCTAssertEqual(c.state.selectedRemoteIdentity, c.remoteResults[6].identityKey)
+        XCTAssertEqual(c.collectionView.selectionIndexPaths, [IndexPath(item: 6, section: 0)])
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "7 of 12", "every page is loaded now")
+        // A complete Discover set wraps, as other sources do.
+        for _ in 0..<5 { c.nextWallpaper(nil) }
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "12 of 12")
+        c.previewNextButton.performClick(nil)
+        XCTAssertEqual(c.state.selectedRemoteIdentity, first[0])
+        XCTAssertEqual(network.searches.count, searches + 1, "no further requests")
+        window.close()
+    }
+
+    @MainActor
+    func testPreviewNavigationDuringAnInFlightSetLeavesTheCapturedTarget() async throws {
+        let network = Batch2Network(), desktop = SetAuditWallpaperService()
+        let (c, window, root) = try await batch2Controller(network, desktop: desktop)
+        window.orderFront(nil)
+        let download = root.appendingPathComponent("download.png")
+        try CompositionFixtures.writeOriginal(CGSize(width: 3840, height: 2160), to: download)
+        network.originalFile = download
+        c.showDiscover(nil)
+        c.nextWallpaper(nil)                                         // Second result: Previous and Next both lead somewhere.
+        c.toggleViewer(nil)
+        let captured = c.remoteResults[1]
+        let gate = SetAuditGate<Void>()
+        network.downloadGate = gate
+        c.setWallpaper(nil)
+        await fulfillment(of: [gate.started], timeout: 2)
+        click(c.previewNextButton, in: window)                       // Browsing stays free while the original downloads.
+        XCTAssertEqual(c.state.selectedRemoteIdentity, c.remoteResults[2].identityKey)
+        XCTAssertTrue(c.previewPreviousButton.isEnabled && c.previewNextButton.isEnabled, "navigation isn't blocked by a Set")
+        XCTAssertFalse(c.setWallpaperButton.isEnabled, "one Set at a time")
+        gate.release(.success(()))
+        try await finishAuditTask(c.downloadTask)
+        XCTAssertEqual(desktop.calls.map(\.image.path),
+                       [root.appendingPathComponent("Originals").appendingPathComponent(RemoteWallpaperCache.filename(for: captured)).path],
+                       "the Set applies the wallpaper it captured")
+        XCTAssertEqual(c.state.selectedRemoteIdentity, c.remoteResults[2].identityKey, "and leaves the browsed one selected")
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "3 of 6 loaded")
+    }
+
+    @MainActor
+    func testPreviewSetsGalleryControlsAsideAndExplicitSearchesReturnToTheGallery() async throws {
+        let network = Batch2Network()
+        let (c, window, root) = try await batch2Controller(network)
+        c.showDiscover(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertFalse(c.categoryPopUp.isHiddenOrHasHiddenAncestor, "filters belong to the gallery")
+        c.nextWallpaper(nil); c.nextWallpaper(nil)
+        let inspected = c.state.selectedRemoteIdentity
+        c.toggleViewer(nil)
+        XCTAssertTrue(c.categoryPopUp.isHiddenOrHasHiddenAncestor, "and step aside in the preview")
+        XCTAssertTrue(c.updateResultsButton.isHiddenOrHasHiddenAncestor)
+        // A draft query and ⌘F keep the preview and its wallpaper; no request starts.
+        let searches = network.searches.count
+        c.searchField.stringValue = "forest"
+        c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+        c.focusSearch(nil)
+        XCTAssertTrue(c.isViewerVisible)
+        XCTAssertEqual(c.state.selectedRemoteIdentity, inspected)
+        XCTAssertEqual(network.searches.count, searches)
+        // Return (or Update Results) is an explicit new search: back to the gallery, which shows the new results.
+        c.search(nil)
+        XCTAssertFalse(c.isViewerVisible, "returns to the gallery before the results change")
+        XCTAssertFalse(c.categoryPopUp.isHiddenOrHasHiddenAncestor)
+        _ = await eventually { !c.remoteResults.isEmpty }
+        XCTAssertFalse(c.isViewerVisible)
+        XCTAssertEqual(network.searches.last?.queryItems?.first { $0.name == "q" }?.value, "forest")
+        // A filter command while previewing (not reachable by pointer now) behaves the same way.
+        c.toggleViewer(nil)
+        c.categoryPopUp.selectItem(at: 1)
+        _ = NSApp.sendAction(c.categoryPopUp.action!, to: c.categoryPopUp.target, from: c.categoryPopUp)
+        XCTAssertFalse(c.isViewerVisible)
+        _ = await eventually { !c.remoteResults.isEmpty }
+
+        // The folder bar steps aside in a folder's preview too.
+        let folder = root.appendingPathComponent("Pictures")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try writeTestImage(to: folder.appendingPathComponent("a.png")); try writeTestImage(to: folder.appendingPathComponent("b.png"))
+        c.openFolder(folder)
+        _ = await eventually { c.statusLabel.stringValue.hasPrefix("Loaded") }
+        func folderBar() -> NSView? {
+            func all(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(all) }
+            return all(window.contentView!).first { ($0 as? NSTextField)?.toolTip == folder.standardizedFileURL.path }
+        }
+        XCTAssertEqual(folderBar()?.isHiddenOrHasHiddenAncestor, false)
+        c.toggleViewer(nil)
+        XCTAssertEqual(folderBar()?.isHiddenOrHasHiddenAncestor, true)
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "1 of 2")
+        c.toggleViewer(nil)
+        XCTAssertEqual(folderBar()?.isHiddenOrHasHiddenAncestor, false)
+    }
+
+    @MainActor
+    func testEmptyStageSaysLoadingOrUnavailableButNeverShowsAStandIn() async throws {
+        let network = Batch2Network(), thumbnails = CompositionThumbnails()
+        let (c, _, _) = try await batch2Controller(network, thumbnails)
+        c.showDiscover(nil)
+        // Slow first frame: nothing at first, then a spinner, never a substitute picture.
+        thumbnails.holds = true
+        c.toggleViewer(nil)
+        XCTAssertNil(c.stageView.image)
+        XCTAssertEqual(c.stageView.placeholder, .loading)
+        XCTAssertFalse(c.stageView.isShowingLoadingIndicator, "no spinner flash for a quick load")
+        let opened = Date()
+        let spinning = await eventually(2) { c.stageView.isShowingLoadingIndicator }
+        XCTAssertTrue(spinning, "a spinner once loading takes a moment")
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(opened), DesktopPreviewView.loadingIndicatorDelay - 0.02, "not before the delay")
+        XCTAssertNil(c.stageView.image)
+        thumbnails.releaseHeld()
+        XCTAssertNotNil(c.stageView.image)
+        XCTAssertEqual(c.stageView.placeholder, .none)
+        XCTAssertFalse(c.stageView.isShowingLoadingIndicator)
+        // Cached pictures arrive at once: browsing back never shows a placeholder.
+        thumbnails.holds = false
+        c.nextWallpaper(nil); c.previousWallpaper(nil)
+        XCTAssertNotNil(c.stageView.image)
+        XCTAssertEqual(c.stageView.placeholder, .none)
+        // A preview that can't load says so instead of showing an empty display.
+        let failing = c.remoteResults[2].wallpaperID
+        thumbnails.sizes.removeValue(forKey: failing)
+        c.nextWallpaper(nil); c.nextWallpaper(nil)
+        XCTAssertEqual(c.previewTitleLabel.stringValue, failing)
+        XCTAssertNil(c.stageView.image)
+        XCTAssertEqual(c.stageView.placeholder, .unavailable)
+        XCTAssertEqual(c.stageView.accessibilityValue() as? String, "Preview unavailable")
+        XCTAssertFalse(c.approximatePreviewNotice.isHidden == false && c.stageView.image == nil, "no fidelity notice without a picture")
+        // A stale failure for a wallpaper no longer shown changes nothing.
+        thumbnails.holds = true
+        c.nextWallpaper(nil)
+        let shown = c.previewTitleLabel.stringValue
+        thumbnails.releaseHeld()
+        XCTAssertEqual(c.previewTitleLabel.stringValue, shown)
+        XCTAssertNotNil(c.stageView.image)
+        XCTAssertEqual(c.stageView.placeholder, .none)
+    }
+
+    @MainActor
+    func testEmptyFavoritesLeadsToDiscover() throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua) { state in
+            state.favorites = []
+        }
+        defer { window.close() }
+        c.showFavorites(nil)
+        XCTAssertEqual(c.emptyStateView.title, "No Favorites Yet")
+        XCTAssertFalse(c.emptyStateView.actionButton.isHidden)
+        XCTAssertEqual(c.emptyStateView.actionButton.title, "Browse Discover")
+        c.emptyStateView.actionButton.performClick(nil)
+        XCTAssertEqual(c.state.currentSource, .discover)
+        XCTAssertFalse(c.remoteResults.isEmpty)
+    }
+}
+
+// MARK: - Fit by default, and preview acceptance repairs
+
+extension WallpierTests {
+    /// A controller over an existing state file, through the real startup path, as a relaunch would.
+    @MainActor
+    private func relaunchCapture(root: URL, desktop: WallpaperService) -> (MainWindowController, NSWindow) {
+        let window = KeyTestWindow(contentRect: NSRect(x: 20, y: 30, width: 1120, height: 720),
+                                   styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let originals = root.appendingPathComponent("Originals")
+        let controller = MainWindowController(window: window, wallpaperService: desktop,
+            stateStore: WallpaperStateStore(stateURL: root.appendingPathComponent("state.json")),
+            provider: WallhavenProvider(client: OfflineNetwork()), originalCache: RemoteWallpaperCache(rootURL: originals),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), originalsRoot: originals),
+            remoteThumbnailProvider: CaptureThumbnails(), availableScreens: { [CaptureScreen()] })
+        controller.prepareForVisualCapture(discoverPage: RemoteSearchPage(wallpapers: [], currentPage: 1, lastPage: 1, total: 0,
+            rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil)))
+        return (controller, window)
+    }
+
+    @MainActor
+    private func setAndRotate(_ c: MainWindowController) async throws {
+        _ = await eventually { c.statusLabel.stringValue.hasPrefix("Loaded") }
+        c.setWallpaper(nil)
+        try await finishAuditTask(c.downloadTask)
+        c.rotateWallpaper()
+        try await finishAuditTask(c.rotationTask)
+    }
+
+    func testNewStateAndMissingSavedValuesDefaultToFit() throws {
+        XCTAssertEqual(WallpaperState().scalingMode, .fit)
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(WallpaperStateStore(stateURL: root.appendingPathComponent("absent.json")).load().scalingMode, .fit, "first launch")
+        let decoder = JSONDecoder()
+        XCTAssertEqual(try decoder.decode(WallpaperState.self, from: Data("{}".utf8)).scalingMode, .fit, "no saved choice")
+        XCTAssertEqual(try decoder.decode(WallpaperState.self, from: Data(#"{"scalingMode":"fill"}"#.utf8)).scalingMode, .fill,
+                       "a saved Fill is kept: it can't be told apart from a deliberate choice")
+        XCTAssertEqual(try decoder.decode(WallpaperState.self, from: Data(#"{"scalingMode":"center"}"#.utf8)).scalingMode, .center)
+    }
+
+    @MainActor
+    func testANewInstallationSetsAndRotatesWithFit() async throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Pictures")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for name in ["a", "b", "c"] { try writeTestImage(to: folder.appendingPathComponent("\(name).png")) }
+        let desktop = SetAuditWallpaperService()
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                windowClass: KeyTestWindow.self, desktop: desktop) { state in
+            state.currentSource = .local
+            state.folderPath = folder.path
+        }
+        defer { window.close() }
+        XCTAssertEqual(c.scalingPopUp.titleOfSelectedItem, "Fit to Screen")
+        XCTAssertEqual(c.stageView.scaling, .fit, "the preview estimates the same mode")
+        try await setAndRotate(c)
+        XCTAssertEqual(desktop.calls.map(\.scaling), [.fit, .fit], "manual Set and rotation request Fit")
+        XCTAssertEqual(c.state.history.last?.replacement.scaling, .fit)
+        // After a relaunch the default is still Fit, and still used.
+        window.close()
+        let (relaunched, second) = relaunchCapture(root: root, desktop: desktop)
+        defer { second.close() }
+        XCTAssertEqual(relaunched.scalingPopUp.titleOfSelectedItem, "Fit to Screen")
+        try await setAndRotate(relaunched)
+        XCTAssertEqual(desktop.calls.map(\.scaling), [.fit, .fit, .fit, .fit])
+    }
+
+    @MainActor
+    func testADeliberateScalingChoiceIsKeptAcrossRelaunchesSetsAndRotation() async throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Pictures")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for name in ["a", "b", "c"] { try writeTestImage(to: folder.appendingPathComponent("\(name).png")) }
+        let desktop = SetAuditWallpaperService()
+        // An existing installation whose saved state says Fill (deliberately or by the old default).
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                windowClass: KeyTestWindow.self, desktop: desktop) { state in
+            state.currentSource = .local
+            state.folderPath = folder.path
+            state.scalingMode = .fill
+        }
+        XCTAssertEqual(c.scalingPopUp.titleOfSelectedItem, "Fill Screen", "a saved choice isn't overwritten")
+        try await setAndRotate(c)
+        XCTAssertEqual(desktop.calls.map(\.scaling), [.fill, .fill])
+        // Switching to Fit once is kept from then on.
+        c.scalingPopUp.selectItem(withTitle: "Fit to Screen"); c.scalingSelectionChanged()
+        try await setAndRotate(c)
+        window.close()
+        for expected in [ScalingMode.fit, .fit] {
+            let (relaunched, next) = relaunchCapture(root: root, desktop: desktop)
+            XCTAssertEqual(relaunched.state.scalingMode, expected)
+            try await setAndRotate(relaunched)
+            next.close()
+        }
+        XCTAssertEqual(desktop.calls.map(\.scaling), [.fill, .fill, .fit, .fit, .fit, .fit, .fit, .fit])
+        // Center, chosen deliberately, is kept too.
+        let (centered, third) = relaunchCapture(root: root, desktop: desktop)
+        centered.scalingPopUp.selectItem(withTitle: "Center"); centered.scalingSelectionChanged()
+        third.close()
+        let (again, fourth) = relaunchCapture(root: root, desktop: desktop)
+        defer { fourth.close() }
+        XCTAssertEqual(again.state.scalingMode, .center)
+        try await setAndRotate(again)
+        XCTAssertEqual(desktop.calls.suffix(2).map(\.scaling), [.center, .center])
+    }
+
+    @MainActor
+    func testDiscoverPageFailureLetsNextRetryOnceTheCooldownEnds() async throws {
+        let network = Batch2Network()
+        let (c, window, _) = try await batch2Controller(network)
+        defer { window.close() }
+        c.showDiscover(nil)
+        c.toggleViewer(nil)
+        for _ in 0..<5 { c.nextWallpaper(nil) }
+        network.apiStatus = 500
+        c.previewNextButton.performClick(nil)
+        let failed = await eventually { c.statusLabel.stringValue.hasPrefix("Couldn’t load more results") }
+        XCTAssertTrue(failed)
+        XCTAssertFalse(c.previewNextButton.isEnabled, "a short cooldown after a failed page")
+        network.apiStatus = 200
+        let ready = await eventually(8) { c.previewNextButton.isEnabled }
+        XCTAssertTrue(ready, "Next becomes available again when the cooldown ends, without any other event")
+        c.previewNextButton.performClick(nil)
+        let advanced = await eventually { c.remoteResults.count == 12 && c.state.selectedRemoteIdentity == c.remoteResults[6].identityKey }
+        XCTAssertTrue(advanced, "the retried Next loads the page and moves on")
+    }
+
+    @MainActor
+    func testClickingThePagerReturnsKeyboardFocusToThePreview() throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                windowClass: KeyTestWindow.self) { _ in }
+        defer { window.close() }
+        window.orderFront(nil)
+        c.showDiscover(nil)
+        c.toggleViewer(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let start = try XCTUnwrap(c.collectionView.selectionIndexPaths.first?.item)
+        // Find: the search field edits a draft while the preview stays.
+        c.focusSearch(nil)
+        let editor = try XCTUnwrap(window.firstResponder as? NSTextView)
+        XCTAssertTrue(editor.delegate === c.searchField)
+        editor.insertText("forest", replacementRange: editor.selectedRange())
+        XCTAssertTrue(c.isViewerVisible)
+        // Clicking Next moves on and gives the keyboard back to the preview, so → navigates rather than editing text.
+        click(c.previewNextButton, in: window)
+        XCTAssertEqual(c.collectionView.selectionIndexPaths.first?.item, start + 1)
+        XCTAssertTrue(window.firstResponder === c.viewerView)
+        key(String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)), code: 124, in: window)
+        XCTAssertEqual(c.collectionView.selectionIndexPaths.first?.item, start + 2)
+        XCTAssertEqual(c.searchField.stringValue, "forest", "the draft is kept, not searched")
+        XCTAssertTrue(c.isViewerVisible)
+    }
+
+    /// Discover's preview at the last loaded result (6 of 6; Wallhaven has page 2), with every search request held.
+    @MainActor
+    private func boundaryPreview(_ network: Batch2Network, file: StaticString = #filePath, line: UInt = #line) async throws
+        -> (MainWindowController, NSWindow) {
+        network.holdsSearches = true
+        let (c, window, _) = try await batch2Controller(network)
+        c.showDiscover(nil)
+        c.toggleViewer(nil)
+        for _ in 0..<5 { c.nextWallpaper(nil) }
+        // Stated, not assumed: nothing (such as gallery pagination) has asked for page 2 before the boundary.
+        XCTAssertEqual(network.searchJournal.map(\.page), [], "precondition: no page request before the boundary", file: file, line: line)
+        XCTAssertNil(c.searchTask, "precondition: no page request in flight before the boundary", file: file, line: line)
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "6 of 6 loaded", file: file, line: line)
+        return (c, window)
+    }
+
+    /// Clicks Next at the boundary and waits, on the network journal, for the page-2 request to arrive and be held.
+    /// Returns the controller's page task, or nil after recording exactly why the request didn't start.
+    @MainActor
+    private func startBoundaryRequest(_ c: MainWindowController, _ network: Batch2Network,
+                                      file: StaticString = #filePath, line: UInt = #line) async -> Task<Void, Never>? {
+        guard c.previewNextButton.isEnabled else {
+            XCTFail("never started: Next is unavailable at the boundary" +
+                    (c.searchTask != nil ? " because a page request is already in flight (it began before the boundary)" : ""),
+                    file: file, line: line)
+            return nil
+        }
+        c.previewNextButton.performClick(nil)
+        guard let task = c.searchTask else {
+            XCTFail("never started: the boundary Next began no page request", file: file, line: line); return nil
+        }
+        guard await eventually(2, { network.searchState(page: 2) == .held }) else {
+            XCTFail("never started: page 2 didn't reach the network (journal \(network.searchJournal.map { "\($0.page) \($0.state)" }))",
+                    file: file, line: line)
+            return nil
+        }
+        return task
+    }
+
+    @MainActor
+    func testNextAtTheLastLoadedResultFinishesItsMoveWhenThePageArrives() async throws {
+        let network = Batch2Network()
+        let (c, window) = try await boundaryPreview(network)
+        defer { window.close() }
+        let last = try XCTUnwrap(c.state.selectedRemoteIdentity)
+        guard let task = await startBoundaryRequest(c, network) else { return }
+        // Started and held: nothing moves yet.
+        XCTAssertEqual(c.state.selectedRemoteIdentity, last, "waits for the page")
+        XCTAssertEqual(c.statusLabel.stringValue, "Loading more results from Wallhaven…")
+        XCTAssertFalse(c.previewNextButton.isEnabled, "one page request at a time")
+        // Completed: the controller's page task has applied the page.
+        XCTAssertTrue(network.releaseSearch(page: 2))
+        await task.value
+        XCTAssertEqual(network.searchState(page: 2), .answered)
+        XCTAssertEqual(c.remoteResults.count, 12)
+        XCTAssertEqual(c.state.selectedRemoteIdentity, c.remoteResults[6].identityKey, "the Next that asked for the page completes")
+        XCTAssertEqual(c.previewPositionLabel.stringValue, "7 of 12")
+        XCTAssertNotEqual(c.statusLabel.stringValue, "Loading more results from Wallhaven…", "the loading status is cleared")
+        // Exactly once: later run-loop turns move nothing, and the next Next is an ordinary step.
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertEqual(c.collectionView.selectionIndexPaths, [IndexPath(item: 6, section: 0)])
+        c.nextWallpaper(nil)
+        XCTAssertEqual(c.state.selectedRemoteIdentity, c.remoteResults[7].identityKey)
+        XCTAssertEqual(network.searchJournal.count, 1, "no further requests")
+    }
+
+    @MainActor
+    func testAPendingBoundaryMoveIsCancelledByAnythingThatChangesTheContext() async throws {
+        enum Interruption: String, CaseIterable { case selection, closePreview, source, query, failure }
+        for interruption in Interruption.allCases {
+            let network = Batch2Network()
+            let (c, window) = try await boundaryPreview(network)
+            defer { window.close() }
+            let context = interruption.rawValue
+            guard let task = await startBoundaryRequest(c, network) else { continue }
+            switch interruption {
+            case .selection: c.previousWallpaper(nil)
+            case .closePreview: c.toggleViewer(nil)
+            case .source: c.showFavorites(nil)
+            case .query:
+                c.searchField.stringValue = "forest"
+                c.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: c.searchField))
+            case .failure: break
+            }
+            let expected = c.state.selectedRemoteIdentity
+            XCTAssertTrue(network.releaseSearch(page: 2, failingWith: interruption == .failure ? URLError(.notConnectedToInternet) : nil))
+            await task.value                                             // The completion has run to its end.
+            XCTAssertEqual(network.searchState(page: 2), interruption == .failure ? .failed : .answered, context)
+            switch interruption {
+            case .selection, .closePreview:
+                XCTAssertEqual(c.remoteResults.count, 12, "\(context): the page itself still arrives")
+            case .source, .query:
+                XCTAssertEqual(c.remoteResults.count, 6, "\(context): the superseded request's results are discarded")
+            case .failure:
+                XCTAssertTrue(c.statusLabel.stringValue.hasPrefix("Couldn’t load more results"), context)
+            }
+            XCTAssertEqual(c.state.selectedRemoteIdentity, expected, "\(context): completed, and the cancelled move never advances")
+            if interruption == .failure {
+                // A later gallery pagination attempt (inside the cooldown) neither requests nor moves anything.
+                c.toggleViewer(nil)
+                c.galleryScrollForTesting.contentView.scroll(to: NSPoint(x: 0, y: 10_000))
+                NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: c.galleryScrollForTesting.contentView)
+                XCTAssertEqual(network.searchJournal.count, 1, "\(context): no request during the cooldown")
+                XCTAssertEqual(c.state.selectedRemoteIdentity, expected)
+            }
+        }
+    }
+
+    @MainActor
+    func testClosingThePreviewStopsItsLoadingStateAndIgnoresLateCallbacks() async throws {
+        let network = Batch2Network(), thumbnails = CompositionThumbnails()
+        let (c, window, _) = try await batch2Controller(network, thumbnails)
+        defer { window.close() }
+        c.showDiscover(nil)
+        thumbnails.holds = true
+        c.toggleViewer(nil)
+        XCTAssertEqual(c.stageView.placeholder, .loading)
+        c.toggleViewer(nil)
+        XCTAssertEqual(c.stageView.placeholder, .none, "closing ends the loading state")
+        await pause(DesktopPreviewView.loadingIndicatorDelay + 0.3)
+        XCTAssertFalse(c.stageView.isShowingLoadingIndicator, "the delayed spinner was cancelled")
+        thumbnails.sizes.removeAll()                       // The late answer is a failure.
+        thumbnails.releaseHeld()
+        XCTAssertEqual(c.stageView.placeholder, .none, "a late callback can't resurrect a placeholder")
+        XCTAssertFalse(c.stageView.isShowingLoadingIndicator)
+    }
+}
+
+extension WallpierTests {
+    /// What Wallpier asks NSWorkspace for (what macOS then renders is verified only by the opt-in physical check).
+    func testFitAsksNSWorkspaceForProportionalScalingWithoutClipping() {
+        func options(_ mode: ScalingMode) -> (scaling: UInt?, clipping: Bool?) {
+            let o = WallpaperService.desktopImageOptions(for: mode)
+            return ((o[.imageScaling] as? UInt) ?? (o[.imageScaling] as? NSNumber)?.uintValue,
+                    (o[.allowClipping] as? Bool) ?? (o[.allowClipping] as? NSNumber)?.boolValue)
+        }
+        XCTAssertEqual(options(.fit).scaling, NSImageScaling.scaleProportionallyUpOrDown.rawValue)
+        XCTAssertEqual(options(.fit).clipping, false, "Fit never crops")
+        XCTAssertEqual(options(.fill).scaling, NSImageScaling.scaleProportionallyUpOrDown.rawValue)
+        XCTAssertEqual(options(.fill).clipping, true)
+        XCTAssertEqual(options(.center).scaling, NSImageScaling.scaleNone.rawValue)
+        XCTAssertNotEqual(options(.fit).scaling, NSImageScaling.scaleProportionallyDown.rawValue, "not the down-only substitute")
+        // Reading the options back (for Undo's record of the previous wallpaper) gives the same mode.
+        for mode in ScalingMode.allCases {
+            let o = WallpaperService.desktopImageOptions(for: mode).mapValues { value -> Any in
+                (value as? Bool).map { NSNumber(value: $0) } ?? (value as? UInt).map { NSNumber(value: $0) } ?? value
+            }
+            XCTAssertEqual(WallpaperService.scalingMode(from: o), mode)
+        }
+    }
+}
+
+extension WallpierTests {
+    /// Existing installations keep their saved scaling (an old saved Fill can't be told from a deliberate one), so Help
+    /// says how to switch once.
+    @MainActor
+    func testHelpExplainsThatSavedScalingIsKeptAndHowToSwitchToFit() {
+        let help = MainWindowController.helpText
+        XCTAssertTrue(help.contains("Fit to Screen is the default for new installations. Existing scaling choices are preserved. " +
+                                    "If your wallpapers are cropped, select Fit to Screen once; Wallpier remembers your choice."), help)
+        // And the preserved choices really are preserved: a saved Fill or Center loads unchanged.
+        for saved in ["fill", "center"] {
+            let state = try? JSONDecoder().decode(WallpaperState.self, from: Data(#"{"scalingMode":"\#(saved)"}"#.utf8))
+            XCTAssertEqual(state?.scalingMode.rawValue, saved)
         }
     }
 }
