@@ -64,7 +64,7 @@ jobs:
           xcodebuild -version
           mkdir -p "$RUNNER_TEMP/package"
           bash Scripts/package-test-build.sh "$RUNNER_TEMP/package"
-      - name: Inspect the shipped binary (expected to fail before RC1 P2 is fixed)
+      - name: Independently inspect the app extracted from the shipped ZIP
         shell: bash
         run: |
           set -euo pipefail

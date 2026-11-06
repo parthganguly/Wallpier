@@ -44,8 +44,38 @@ shadow are dropped and the frame line is thicker, so the window stays legible. T
 
 ## Distribution
 
-`Scripts/package-test-build.sh <out>` builds Universal Release, ad-hoc signs it with the hardened runtime, verifies the
-signature, and writes `Wallpier-<version>-<build>-universal-adhoc.zip` with its SHA-256.
+`Scripts/package-test-build.sh <out>` builds Universal Release and ad-hoc signs it with the hardened runtime. It writes
+`Wallpier-<version>-<build>-universal-adhoc.zip`, then extracts that ZIP and runs `Scripts/audit-release-app.sh` on the
+extracted app. Only an app that passes gets its SHA-256 written. On failure the script exits non-zero and deletes the
+ZIP. This is a **private ad-hoc test build**, not a distribution build.
+
+**Packaging guarantees (#2).** The audited app must have:
+
+- `codesign --verify --strict --deep` passing.
+- The hardened runtime flag.
+- Exactly the `arm64` and `x86_64` slices.
+- No enabled `com.apple.security.get-task-allow`.
+- No `__llvm_profile*`, `__llvm_prf*` or `__llvm_cov*` symbols or sections in either slice.
+
+The build also fails if its log shows `-profile-generate`, `-profile-coverage-mapping` or `-fprofile-instr-generate`.
+CI's Release job independently re-inspects the app extracted from the same ZIP.
+
+**Cause and fix.**
+
+- **`get-task-allow`:** RC1's effective Release settings had `CODE_SIGN_INJECT_BASE_ENTITLEMENTS = YES`, and Xcode
+  treats ad-hoc (`-`) signing as development signing, so it injected `get-task-allow = true`. The empty source
+  entitlements file was never the cause.
+- **Coverage:** `ENABLE_CODE_COVERAGE` defaulted to `YES`, so any coverage-enabled scheme or override could instrument
+  Release. The setting `CLANG_COVERAGE_MAPPING=YES` alone produces `__llvm_covmap`/`__llvm_prf_*` sections in a Release
+  build. (`-enableCodeCoverage` is accepted only by test actions, so it can't be a Release `build` guard.)
+- **Fix:** the app target's **Release** configuration now sets `CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO`,
+  `ENABLE_CODE_COVERAGE = NO` and `CLANG_COVERAGE_MAPPING = NO`. The packaging command repeats them as overrides.
+- **Debug is unchanged:** base-entitlement injection, coverage support and testability remain. The shared scheme's
+  test action keeps `codeCoverageEnabled="NO"`, and CI tests also pass `-enableCodeCoverage NO`.
+- **Guard verified both ways:**
+  - The RC1 package fails the audit with `get-task-allow is enabled`.
+  - A Release build forced with `CLANG_COVERAGE_MAPPING=YES` fails with coverage sections in `arm64`.
+  - The fixed package passes.
 
 Public distribution needs these, all currently missing:
 
