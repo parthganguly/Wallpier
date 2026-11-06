@@ -417,8 +417,8 @@ final class WallpierTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: rollback)), bytes)
     }
 
-    // Caches is purgeable, so a previous wallpaper still in the remote cache (state saved before RC1,
-    // or a retain that fell back) gets an owned rollback copy like any external file.
+    // Caches is purgeable, so a previous wallpaper still in the remote cache (state saved before RC1)
+    // gets an owned rollback copy like any external file.
     func testCachedRemoteOriginalGetsOwnedRollbackCopy() async throws {
         let folder = try historyTestFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -444,15 +444,17 @@ final class WallpierTests: XCTestCase {
         try writeTestImage(to: cached)
         let root = folder.appendingPathComponent("Rollback")
         let store = WallpaperHistoryStore(root: root)
-        let owned = await store.retain(cached)
+        let owned = try await store.retain(cached)
         XCTAssertEqual(owned, root.appendingPathComponent("wallhaven-a.png"))
-        let reused = await store.retain(cached)
+        let reused = try await store.retain(cached)
         XCTAssertEqual(reused, owned)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["wallhaven-a.png"])
-        // Over the limit, the cached file is used as before rather than failing the change.
-        let full = WallpaperHistoryStore(root: folder.appendingPathComponent("Full"), maximumSizeBytes: 1)
-        let fallback = await full.retain(cached)
-        XCTAssertEqual(fallback, cached)
+        // Over the limit, retention fails closed: never the cached path, and no partial file is left.
+        let fullRoot = folder.appendingPathComponent("Full")
+        let full = WallpaperHistoryStore(root: fullRoot, maximumSizeBytes: 1)
+        do { _ = try await full.retain(cached); XCTFail("Budget exhaustion must throw") }
+        catch { XCTAssertTrue(error is RetentionError) }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fullRoot.path), [])
         await store.cleanup(protectedPaths: [])
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
     }
@@ -788,7 +790,7 @@ private final class SetAuditHarness {
     let x = SetAuditScreen(101)
     let y = SetAuditScreen(202)
 
-    init(root: URL, references: [WallpaperReference]) {
+    init(root: URL, references: [WallpaperReference], historyLimit: Int64 = WallpaperHistoryStore.maximumSizeBytes) {
         self.root = root
         incoming = root.appendingPathComponent("incoming.png")
         prior = root.appendingPathComponent("prior.png")
@@ -809,7 +811,7 @@ private final class SetAuditHarness {
         displayList.screens = [x, y]
         controller = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
             provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
-            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), maximumSizeBytes: historyLimit),
             remoteThumbnailProvider: thumbnails, availableScreens: { displayList.screens })
         self.displayList = displayList
         desktop.current = prior
@@ -1186,9 +1188,10 @@ extension WallpierTests {
     }
 
     @MainActor
-    private func setAuditHarness() throws -> SetAuditHarness {
+    private func setAuditHarness(historyLimit: Int64 = WallpaperHistoryStore.maximumSizeBytes) throws -> SetAuditHarness {
         let root = try historyTestFolder()
-        let harness = SetAuditHarness(root: root, references: [remoteReference(id: "aaaaaa"), remoteReference(id: "bbbbbb")])
+        let harness = SetAuditHarness(root: root, references: [remoteReference(id: "aaaaaa"), remoteReference(id: "bbbbbb")],
+                                      historyLimit: historyLimit)
         try writeTestImage(to: harness.incoming)
         try writeTestImage(to: harness.prior, width: 3)
         addTeardownBlock {
@@ -3461,7 +3464,8 @@ private final class RotationHarness {
 
     init(root: URL, references: [WallpaperReference], interval: RotationInterval,
          shuffle: Bool, localImages: Int, favorites: [WallpaperReference] = [],
-         extraCollections: [WallpaperCollection] = []) throws {
+         extraCollections: [WallpaperCollection] = [],
+         historyLimit: Int64 = WallpaperHistoryStore.maximumSizeBytes) throws {
         precondition(localImages > 0 || !references.isEmpty)
         self.root = root
         incoming = root.appendingPathComponent("incoming.png")
@@ -3500,7 +3504,7 @@ private final class RotationHarness {
         displayList.screens = [x, y]
         controller = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
             provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
-            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), maximumSizeBytes: historyLimit),
             remoteThumbnailProvider: thumbnails, availableScreens: { displayList.screens })
         self.displayList = displayList
         desktop.current = prior
@@ -3552,11 +3556,12 @@ extension WallpierTests {
     private func rotationHarness(references: [WallpaperReference] = [], interval: RotationInterval = .off,
                                  shuffle: Bool = false, localImages: Int = 0,
                                  favorites: [WallpaperReference] = [],
-                                 extraCollections: [WallpaperCollection] = []) throws -> RotationHarness {
+                                 extraCollections: [WallpaperCollection] = [],
+                                 historyLimit: Int64 = WallpaperHistoryStore.maximumSizeBytes) throws -> RotationHarness {
         let root = try historyTestFolder()
         let harness = try RotationHarness(root: root, references: references, interval: interval,
                                           shuffle: shuffle, localImages: localImages, favorites: favorites,
-                                          extraCollections: extraCollections)
+                                          extraCollections: extraCollections, historyLimit: historyLimit)
         try writeTestImage(to: harness.incoming)
         try writeTestImage(to: harness.prior, width: 3)
         addTeardownBlock {
@@ -5503,5 +5508,190 @@ extension WallpierTests {
         let referenced = h.store.load().protectedCachePaths.filter { $0.hasPrefix(rollback.path + "/") }
         XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: rollback.path)),
                        Set(referenced.map { URL(fileURLWithPath: $0).lastPathComponent }))
+    }
+}
+
+// MARK: - RC1 P1: retention fails closed (#1)
+
+/// Reproducible owned-storage failures, all inside an isolated fixture root.
+enum RetentionFault: CaseIterable {
+    /// An unreferenced file already fills the (small) owned budget.
+    case budgetExhausted
+    /// The owned-storage root is an ordinary file, so its directory can't be created.
+    case rootIsAFile
+
+    static let limit: Int64 = 1_048_576
+
+    func inject(at rollback: URL) throws {
+        switch self {
+        case .budgetExhausted:
+            try FileManager.default.createDirectory(at: rollback, withIntermediateDirectories: true)
+            try Data(count: Int(Self.limit)).write(to: rollback.appendingPathComponent("filler.bin"))
+        case .rootIsAFile:
+            try Data("not a folder".utf8).write(to: rollback)
+        }
+    }
+
+    func clear(at rollback: URL) throws {
+        switch self {
+        case .budgetExhausted: try FileManager.default.removeItem(at: rollback.appendingPathComponent("filler.bin"))
+        case .rootIsAFile: try FileManager.default.removeItem(at: rollback)
+        }
+    }
+}
+
+extension WallpierTests {
+    private func assertRetentionThrows(_ store: WallpaperHistoryStore, _ url: URL, file: StaticString = #filePath, line: UInt = #line) async {
+        do {
+            let returned = try await store.retain(url)
+            XCTFail("retain must throw, returned \(returned.path)", file: file, line: line)
+        } catch {
+            XCTAssertTrue(error is RetentionError, "Unexpected \(error)", file: file, line: line)
+        }
+    }
+
+    private func entries(_ folder: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: folder.path).sorted()
+    }
+
+    func testRetentionBudgetExhaustionThrowsAndKeepsReferencedOriginals() async throws {
+        let folder = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let a = folder.appendingPathComponent("wallhaven-a.png"), b = folder.appendingPathComponent("wallhaven-b.png")
+        try writeTestImage(to: a); try writeTestImage(to: b, red: 0.9)
+        let size = Int64(try Data(contentsOf: a).count)
+        let root = folder.appendingPathComponent("Rollback")
+        let store = WallpaperHistoryStore(root: root, maximumSizeBytes: size + size / 2)
+        let owned = try await store.retain(a)
+        let ownedBytes = try Data(contentsOf: owned)
+        await assertRetentionThrows(store, b)
+        XCTAssertEqual(try entries(root), ["wallhaven-a.png"], "Only this call's partial copy may be removed")
+        XCTAssertEqual(try Data(contentsOf: owned), ownedBytes)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: b.path), "The cached source is never touched")
+        // An already owned original is still reused when the budget is full.
+        let reused = try await store.retain(a)
+        XCTAssertEqual(reused, owned)
+    }
+
+    func testRetentionIOFailuresThrowWithoutDeletingWhatIsThere() async throws {
+        let folder = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let cached = folder.appendingPathComponent("wallhaven-a.png")
+        try writeTestImage(to: cached)
+        // Root is an ordinary file.
+        let fileRoot = folder.appendingPathComponent("FileRoot")
+        try Data("keep".utf8).write(to: fileRoot)
+        await assertRetentionThrows(WallpaperHistoryStore(root: fileRoot), cached)
+        XCTAssertEqual(try Data(contentsOf: fileRoot), Data("keep".utf8))
+        // A directory occupies the destination name; it and its contents survive.
+        let root = folder.appendingPathComponent("Rollback")
+        let collision = root.appendingPathComponent("wallhaven-a.png")
+        try FileManager.default.createDirectory(at: collision, withIntermediateDirectories: true)
+        try Data("inner".utf8).write(to: collision.appendingPathComponent("inner.txt"))
+        await assertRetentionThrows(WallpaperHistoryStore(root: root), cached)
+        XCTAssertEqual(try entries(root), ["wallhaven-a.png"])
+        XCTAssertEqual(try Data(contentsOf: collision.appendingPathComponent("inner.txt")), Data("inner".utf8))
+    }
+
+    func testRetentionRejectsInvalidImageAndRecoversWithAValidOne() async throws {
+        let folder = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let cached = folder.appendingPathComponent("wallhaven-a.png")
+        try Data(repeating: 0x42, count: 512).write(to: cached)
+        let root = folder.appendingPathComponent("Rollback")
+        let store = WallpaperHistoryStore(root: root)
+        await assertRetentionThrows(store, cached)
+        XCTAssertEqual(try entries(root), [], "No partial or invalid copy is left behind")
+        // A truncated (incomplete) image is rejected too.
+        try writeTestImage(to: cached, width: 64)
+        let full = try Data(contentsOf: cached)
+        try full.prefix(full.count / 2).write(to: cached)
+        await assertRetentionThrows(store, cached)
+        XCTAssertEqual(try entries(root), [])
+        try writeTestImage(to: cached)
+        let owned = try await store.retain(cached)
+        XCTAssertEqual(owned, root.appendingPathComponent("wallhaven-a.png"))
+        XCTAssertEqual(try Data(contentsOf: owned), try Data(contentsOf: cached))
+    }
+
+    func testRetentionHonoursCancellation() async throws {
+        let folder = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let cached = folder.appendingPathComponent("wallhaven-a.png")
+        try writeTestImage(to: cached)
+        let root = folder.appendingPathComponent("Rollback")
+        let store = WallpaperHistoryStore(root: root)
+        let task = Task { () -> Result<URL, Error> in
+            withUnsafeCurrentTask { $0?.cancel() }
+            do { return .success(try await store.retain(cached)) } catch { return .failure(error) }
+        }
+        let result = await task.value
+        guard case .failure(let error) = result else { return XCTFail("Cancelled retain must throw") }
+        XCTAssertTrue(error is CancellationError)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    @MainActor
+    func testRemoteSetRetentionFailureDoesNotMutateAndRecovers() async throws {
+        for fault in RetentionFault.allCases {
+            let h = try setAuditHarness(historyLimit: RetentionFault.limit)
+            let rollback = h.root.appendingPathComponent("Rollback")
+            try fault.inject(at: rollback)
+            h.controller.setWallpaper(nil)
+            await fulfillment(of: [h.network.downloadGate.started], timeout: 2)
+            h.network.downloadGate.release(.success(h.incoming))
+            try await finishAuditTask(h.controller.downloadTask)
+            XCTAssertTrue(h.desktop.calls.isEmpty, "\(fault): no wallpaper mutation")
+            XCTAssertEqual(h.desktop.current, h.prior)
+            XCTAssertTrue(h.store.load().history.isEmpty, "\(fault): no history entry")
+            XCTAssertNil(h.store.load().assignment(for: "101"), "\(fault): no display assignment")
+            let status = h.controller.statusLabel.stringValue
+            XCTAssertTrue(status.hasPrefix("Could Not Set Wallpaper:"), "\(fault): \(status)")
+            XCTAssertTrue(status.contains("the desktop was not changed"), "\(fault): \(status)")
+            XCTAssertNil(h.controller.downloadTask)
+            XCTAssertTrue(h.controller.setWallpaperButton.isEnabled)
+            // Recovery: the next explicit Set uses the established download cache and an owned copy.
+            try fault.clear(at: rollback)
+            h.controller.setWallpaper(nil)
+            try await finishAuditTask(h.controller.downloadTask)
+            let a = h.controller.state.favorites[0]
+            XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(a)], "\(fault)")
+            XCTAssertEqual(h.network.downloads.count, 1, "\(fault): cached original is reused")
+            XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.owned(a).path)
+            XCTAssertEqual(h.store.load().history.count, 1)
+        }
+    }
+
+    @MainActor
+    func testRotationRetentionFailureReportsReleasesGuardAndRecovers() async throws {
+        for fault in RetentionFault.allCases {
+            let h = try rotationHarness(references: rotationReferences("aaaaaa", "bbbbbb"), historyLimit: RetentionFault.limit)
+            try fault.inject(at: h.rollbackRoot)
+            h.selectRotationInterval(.fifteenMinutes)
+            h.scheduledTimers[0].fire()
+            await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+            h.network.downloadGate.release(.success(h.incoming))
+            try await finishAuditTask(h.controller.rotationTask)
+            XCTAssertTrue(h.desktop.calls.isEmpty, "\(fault): no wallpaper mutation")
+            XCTAssertEqual(h.desktop.current, h.prior)
+            XCTAssertTrue(h.store.load().history.isEmpty, "\(fault)")
+            XCTAssertNil(h.store.load().assignment(for: "101"), "\(fault)")
+            XCTAssertTrue(h.controller.statusLabel.stringValue.contains("Automatic rotation failed"), "\(fault)")
+            XCTAssertNil(h.controller.rotationTask, "\(fault): busy guard released")
+            XCTAssertEqual(h.store.load().rotationCursor, h.controller.state.collections[0].wallpapers[1].identityKey)
+            XCTAssertTrue(h.controller.setWallpaperButton.isEnabled)
+            // The failed attempt (bbbbbb) still advanced rotation's cursor, as before; the next tick wraps to aaaaaa.
+            try fault.clear(at: h.rollbackRoot)
+            h.network.downloadGate = SetAuditGate<URL>()
+            try writeTestImage(to: h.incoming, width: 5)
+            h.scheduledTimers[0].fire()
+            await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+            h.network.downloadGate.release(.success(h.incoming))
+            try await finishAuditTask(h.controller.rotationTask)
+            let next = h.controller.state.collections[0].wallpapers[0]
+            XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(next)], "\(fault)")
+            XCTAssertEqual(h.store.load().assignment(for: "101")?.imagePath, h.owned(next).path)
+            XCTAssertEqual(h.store.load().history.count, 1)
+        }
     }
 }

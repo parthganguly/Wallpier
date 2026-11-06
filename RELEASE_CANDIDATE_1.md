@@ -22,9 +22,25 @@ three against the unfixed code.
 - `WallpaperHistoryStore.retain(_:)` copies a cached original into owned storage just before it is set. On APFS the
   copy is a clone (measured: a 300 MB copy changed free space by 0), so it uses no extra disk until the cache copy is
   evicted.
-- If the owned budget is full, `retain` returns the cached file. That is the old behavior: the change still succeeds.
-- A previous wallpaper that is still in Caches (state saved before RC1, or a `retain` that fell back) now gets an
-  owned rollback copy, like any external file.
+- **Retention fails closed (#1).** `retain` returns only a verified owned file, or it throws. It never falls back to
+  the purgeable cache file. Budget exhaustion, a directory or file-copy error, an invalid or incomplete copy, and
+  cancellation all make Set and rotation fail before the wallpaper boundary is reached. So there is no desktop change,
+  no new display assignment and no new history entry. An explicit Set shows "Could Not Set Wallpaper" with the reason
+  and says the desktop was not changed. Rotation reports "Automatic rotation failed" and releases its busy guard, so
+  a later Set or tick can succeed.
+- The copy is written to a uniquely named `.partial-<UUID>` file, checked for size and decodability, and then renamed
+  into place. Failure cleanup removes only that partial file. It never removes an existing owned file, a stale file or
+  a folder at the destination name, or any other operation's file. A partial file left by a crash is unreferenced, so
+  the next committed cleanup sweeps it.
+- **Still the same on a retention failure (by design):** the downloaded original stays in the remote cache and the
+  wallpaper reference keeps its cache path. A rotation attempt still advances the rotation cursor, so one wallpaper
+  that can't be retained isn't retried on every tick.
+- A previous wallpaper that is still in Caches (state saved before RC1) gets an owned rollback copy, like any external
+  file.
+- **Previous-wallpaper policy (unchanged, separate from #1).** If the *previous* wallpaper is missing, or can't be
+  copied within the budget, the new change still proceeds. Its history entry is then marked Undo-unavailable
+  (`previousFileUnavailable` / `preservationFailed`), and the status reports "Undo unavailable for this change." Only
+  the *new* wallpaper must be durably owned.
 - Cleanup removes every unreferenced file in the owned folder, not just `rollback-*` files, so set originals don't
   accumulate.
 - Favorites, collections, browsing and previews are unchanged. Originals still download only when needed.
