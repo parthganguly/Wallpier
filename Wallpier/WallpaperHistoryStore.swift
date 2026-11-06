@@ -19,25 +19,30 @@ actor WallpaperHistoryStore {
         limit = maximumSizeBytes
     }
 
-    /// An owned copy of a cached remote original, under the same name, for the desktop to reference.
-    /// Falls back to the cached file (the earlier behavior) if the copy can't be made within the limit.
-    func retain(_ original: URL) -> URL {
+    /// An owned, verified copy of a cached remote original, under the same name, for the desktop to reference.
+    /// Throws instead of ever returning the purgeable cache file. On failure only this call's own partial copy is removed.
+    func retain(_ original: URL) throws -> URL {
+        try Task.checkCancellation()
         let destination = root.appendingPathComponent(original.lastPathComponent)
         if Self.validImage(destination) { return destination }
+        let partial = root.appendingPathComponent(".partial-\(UUID().uuidString)")
         do {
-            let size = Int64(try original.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+            // FileManager, not URL resource values: those are cached per URL instance and go stale.
+            let size = try fileSize(original)
             try files.createDirectory(at: root, withIntermediateDirectories: true)
-            guard try ownedBytes() + size <= limit else { throw CocoaError(.fileWriteOutOfSpace) }
-            // An invalid file here was never a usable desktop; replace it.
-            try? files.removeItem(at: destination)
+            guard try ownedBytes() + size <= limit else { throw RetentionError.storageFull }
             // On APFS this is a clone: no extra space until the cache copy is evicted.
-            try files.copyItem(at: original, to: destination)
-            guard Self.validImage(destination) else { throw CocoaError(.fileReadCorruptFile) }
+            try files.copyItem(at: original, to: partial)
+            guard try fileSize(partial) == size, Self.validImage(partial) else { throw CocoaError(.fileReadCorruptFile) }
+            try Task.checkCancellation()
+            // rename(2) replaces only a stale invalid file of this name; a directory there makes it fail, untouched.
+            guard rename(partial.path, destination.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             return destination
         } catch {
-            try? files.removeItem(at: destination)
+            try? files.removeItem(at: partial)
             logger.error("Could not retain \(original.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return original
+            if error is CancellationError || error is RetentionError { throw error }
+            throw RetentionError.failed(error)
         }
     }
 
@@ -116,6 +121,10 @@ actor WallpaperHistoryStore {
         }
     }
 
+    private func fileSize(_ url: URL) throws -> Int64 {
+        (try files.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
     private func ownedBytes() throws -> Int64 {
         try files.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey]).reduce(Int64(0)) { sum, url in
             sum + Int64(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
@@ -145,5 +154,20 @@ actor WallpaperHistoryStore {
                                       kCGImageSourceThumbnailMaxPixelSize: 32,
                                       kCGImageSourceShouldCacheImmediately: true]
         return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) != nil
+    }
+}
+
+
+/// A remote original could not be kept outside purgeable Caches, so the desktop was left unchanged.
+enum RetentionError: LocalizedError {
+    case storageFull
+    case failed(Error)
+    var errorDescription: String? {
+        let reason: String
+        switch self {
+        case .storageFull: reason = "Its storage for active and Undo wallpapers is full."
+        case .failed(let error): reason = error.localizedDescription
+        }
+        return "Wallpier couldn’t keep its own copy of this wallpaper, so the desktop was not changed. \(reason) Try again, or choose a different wallpaper."
     }
 }
