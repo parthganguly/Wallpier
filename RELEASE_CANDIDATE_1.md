@@ -44,8 +44,33 @@ shadow are dropped and the frame line is thicker, so the window stays legible. T
 
 ## Distribution
 
-`Scripts/package-test-build.sh <out>` builds Universal Release, ad-hoc signs it with the hardened runtime, verifies the
-signature, and writes `Wallpier-<version>-<build>-universal-adhoc.zip` with its SHA-256.
+`Scripts/package-test-build.sh <out>` builds Universal Release, ad-hoc signs it with the hardened
+runtime, verifies the signature, and writes `Wallpier-<version>-<build>-universal-adhoc.zip` with
+its SHA-256.
+
+The Release packaging path explicitly disables Xcode's effective defaults that shipped development
+instrumentation: `CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO` (kept the
+`com.apple.security.get-task-allow` debugging entitlement out of the signature) and
+`ENABLE_CODE_COVERAGE=NO` (kept `___llvm_profile_*` symbols and `__llvm_prf*` / `__llvm_cov*`
+sections out of both slices). Debug configuration and the test targets keep their existing
+instrumentation: `ENABLE_TESTABILITY` in Debug, and code coverage remains switchable from the
+shared scheme's TestAction and the CI core job, which passes `-enableCodeCoverage NO` explicitly.
+
+Before creating the ZIP, the script audits the app it is about to zip; after checksum generation it
+extracts the ZIP and audits the app extracted from it (`Scripts/audit-release-artifact.py`),
+failing the build unless the shipped artifact all of:
+
+1. verifies with `codesign --verify --strict --deep`,
+2. is ad-hoc signed (`Signature=adhoc`) with the hardened runtime (`flags=` contains `runtime`),
+3. has no enabled `com.apple.security.get-task-allow` entitlement,
+4. contains exactly the `arm64` and `x86_64` slices, and
+5. has no LLVM coverage symbols or coverage data/mapping sections in either slice.
+
+The same audit runs independently on GitHub Actions (release-audit job) against the app extracted
+from the produced ZIP, with Xcode 16.4 on `macos-15-intel`.
+
+The package remains a private ad-hoc test build. Developer ID signing, notarization and Gatekeeper
+distribution acceptance require a separately authorized release workflow and credentials.
 
 Public distribution needs these, all currently missing:
 
