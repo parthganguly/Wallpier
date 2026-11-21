@@ -5695,3 +5695,108 @@ extension WallpierTests {
         }
     }
 }
+
+extension WallpierTests {
+    @MainActor
+    func testThumbnailProviderCancellationSkipsCallbackAndPreservesLiveAndSyncRequests() async throws {
+        let folder = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let a = folder.appendingPathComponent("a.png")
+        let b = folder.appendingPathComponent("b.png")
+        try writeTestImage(to: a, red: 0.2, width: 16)
+        try writeTestImage(to: b, red: 0.9, width: 24)
+
+        let provider = ThumbnailProvider()
+
+        // Cancelled operation does not invoke its completion and deallocates without leaking.
+        var cancelledCallbackFired = false
+        weak var weakCancelledOp: Operation?
+        do {
+            let op = provider.requestThumbnail(for: a, maximumPixelSize: 1800) { _ in
+                cancelledCallbackFired = true
+            }
+            XCTAssertNotNil(op)
+            weakCancelledOp = op
+            op?.cancel()
+        }
+
+        // Unretained live request (gallery caller pattern) still delivers, caches, and deallocates.
+        let delivered = expectation(description: "live request delivered")
+        var liveImage: NSImage?
+        weak var weakLiveOp: Operation?
+        do {
+            let op = provider.requestThumbnail(for: b, maximumPixelSize: 360) { image in
+                liveImage = image
+                delivered.fulfill()
+            }
+            weakLiveOp = op
+        }
+        await fulfillment(of: [delivered], timeout: 5)
+        XCTAssertEqual(liveImage?.size, NSSize(width: 24, height: 8))
+
+        // Cached request completes synchronously and returns nil (no pending operation).
+        var syncImage: NSImage?
+        let cachedOp = provider.requestThumbnail(for: b, maximumPixelSize: 360) { image in
+            syncImage = image
+        }
+        XCTAssertNil(cachedOp)
+        XCTAssertNotNil(syncImage)
+        XCTAssertEqual(syncImage?.size, NSSize(width: 24, height: 8))
+
+        let deallocated = await eventually(2) { weakCancelledOp == nil && weakLiveOp == nil }
+        XCTAssertTrue(deallocated, "Cancelled and completed thumbnail operations must deallocate")
+        XCTAssertFalse(cancelledCallbackFired, "Cancelled request must not invoke completion")
+    }
+
+    @MainActor
+    func testLocalPreviewCancelsSupersededRequestsAndSupportsReopenAndWarmRevisit() async throws {
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pictures = root.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent("Pictures")
+        try FileManager.default.createDirectory(at: pictures, withIntermediateDirectories: true)
+        let img1 = pictures.appendingPathComponent("01.png")
+        let img2 = pictures.appendingPathComponent("02.png")
+        let img3 = pictures.appendingPathComponent("03.png")
+        try writeTestImage(to: img1, red: 0.1, width: 12)
+        try writeTestImage(to: img2, red: 0.5, width: 20)
+        try writeTestImage(to: img3, red: 0.9, width: 28)
+
+        let h = SetAuditHarness(root: root, references: [])
+        h.controller.openFolder(pictures)
+        let loaded = await eventually {
+            h.controller.state.selectedImagePath.map {
+                URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path
+            } == img1.path
+        }
+        XCTAssertTrue(loaded)
+
+        // Rapid step 01 -> 02 -> 03 settles on 03 with exact dimensions and no late overwrite.
+        h.controller.toggleViewer(nil)
+        h.controller.nextWallpaper(nil)
+        h.controller.nextWallpaper(nil)
+        let arrived3 = await eventually { h.controller.stageView.image != nil }
+        XCTAssertTrue(arrived3)
+        XCTAssertEqual(h.controller.previewTitleLabel.stringValue, "03")
+        XCTAssertEqual(h.controller.stageView.image?.size, NSSize(width: 28, height: 8))
+        let settled3 = h.controller.stageView.image
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(h.controller.stageView.image === settled3, "Superseded decode must not overwrite settled selection")
+
+        // Close and reopen same selection uses cached image cleanly.
+        h.controller.toggleViewer(nil)
+        XCTAssertFalse(h.controller.isViewerVisible)
+        h.controller.toggleViewer(nil)
+        XCTAssertTrue(h.controller.isViewerVisible)
+        XCTAssertNotNil(h.controller.stageView.image)
+        XCTAssertEqual(h.controller.stageView.image?.size, NSSize(width: 28, height: 8))
+
+        // Settled 03 -> 02 -> 03 warm revisit completes synchronously with exact image.
+        h.controller.previousWallpaper(nil)
+        let arrived2 = await eventually { h.controller.stageView.image != nil }
+        XCTAssertTrue(arrived2)
+        XCTAssertEqual(h.controller.stageView.image?.size, NSSize(width: 20, height: 8))
+        h.controller.nextWallpaper(nil)
+        XCTAssertNotNil(h.controller.stageView.image, "Warm revisit should complete synchronously from cache")
+        XCTAssertEqual(h.controller.stageView.image?.size, NSSize(width: 28, height: 8))
+    }
+}
