@@ -25,37 +25,42 @@ final class ThumbnailProvider {
         cache.removeAllObjects()
     }
 
+    @discardableResult
     func requestThumbnail(
         for url: URL,
         maximumPixelSize: Int = 360,
         completion: @escaping (NSImage?) -> Void
-    ) {
+    ) -> Operation? {
         let key = "\(url.path)#\(maximumPixelSize)" as NSString
         if let cached = cache.object(forKey: key) {
             completion(cached)
-            return
+            return nil
         }
 
         let requestGeneration = generation
-        queue.addOperation { [weak self] in
-            guard let self else { return }
+        let operation = BlockOperation()
+        operation.addExecutionBlock { [weak self, weak operation] in
+            guard let self, let operation, !operation.isCancelled else { return }
             let image = autoreleasepool {
                 Self.makeThumbnail(for: url, maximumPixelSize: maximumPixelSize)
             }
+            guard !operation.isCancelled else { return }
 
             if image == nil {
                 self.logger.error("Could not create thumbnail for \(url.lastPathComponent, privacy: .public)")
             }
 
             OperationQueue.main.addOperation { [weak self] in
-                guard self?.generation == requestGeneration else { return }
+                guard let self, !operation.isCancelled, self.generation == requestGeneration else { return }
                 if let image {
                     let cost = Int(image.size.width * image.size.height * 4)
-                    self?.cache.setObject(image, forKey: key, cost: cost)
+                    self.cache.setObject(image, forKey: key, cost: cost)
                 }
                 completion(image)
             }
         }
+        queue.addOperation(operation)
+        return operation
     }
 
     private static func makeThumbnail(for url: URL, maximumPixelSize: Int) -> NSImage? {

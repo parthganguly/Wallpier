@@ -79,6 +79,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private var rotationTimer: Timer?
     private(set) var searchTask: Task<Void, Never>?
     private(set) var detailTask: Task<Void, Never>?
+    private var previewThumbnailOperation: Operation?
+    private var previewThumbnailToken: UInt64 = 0
     private(set) var downloadTask: Task<Void, Never>?
     private(set) var rotationTask: Task<Void, Never>?
     private var isSearching = false
@@ -249,6 +251,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         rotationTimer?.invalidate()
         searchTask?.cancel()
         detailTask?.cancel()
+        previewThumbnailOperation?.cancel()
         downloadTask?.cancel()
         rotationTask?.cancel()
         undoValidationTask?.cancel()
@@ -955,7 +958,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             guard let self else { return }
             defer { downloadTask = nil; updateControlAvailability() }
             do {
-                let url = await historyStore.retain(try await localOriginal(for: reference))
+                let url = try await historyStore.retain(try await localOriginal(for: reference))
                 try Task.checkCancellation()
                 await applyWallpaper(url, to: screen, scaling: scaling, source: source)
             } catch is CancellationError {
@@ -1093,9 +1096,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         moveSelection(direction: sender === previewPreviousButton ? -1 : 1)
     }
 
-    /// Closing the preview ends everything it was waiting for: details, a pending boundary move, the loading state.
+    /// Closing the preview ends everything it was waiting for: details, local preview decode, a pending boundary move, the loading state.
     private func endPreviewSession() {
         cancelDetails()
+        cancelLocalPreview()
         pendingAdvance = nil
         stageView.placeholder = .none
     }
@@ -1145,6 +1149,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     private func updatePreview(for item: BrowserItem?) {
         if item?.identifier != detailIdentity { cancelDetails() }
+        cancelLocalPreview()
         stageView.image = nil
         stageView.placeholder = .none
         stageFidelity = .none
@@ -1186,7 +1191,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func loadPreviewContent(for item: BrowserItem) {
         if stageView.image == nil { stageView.placeholder = .loading }
         switch item {
-        case .local(let url): loadLocalPreview(url, identity: item.identifier)
+        case .local(let url): loadLocalPreview(url, identity: item.identifier, cancelsPrevious: true)
         case .remote(let ref):
             // A validated cached original is best, but checking takes a moment: show the most faithful
             // thumbnail meanwhile unless an original is expected. Nothing here downloads an original.
@@ -1201,14 +1206,34 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         }
     }
 
-    private func loadLocalPreview(_ url: URL, identity: String, onFailure: (() -> Void)? = nil) {
-        thumbnailProvider.requestThumbnail(for: url, maximumPixelSize: 1800) { [weak self] image in
-            guard let self, selectedItem?.identifier == identity else { return }
+    private func cancelLocalPreview() {
+        previewThumbnailToken &+= 1
+        previewThumbnailOperation?.cancel()
+        previewThumbnailOperation = nil
+    }
+
+    private func loadLocalPreview(_ url: URL, identity: String, cancelsPrevious: Bool = false, onFailure: (() -> Void)? = nil) {
+        let token: UInt64?
+        if cancelsPrevious {
+            cancelLocalPreview()
+            token = previewThumbnailToken
+        } else {
+            token = nil
+        }
+        let operation = thumbnailProvider.requestThumbnail(for: url, maximumPixelSize: 1800) { [weak self] image in
+            guard let self else { return }
+            if let token, self.previewThumbnailToken == token {
+                self.previewThumbnailOperation = nil
+            }
+            guard selectedItem?.identifier == identity else { return }
             guard let image else {
                 if let onFailure { onFailure() } else if isViewerVisible, stageFidelity == .none { stageView.placeholder = .unavailable }
                 return
             }
             showOnStage(image, fidelity: .original, identity: identity)
+        }
+        if let token, let operation, previewThumbnailToken == token {
+            previewThumbnailOperation = operation
         }
     }
 
@@ -1667,7 +1692,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                     let url = try await localOriginal(for: ref)
                     try Task.checkCancellation()
                     guard state.activeRotationCollectionID == id, state.rotationInterval != .off else { return }
-                    await applyWallpaper(await historyStore.retain(url), to: screen, scaling: scaling, source: .rotation)
+                    await applyWallpaper(try await historyStore.retain(url), to: screen, scaling: scaling, source: .rotation)
                 } catch {
                     if !Task.isCancelled { showStatus("Automatic rotation failed: \(friendlyMessage(for: error))", isError: true) }
                 }
