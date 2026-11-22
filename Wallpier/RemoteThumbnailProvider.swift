@@ -27,7 +27,11 @@ class RemoteThumbnailProvider {
         )
         configuration.httpMaximumConnectionsPerHost = 4
         configuration.timeoutIntervalForRequest = 20
-        session = URLSession(configuration: configuration)
+        // Openverse thumbnails must not be redirected off its API host; Wallhaven's keep URLSession's defaults.
+        let redirects = RedirectPolicyDelegate { from, to in
+            from.host?.lowercased() != OpenverseURLPolicy.apiHost || OpenverseURLPolicy.allowsRedirect(from: from, to: to)
+        }
+        session = URLSession(configuration: configuration, delegate: redirects, delegateQueue: nil)
         cache.countLimit = 100
         cache.totalCostLimit = 32 * 1_024 * 1_024
     }
@@ -81,8 +85,7 @@ class RemoteThumbnailProvider {
             guard isCurrent else { return }
             guard error == nil,
                   let response = response as? HTTPURLResponse,
-                  (200...299).contains(response.statusCode),
-                  let data else {
+                  let data, Self.accepts(response, for: url, byteCount: data.count) else {
                 self.finish(key: key, generation: requestGeneration, result: nil)
                 return
             }
@@ -115,6 +118,15 @@ class RemoteThumbnailProvider {
             self.lock.unlock()
             callbacks.forEach { $0(result?.image) }
         }
+    }
+
+    static let maximumThumbnailBytes = 16 * 1_024 * 1_024
+
+    /// A successful, bounded response; an Openverse thumbnail must also have ended on its HTTPS API host.
+    static func accepts(_ response: HTTPURLResponse, for requested: URL, byteCount: Int) -> Bool {
+        guard (200...299).contains(response.statusCode), (1...maximumThumbnailBytes).contains(byteCount) else { return false }
+        guard requested.host?.lowercased() == OpenverseURLPolicy.apiHost else { return true }
+        return response.url.map { OpenverseURLPolicy.isSafeHTTPS($0) && $0.host?.lowercased() == OpenverseURLPolicy.apiHost } ?? false
     }
 
     private static func makeThumbnail(data: Data, maximumPixelSize: Int) -> (image: NSImage, cost: Int)? {

@@ -1,0 +1,18 @@
+{
+  "id": "0aff3595-8168-440b-83ff-7a80b65dea42",
+  "title": "Fixture Ridge at Dawn",
+  "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=100001",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/a/aa/Fixture_Ridge.jpg",
+  "creator": "Fixture Photographer",
+  "license": "cc0",
+  "license_version": "1.0",
+  "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+  "provider": "wikimedia",
+  "source": "wikimedia",
+  "category": "photograph",
+  "tags": [{"name": "mountain"}, {"name": "dawn"}, {"name": "ridge"}],
+  "mature": false,
+  "height": 2400,
+  "width": 3840,
+  "thumbnail": "https://api.openverse.org/v1/images/0aff3595-8168-440b-83ff-7a80b65dea42/thumb/"
+}

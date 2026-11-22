@@ -1,0 +1,123 @@
+{
+  "result_count": 4000,
+  "page_count": 12,
+  "page_size": 20,
+  "page": 1,
+  "results": [
+    {
+      "id": "0aff3595-8168-440b-83ff-7a80b65dea42",
+      "title": "Fixture Ridge at Dawn",
+      "indexed_on": "2024-01-01T00:00:00Z",
+      "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=100001",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/a/aa/Fixture_Ridge.jpg",
+      "creator": "Fixture Photographer",
+      "creator_url": "https://commons.wikimedia.org/wiki/User:Fixture",
+      "license": "cc0",
+      "license_version": "1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "provider": "wikimedia",
+      "source": "wikimedia",
+      "category": "photograph",
+      "filetype": "jpg",
+      "tags": [{"name": "mountain", "accuracy": null}, {"name": "dawn", "accuracy": null}],
+      "attribution": "\"Fixture Ridge at Dawn\" by Fixture Photographer is marked with CC0 1.0.",
+      "mature": false,
+      "height": 2400,
+      "width": 3840,
+      "thumbnail": "https://api.openverse.org/v1/images/0aff3595-8168-440b-83ff-7a80b65dea42/thumb/",
+      "detail_url": "https://api.openverse.org/v1/images/0aff3595-8168-440b-83ff-7a80b65dea42/"
+    },
+    {
+      "id": "1b6f8c2e-5d3a-4e7b-9c1d-2a3b4c5d6e7f",
+      "title": "",
+      "foreign_landing_url": "https://www.flickr.com/photos/fixture/200002",
+      "url": "https://live.staticflickr.com/65535/200002_fixture_b.jpg",
+      "creator": null,
+      "license": "pdm",
+      "license_version": "1.0",
+      "license_url": null,
+      "source": "flickr",
+      "category": "photograph",
+      "tags": [],
+      "mature": false,
+      "height": 1080,
+      "width": 2560,
+      "thumbnail": "https://evil.example/thumb.jpg"
+    },
+    {
+      "id": "2c7a9d3f-6e4b-4f8c-8d2e-3b4c5d6e7f80",
+      "title": "Untrusted host",
+      "foreign_landing_url": "https://example.org/photo/3",
+      "url": "https://images.example.org/3.jpg",
+      "license": "cc0", "license_version": "1.0",
+      "source": "examplesource",
+      "mature": false, "height": 2000, "width": 3000
+    },
+    {
+      "id": "3d8b0e4a-7f5c-4a9d-9e3f-4c5d6e7f8091",
+      "title": "Attribution license is outside the requested filter",
+      "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=100004",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/b/bb/Fixture_By.jpg",
+      "license": "by", "license_version": "4.0",
+      "source": "wikimedia",
+      "mature": false, "height": 2000, "width": 3000
+    },
+    {
+      "id": "4e9c1f5b-8a6d-4bae-af40-5d6e7f8091a2",
+      "title": "Missing license",
+      "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=100005",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/c/cc/Fixture_NoLicense.jpg",
+      "source": "wikimedia",
+      "mature": false, "height": 2000, "width": 3000
+    },
+    {
+      "id": "5fad2a6c-9b7e-4cbf-b051-6e7f8091a2b3",
+      "title": "Plain HTTP original",
+      "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=100006",
+      "url": "http://upload.wikimedia.org/wikipedia/commons/d/dd/Fixture_Http.jpg",
+      "license": "cc0", "source": "wikimedia",
+      "mature": false, "height": 2000, "width": 3000
+    },
+    {
+      "id": "60be3b7d-ac8f-4dc0-8162-7f8091a2b3c4",
+      "title": "Missing dimensions",
+      "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=100007",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/e/ee/Fixture_NoSize.jpg",
+      "license": "cc0", "source": "wikimedia",
+      "mature": false, "height": null, "width": null
+    },
+    {
+      "id": "not-a-uuid",
+      "title": "Invalid identifier",
+      "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=100008",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/f/ff/Fixture_Id.jpg",
+      "license": "cc0", "source": "wikimedia",
+      "mature": false, "height": 2000, "width": 3000
+    },
+    {
+      "id": "71cf4c8e-bd90-4ed1-9273-8091a2b3c4d5",
+      "title": "Malformed width",
+      "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=100009",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/1/11/Fixture_Width.jpg",
+      "license": "cc0", "source": "wikimedia",
+      "mature": false, "height": 2000, "width": "wide"
+    },
+    {
+      "id": "82d05d9f-cea1-4fe2-a384-91a2b3c4d5e6",
+      "title": "Mature",
+      "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=100010",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/2/22/Fixture_Mature.jpg",
+      "license": "cc0", "source": "wikimedia",
+      "mature": true, "height": 2000, "width": 3000
+    },
+    {
+      "id": "93e16ea0-dfb2-4013-b495-a2b3c4d5e6f7",
+      "title": "Script landing page",
+      "foreign_landing_url": "javascript:alert(1)",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/3/33/Fixture_Landing.jpg",
+      "license": "cc0", "source": "wikimedia",
+      "mature": false, "height": 2000, "width": 3000
+    }
+  ],
+  "warnings": []
+}

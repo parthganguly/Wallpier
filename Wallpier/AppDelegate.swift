@@ -91,6 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(viewMenu, "Hide Sidebar", #selector(MainWindowController.toggleSidebar(_:)), "s", [.command, .control])
         viewMenu.addItem(.separator())
         add(viewMenu, "Discover", #selector(MainWindowController.showDiscover(_:)), "1")
+        add(viewMenu, "Wallhaven", #selector(MainWindowController.showWallhaven(_:)))
+        add(viewMenu, "Openverse", #selector(MainWindowController.showOpenverse(_:)))
         add(viewMenu, "Folder", #selector(MainWindowController.showLocal(_:)), "2")
         add(viewMenu, "Favorites", #selector(MainWindowController.showFavorites(_:)), "3")
         add(viewMenu, "Collections", #selector(MainWindowController.showCollections(_:)), "4")
@@ -114,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         collections.submenu?.delegate = controller
         add(wallpaperMenu, "Remove from Collection", #selector(MainWindowController.removeSelected(_:)), "\u{8}")
         add(wallpaperMenu, "Open on Wallhaven", #selector(MainWindowController.openSourcePage(_:)), "o", [.command, .shift])
+        add(wallpaperMenu, "View License", #selector(MainWindowController.openLicense(_:)))
         wallpaperMenu.addItem(.separator())
         let rotation = wallpaperMenu.addItem(withTitle: "Automatic Rotation", action: nil, keyEquivalent: "")
         let rotationMenu = NSMenu(title: "Automatic Rotation")

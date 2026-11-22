@@ -20,10 +20,13 @@
 		B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */; };
 		B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */; };
 		B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */; };
+		C3AE91A03041EC41004BF2F2 /* OpenverseProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3AE91A13041EC41004BF2F2 /* OpenverseProvider.swift */; };
 		B2AE91943041EC41004BF2F2 /* RemoteWallpaperCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */; };
 		B2AE91963041EC41004BF2F2 /* RemoteThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */; };
 		B2AE91983041EC41004BF2F2 /* wallhaven-search.json in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91993041EC41004BF2F2 /* wallhaven-search.json */; };
 		B2AE919A3041EC41004BF2F2 /* wallhaven-detail.json in Resources */ = {isa = PBXBuildFile; fileRef = B2AE919B3041EC41004BF2F2 /* wallhaven-detail.json */; };
+		C3AE91A23041EC41004BF2F2 /* openverse-search.json in Resources */ = {isa = PBXBuildFile; fileRef = C3AE91A33041EC41004BF2F2 /* openverse-search.json */; };
+		C3AE91A43041EC41004BF2F2 /* openverse-detail.json in Resources */ = {isa = PBXBuildFile; fileRef = C3AE91A53041EC41004BF2F2 /* openverse-detail.json */; };
 		B2AE91553041EC40004BF2F2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91543041EC40004BF2F2 /* Assets.xcassets */; };
 		B2AE91633041EC41004BF2F2 /* WallpierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91623041EC41004BF2F2 /* WallpierTests.swift */; };
 		B2AE916D3041EC41004BF2F2 /* WallpierUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE916C3041EC41004BF2F2 /* WallpierUITests.swift */; };
@@ -62,10 +65,13 @@
 		B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperCollectionViewItem.swift; sourceTree = "<group>"; };
 		B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWallpaperProvider.swift; sourceTree = "<group>"; };
 		B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallhavenProvider.swift; sourceTree = "<group>"; };
+		C3AE91A13041EC41004BF2F2 /* OpenverseProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenverseProvider.swift; sourceTree = "<group>"; };
 		B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWallpaperCache.swift; sourceTree = "<group>"; };
 		B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteThumbnailProvider.swift; sourceTree = "<group>"; };
 		B2AE91993041EC41004BF2F2 /* wallhaven-search.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "wallhaven-search.json"; sourceTree = "<group>"; };
 		B2AE919B3041EC41004BF2F2 /* wallhaven-detail.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "wallhaven-detail.json"; sourceTree = "<group>"; };
+		C3AE91A33041EC41004BF2F2 /* openverse-search.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "openverse-search.json"; sourceTree = "<group>"; };
+		C3AE91A53041EC41004BF2F2 /* openverse-detail.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "openverse-detail.json"; sourceTree = "<group>"; };
 		B2AE91543041EC40004BF2F2 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B2AE91563041EC40004BF2F2 /* Wallpier.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Wallpier.entitlements; sourceTree = "<group>"; };
 		B2AE915E3041EC41004BF2F2 /* WallpierTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WallpierTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -136,6 +142,7 @@
 				B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */,
 				B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */,
 				B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */,
+				C3AE91A13041EC41004BF2F2 /* OpenverseProvider.swift */,
 				B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */,
 				B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */,
 				B2AE91543041EC40004BF2F2 /* Assets.xcassets */,
@@ -158,6 +165,8 @@
 			children = (
 				B2AE91993041EC41004BF2F2 /* wallhaven-search.json */,
 				B2AE919B3041EC41004BF2F2 /* wallhaven-detail.json */,
+				C3AE91A33041EC41004BF2F2 /* openverse-search.json */,
+				C3AE91A53041EC41004BF2F2 /* openverse-detail.json */,
 			);
 			path = Fixtures;
 			sourceTree = "<group>";
@@ -285,6 +294,8 @@
 			files = (
 				B2AE91983041EC41004BF2F2 /* wallhaven-search.json in Resources */,
 				B2AE919A3041EC41004BF2F2 /* wallhaven-detail.json in Resources */,
+				C3AE91A23041EC41004BF2F2 /* openverse-search.json in Resources */,
+				C3AE91A43041EC41004BF2F2 /* openverse-detail.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -315,6 +326,7 @@
 				B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */,
 				B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */,
 				B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */,
+				C3AE91A03041EC41004BF2F2 /* OpenverseProvider.swift in Sources */,
 				B2AE91943041EC41004BF2F2 /* RemoteWallpaperCache.swift in Sources */,
 				B2AE91963041EC41004BF2F2 /* RemoteThumbnailProvider.swift in Sources */,
 			);
