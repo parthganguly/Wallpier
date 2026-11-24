@@ -29,7 +29,7 @@ class RemoteThumbnailProvider {
         configuration.timeoutIntervalForRequest = 20
         // Openverse thumbnails must not be redirected off its API host; Wallhaven's keep URLSession's defaults.
         let redirects = RedirectPolicyDelegate { from, to in
-            from.host?.lowercased() != OpenverseURLPolicy.apiHost || OpenverseURLPolicy.allowsRedirect(from: from, to: to)
+            Self.allowsThumbnailResponse(from: from, to: to)
         }
         session = URLSession(configuration: configuration, delegate: redirects, delegateQueue: nil)
         cache.countLimit = 100
@@ -73,9 +73,7 @@ class RemoteThumbnailProvider {
         completions[key as String] = [completion]
         lock.unlock()
 
-        var request = URLRequest(url: url)
-        request.setValue("image/*", forHTTPHeaderField: "Accept")
-        request.setValue("Wallpier/0.2", forHTTPHeaderField: "User-Agent")
+        let request = Self.thumbnailRequest(for: url)
         let task = session.dataTask(with: request) { [weak self] data, response, error in
             guard let self else { return }
             self.lock.lock()
@@ -122,11 +120,34 @@ class RemoteThumbnailProvider {
 
     static let maximumThumbnailBytes = 16 * 1_024 * 1_024
 
-    /// A successful, bounded response; an Openverse thumbnail must also have ended on its HTTPS API host.
+    static func thumbnailRequest(for url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        // Openverse's thumbnail endpoint returns HTTP 406 for an image-only Accept header.
+        let accept = url.host?.lowercased() == OpenverseURLPolicy.apiHost ? "*/*" : "image/*"
+        request.setValue(accept, forHTTPHeaderField: "Accept")
+        if url.host?.lowercased() == OpenverseURLPolicy.commonsThumbnailHost {
+            request.setValue("Wallpier/0.2 (https://github.com/parthganguly/Wallpier)", forHTTPHeaderField: "User-Agent")
+        } else {
+            request.setValue("Wallpier/0.2", forHTTPHeaderField: "User-Agent")
+        }
+        return request
+    }
+
+    private static func allowsThumbnailResponse(from requested: URL, to target: URL) -> Bool {
+        switch requested.host?.lowercased() {
+        case OpenverseURLPolicy.apiHost:
+            return OpenverseURLPolicy.allowsRedirect(from: requested, to: target)
+        case OpenverseURLPolicy.commonsThumbnailHost:
+            return OpenverseURLPolicy.isSafeHTTPS(target) && target.host?.lowercased() == OpenverseURLPolicy.commonsThumbnailHost
+                && requested.path == target.path
+        default:
+            return true
+        }
+    }
+
     static func accepts(_ response: HTTPURLResponse, for requested: URL, byteCount: Int) -> Bool {
         guard (200...299).contains(response.statusCode), (1...maximumThumbnailBytes).contains(byteCount) else { return false }
-        guard requested.host?.lowercased() == OpenverseURLPolicy.apiHost else { return true }
-        return response.url.map { OpenverseURLPolicy.isSafeHTTPS($0) && $0.host?.lowercased() == OpenverseURLPolicy.apiHost } ?? false
+        return response.url.map { allowsThumbnailResponse(from: requested, to: $0) } ?? false
     }
 
     private static func makeThumbnail(data: Data, maximumPixelSize: Int) -> (image: NSImage, cost: Int)? {

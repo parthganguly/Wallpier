@@ -455,13 +455,14 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         openverseNoticeLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         openverseNoticeLabel.textColor = .secondaryText
         openverseNoticeLabel.lineBreakMode = .byTruncatingTail
-        openverseNoticeLabel.toolTip = "Wide, large, non-mature photographs reported as CC0 or public domain. Openverse doesn’t verify licenses: review the source before reuse."
+        openverseNoticeLabel.toolTip = "Wide, large, non-mature Wikimedia Commons JPEGs reported as CC0 or public domain. Openverse doesn’t verify licenses: review the source before reuse."
         // The acknowledgement stays whole at the minimum window width; the pending-search note gives way first.
         openverseNoticeLabel.setContentCompressionResistancePriority(.defaultHigh + 1, for: .horizontal)
         loadMoreButton.controlSize = .small
         loadMoreButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         loadMoreButton.target = self; loadMoreButton.action = #selector(loadMoreResults(_:))
         loadMoreButton.toolTip = "Load the next page of Openverse results"
+        reviewSourceButton.toolTip = selectedReference?.useRestriction?.errorDescription
         loadMoreButton.isHidden = true
         discoverBar.setViews([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp, openverseLicensePopUp, openverseNoticeLabel], in: .leading)
         pendingSearchLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -787,7 +788,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func configureSearchField() {
         let openverse = state.discoverProvider == .openverse
         searchField.placeholderString = "Search \(discoverName)"
-        searchField.setAccessibilityHelp(openverse ? "Searches openly licensed photographs on Openverse" : "Searches safe-for-work wallpapers on Wallhaven")
+        searchField.setAccessibilityHelp(openverse ? "Searches openly licensed Wikimedia Commons images on Openverse" : "Searches safe-for-work wallpapers on Wallhaven")
         searchField.toolTip = "Search \(discoverName) (⌘F). Results appear in Discover."
     }
     @objc func showLocal(_ sender: Any?) { selectSource(.local) }
@@ -1105,8 +1106,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     private func localOriginal(for reference: WallpaperReference) async throws -> URL {
         // Checked before any cached copy is reused, so Set and rotation both fail closed.
-        if reference.provider == nil { throw RemoteProviderError.unsupportedProvider }
-        if reference.blocksUse { throw RemoteProviderError.licenseNeedsReview }
+        if let restriction = reference.useRestriction { throw restriction }
         if let cached = try await originalCache.cachedURL(for: reference, accepting: Self.originalCheck(for: reference)) {
             updateReference(reference, cachedPath: cached.path); showOriginalIfSelected(reference, at: cached); return cached
         }
@@ -2156,7 +2156,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         pendingSearchLabel.isHidden = note == nil
         updateResultsButton.isHidden = note == nil
         updateResultsButton.toolTip = draft.trimmedQuery.isEmpty
-            ? (draft.provider == .openverse ? "Show photographs on Openverse" : "Show \(wallhaven.effectiveSorting.displayName) on Wallhaven")
+            ? (draft.provider == .openverse ? "Show Wikimedia Commons images on Openverse" : "Show \(wallhaven.effectiveSorting.displayName) on Wallhaven")
             : "Search \(discoverName) for “\(draft.trimmedQuery)”"
     }
 
@@ -2175,7 +2175,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                                     action: ("Try Again", #selector(search(_:)), self))
             } else if resultOptions == nil || resultOptions != draftQuery {
                 emptyStateView.show(symbolName: "magnifyingglass", title: "Search \(discoverName)",
-                                    message: state.discoverProvider == .openverse ? "Press Return in the search field to find openly licensed photographs."
+                                    message: state.discoverProvider == .openverse ? "Press Return in the search field to find openly licensed Wikimedia Commons images."
                                         : "Press Return in the search field to see safe-for-work wallpapers.")
             } else if state.discoverProvider == .openverse {
                 // Truthful: Wallpier never broadens the license or content filters to fill the page.
@@ -2186,7 +2186,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                                         action: ("Load More", #selector(loadMoreResults(_:)), self))
                 } else {
                     emptyStateView.show(symbolName: "magnifyingglass", title: "No Results",
-                                        message: "No wide, large, non-mature photographs with this public-domain license matched on Openverse." + hidden)
+                                        message: "No wide, large Wikimedia Commons JPEGs with this public-domain license matched on Openverse." + hidden)
                 }
             } else {
                 emptyStateView.show(symbolName: "magnifyingglass", title: "No Results",
@@ -2225,8 +2225,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let hasSelection = selectedItem != nil
         let blocked = selectedReference?.blocksUse == true
         setWallpaperButton.isEnabled = hasSelection && selectedScreen != nil && canMutate && !blocked
-        setWallpaperButton.toolTip = blocked ? RemoteProviderError.licenseNeedsReview.errorDescription : nil
-        reviewSourceButton.isHidden = !(selectedReference.map { $0.provider == .openverse && !$0.licenseIsConsistent } ?? false)
+        setWallpaperButton.toolTip = selectedReference?.useRestriction?.errorDescription
+        reviewSourceButton.isHidden = !(selectedReference.map { $0.provider == .openverse && $0.blocksUse } ?? false)
+        reviewSourceButton.toolTip = selectedReference?.useRestriction?.errorDescription
         loadMoreButton.isHidden = !(state.discoverProvider == .openverse && hasUnloadedResults && !currentItems.isEmpty)
         loadMoreButton.isEnabled = canLoadMoreResults
         undoButton.isEnabled = canUndoWallpaper && canMutate
@@ -2290,10 +2291,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     // Saved scaling choices are never rewritten: an old saved Fill can't be told from a deliberate one.
     static let helpText = """
-        Discover searches safe-for-work wallpapers on Wallhaven, or openly licensed photographs on Openverse. \
+        Discover searches safe-for-work wallpapers on Wallhaven, or openly licensed Wikimedia Commons images on Openverse. \
         Your folder, Favorites and collections are in the sidebar, and can mix both sources.
 
-        Openverse results are wide, large, non-mature photographs reported as CC0 or public domain. Wallpier shows each \
+        Openverse results are wide, large, non-mature Wikimedia Commons JPEGs reported as CC0 or public domain. Wallpier shows each \
         one's creator, source and reported license; Openverse doesn't verify licenses, so review the source page before reuse.
 
         Select a wallpaper and press Space to preview it on your display’s shape; ← and → browse, Esc returns. \

@@ -170,7 +170,7 @@ enum RemoteProviderID: String, Codable, CaseIterable {
     var displayName: String { self == .openverse ? "Openverse" : "Wallhaven" }
 }
 
-/// Openverse's own, deliberately narrow filters: wide, large, non-mature photographs are fixed;
+/// Openverse's own, deliberately narrow filters: wide, large, non-mature Commons JPEGs are fixed;
 /// only the public-domain license choice is offered. Nothing here broadens licensing.
 enum OpenverseLicenseFilter: String, Codable, CaseIterable {
     case cc0AndPublicDomain = "cc0,pdm"
@@ -191,7 +191,7 @@ struct OpenverseSearchOptions: Codable, Equatable {
     var license: OpenverseLicenseFilter = .cc0AndPublicDomain
 
     var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
-    var resultsDescription: String { trimmedQuery.isEmpty ? "Photographs" : "“\(trimmedQuery)”" }
+    var resultsDescription: String { trimmedQuery.isEmpty ? "Commons Images" : "“\(trimmedQuery)”" }
 
     private enum CodingKeys: String, CodingKey { case query, license }
 
@@ -250,14 +250,27 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     var licenseIsConsistent: Bool {
         provider == .openverse && OpenverseURLPolicy.isCanonicalLicenseURL(licenseURL, license: license, version: licenseVersion)
     }
-    /// Openverse needs the source reviewed, or the provider is unsupported: Set and rotation refuse it.
-    var blocksUse: Bool { provider == nil || (provider == .openverse && !licenseIsConsistent) }
-    /// The only gallery thumbnail Wallpier requests. Openverse's is derived from the validated identifier,
-    /// never from a saved URL; an unsupported provider's isn't requested.
+    var useRestriction: RemoteProviderError? {
+        switch provider {
+        case .openverse?:
+            if OpenverseURLPolicy.isThumbnailOnly(originalURL, source: sourceName) { return .originalUnavailable }
+            return licenseIsConsistent ? nil : .licenseNeedsReview
+        case .wallhaven?: return nil
+        case nil: return .unsupportedProvider
+        }
+    }
+
+    var blocksUse: Bool { useRestriction != nil }
+
+    /// Reconstruct Openverse thumbnail addresses from validated data, including for previously saved references.
     func galleryThumbnailURL(large: Bool) -> URL? {
         switch provider {
         case .wallhaven?: return large ? previewURL : thumbnailURL
-        case .openverse?: return UUID(uuidString: wallpaperID).map(OpenverseEndpoint.thumbnailURL)
+        case .openverse?:
+            guard let id = UUID(uuidString: wallpaperID) else { return nil }
+            if sourceName == OpenverseURLPolicy.discoverySource,
+               let thumbnail = OpenverseURLPolicy.commonsThumbnail(for: originalURL) { return thumbnail }
+            return OpenverseEndpoint.thumbnailURL(id: id)
         case nil: return nil
         }
     }

@@ -5849,9 +5849,7 @@ final class OpenverseFakeNetwork: NetworkClient {
                 "mature": false, "width": 3840, "height": 2160, "tags": [["name": "ridge"]]
             ]
             if index == 1 {
-                item["url"] = "https://live.staticflickr.com/65535/\(page)_\(index)_b.jpg"
-                item["foreign_landing_url"] = "https://www.flickr.com/photos/fixture/\(page)\(index)"
-                item["source"] = "flickr"; item["license"] = "pdm"; item["license_url"] = NSNull(); item["creator"] = NSNull()
+                item["license"] = "pdm"; item["license_url"] = NSNull(); item["creator"] = NSNull()
             }
             if untrustedOnly || untrustedPages.contains(page) { item["url"] = "https://images.example.org/\(page)_\(index).jpg" }
             return item
@@ -5946,9 +5944,9 @@ extension WallpierTests {
             return Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
         }
         let url = OpenverseEndpoint.searchURL(options: OpenverseSearchOptions(query: "  misty forest "), page: 3)
-        XCTAssertEqual(try items(url), ["q": "misty forest", "page": "3", "page_size": "20", "category": "photograph",
+        XCTAssertEqual(try items(url), ["q": "misty forest", "page": "3", "page_size": "20", "extension": "jpg,jpeg",
                                         "aspect_ratio": "wide", "size": "large", "license": "cc0,pdm", "mature": "false",
-                                        "source": "flickr,rawpixel,stocksnap,wikimedia"])
+                                        "source": "wikimedia"])
         // A literal + is escaped, so the API doesn't read it as a space.
         let plus = OpenverseEndpoint.searchURL(options: OpenverseSearchOptions(query: "c++ sky"), page: 1)
         XCTAssertTrue(plus.absoluteString.contains("q=c%2B%2B%20sky"), plus.absoluteString)
@@ -5989,16 +5987,16 @@ extension WallpierTests {
         XCTAssertEqual(ridge.remotePreview?.fidelity, .lowResolution, "Openverse thumbnails are resized, not cropped")
         XCTAssertTrue(ridge.licenseIsConsistent, "cc0 with the canonical CC0 1.0 deed")
         XCTAssertFalse(ridge.blocksUse)
-        let flickr = page.wallpapers[1]
-        XCTAssertNil(flickr.title, "An empty title is absent, not invented"); XCTAssertEqual(flickr.displayTitle, flickr.wallpaperID)
-        XCTAssertNil(flickr.uploader)
-        XCTAssertNil(flickr.licenseURL, "A missing license URL stays missing")
-        XCTAssertFalse(flickr.licenseIsConsistent, "Browse-only until the source is reviewed")
-        XCTAssertTrue(flickr.blocksUse)
-        XCTAssertEqual(flickr.licenseDescription, "Public Domain Mark 1.0")
-        XCTAssertEqual(flickr.sourceDisplayName, "Flickr")
-        XCTAssertEqual(flickr.thumbnailURL.absoluteString,
-                       "https://api.openverse.org/v1/images/1b6f8c2e-5d3a-4e7b-9c1d-2a3b4c5d6e7f/thumb/",
+        let meadow = page.wallpapers[1]
+        XCTAssertNil(meadow.title, "An empty title is absent, not invented"); XCTAssertEqual(meadow.displayTitle, meadow.wallpaperID)
+        XCTAssertNil(meadow.uploader)
+        XCTAssertNil(meadow.licenseURL, "A missing license URL stays missing")
+        XCTAssertFalse(meadow.licenseIsConsistent, "Browse-only until the source is reviewed")
+        XCTAssertTrue(meadow.blocksUse)
+        XCTAssertEqual(meadow.licenseDescription, "Public Domain Mark 1.0")
+        XCTAssertEqual(meadow.sourceDisplayName, "Wikimedia Commons")
+        XCTAssertEqual(meadow.thumbnailURL.absoluteString,
+                       "https://thumb.wikimedia.org/wikipedia/commons/thumb/b/bb/Fixture_Meadow.jpg/500px-Fixture_Meadow.jpg",
                        "The response's own thumbnail URL is never used")
         // A last page has no more.
         let last = try JSONSerialization.data(withJSONObject: ["result_count": 1, "page_count": 1, "page": 1, "results": []])
@@ -6291,7 +6289,7 @@ extension WallpierTests {
         var reached = await eventually { openverse.heldCount == 1 }
         XCTAssertTrue(reached)
         XCTAssertEqual(c.emptyStateView.title, "Searching Openverse…")
-        XCTAssertEqual(value(openverse.requests.first, "category"), "photograph")
+        XCTAssertEqual(value(openverse.requests.first, "source"), "wikimedia")
         XCTAssertEqual(value(openverse.requests.first, "mature"), "false")
 
         // Back to Wallhaven while Openverse is answering: Wallhaven's results, search and filters return untouched,
@@ -6382,7 +6380,7 @@ extension WallpierTests {
         c.showOpenverse(nil)
         let reached = await eventually { c.remoteResults.count == 2 }
         XCTAssertTrue(reached)
-        let ridge = c.remoteResults[0], flickr = c.remoteResults[1]
+        let ridge = c.remoteResults[0], meadow = c.remoteResults[1]
         XCTAssertEqual(c.state.selectedRemoteIdentity, ridge.identityKey)
         let text = c.previewAttributionLabel.attributedStringValue
         XCTAssertFalse(c.previewAttributionLabel.isHidden)
@@ -6408,9 +6406,9 @@ extension WallpierTests {
 
         // No creator, no license URL: nothing is invented.
         c.nextWallpaper(nil)
-        let flickrText = c.previewAttributionLabel.attributedStringValue
-        XCTAssertTrue(flickrText.string.contains("Public Domain Mark 1.0 · unconfirmed, review source"), flickrText.string)
-        XCTAssertNil(flickrText.attribute(.link, at: 0, effectiveRange: nil), "No license link without a matching license URL")
+        let meadowText = c.previewAttributionLabel.attributedStringValue
+        XCTAssertTrue(meadowText.string.contains("Public Domain Mark 1.0 · unconfirmed, review source"), meadowText.string)
+        XCTAssertNil(meadowText.attribute(.link, at: 0, effectiveRange: nil), "No license link without a matching license URL")
         XCTAssertEqual(c.previewMetadataLabel.stringValue, "3840 × 2160")
         XCTAssertFalse(c.itemMenu().items.contains { $0.title.hasPrefix("View License") })
         XCTAssertTrue(c.itemMenu().items.contains { $0.title == "Review Original Source" })
@@ -6422,10 +6420,10 @@ extension WallpierTests {
         c.toggleViewer(nil)
         let drawn = await eventually { c.stageView.image != nil }
         XCTAssertTrue(drawn)
-        XCTAssertEqual(thumbnails.requested.last, flickr.thumbnailURL)
+        XCTAssertEqual(thumbnails.requested.last, meadow.thumbnailURL)
         XCTAssertTrue(notice(c).hasPrefix("Low-resolution preview"), notice(c))
         XCTAssertTrue(openverse.downloads.isEmpty, "Previewing never downloads an original")
-        XCTAssertTrue(thumbnails.requested.allSatisfy { $0.host == "api.openverse.org" })
+        XCTAssertTrue(thumbnails.requested.allSatisfy { $0.host == "thumb.wikimedia.org" })
 
         // Wallhaven selections carry no Openverse attribution.
         c.showWallhaven(nil)
@@ -6552,7 +6550,7 @@ extension WallpierTests {
                                       thumbnailURL: URL(string: "http://169.254.169.254/latest")!, width: 3840, height: 2160,
                                       uploader: nil, tags: [], cachedLocalPath: nil, title: "Tampered", sourceName: "wikimedia",
                                       license: "cc0", licenseVersion: "1.0", licenseURL: tampered.licenseURL)
-        let canonical = OpenverseEndpoint.thumbnailURL(id: UUID(uuidString: tampered.wallpaperID)!)
+        let canonical = try XCTUnwrap(OpenverseURLPolicy.commonsThumbnail(for: tampered.originalURL))
         XCTAssertEqual(tampered.galleryThumbnailURL(large: true), canonical)
         XCTAssertEqual(tampered.galleryThumbnailURL(large: false), canonical)
         XCTAssertEqual(tampered.remotePreview?.url, canonical)
@@ -6596,6 +6594,41 @@ extension WallpierTests {
         XCTAssertTrue(RemoteThumbnailProvider.accepts(response(wallhaven.absoluteString), for: wallhaven, byteCount: 10))
     }
 
+    func testOpenverseThumbnailNegotiationAndCommonsRedirects() throws {
+        let openverse = OpenverseEndpoint.thumbnailURL(id: UUID())
+        XCTAssertEqual(RemoteThumbnailProvider.thumbnailRequest(for: openverse).value(forHTTPHeaderField: "Accept"), "*/*")
+        let refused = try XCTUnwrap(HTTPURLResponse(url: openverse, statusCode: 406, httpVersion: nil, headerFields: nil))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(refused, for: openverse, byteCount: 57))
+
+        let original = try XCTUnwrap(URL(string: "https://upload.wikimedia.org/wikipedia/commons/4/4f/Pass%2C_Ridge.jpg"))
+        let commons = try XCTUnwrap(OpenverseURLPolicy.commonsThumbnail(for: original))
+        XCTAssertEqual(commons.absoluteString, "https://thumb.wikimedia.org/wikipedia/commons/thumb/4/4f/Pass%2C_Ridge.jpg/500px-Pass%2C_Ridge.jpg")
+        XCTAssertEqual(RemoteThumbnailProvider.thumbnailRequest(for: commons).value(forHTTPHeaderField: "Accept"), "image/*")
+        let unrelated = try XCTUnwrap(HTTPURLResponse(url: original, statusCode: 200, httpVersion: nil, headerFields: nil))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(unrelated, for: commons, byteCount: 1024))
+        XCTAssertNil(OpenverseURLPolicy.commonsThumbnail(for: URL(string: "https://upload.wikimedia.org/wikipedia/commons/4/4f/file%2Fname.jpg")!))
+    }
+
+    func testStockSnapThumbnailCannotReachSetEvenWithMatchingLicense() async throws {
+        let reference = openverseReference(60, source: "stocksnap",
+            original: "https://cdn.stocksnap.io/img-thumbs/960w/RKS9M8PY0X.jpg", width: 2048, height: 1365)
+        XCTAssertTrue(reference.licenseIsConsistent)
+        XCTAssertEqual(reference.useRestriction, .originalUnavailable)
+        let client = OpenverseDownloadClient()
+        client.body = Self.pngData(width: 960, height: 640)
+        do {
+            _ = try await OpenverseProvider(client: client).downloadOriginal(for: reference)
+            XCTFail("A known thumbnail URL was used as a full original")
+        } catch {
+            XCTAssertEqual(error as? RemoteProviderError, .originalUnavailable)
+        }
+        XCTAssertTrue(client.downloads.isEmpty)
+        let smaller = FileManager.default.temporaryDirectory.appendingPathComponent("wallpier-stocksnap-\(UUID()).png")
+        defer { try? FileManager.default.removeItem(at: smaller) }
+        try client.body.write(to: smaller)
+        XCTAssertFalse(OpenverseProvider.isFaithfulOriginal(at: smaller, for: reference))
+    }
+
     // 4. License deeds, landing hosts and the acknowledgement at the minimum window width.
     @MainActor
     func testOpenverseLicenseConsistencyLandingHostsAndMinimumWidthAttribution() async throws {
@@ -6605,6 +6638,8 @@ extension WallpierTests {
         XCTAssertTrue(consistent("https://creativecommons.org/publicdomain/zero/1.0/", "cc0"))
         XCTAssertTrue(consistent("https://creativecommons.org/publicdomain/zero/1.0", "CC0", nil))
         XCTAssertTrue(consistent("https://creativecommons.org/publicdomain/mark/1.0/", "pdm"))
+        XCTAssertTrue(consistent("https://creativecommons.org/publicdomain/zero/1.0/deed.en/", "cc0"))
+        XCTAssertFalse(consistent("https://creativecommons.org/publicdomain/mark/1.0/deed.en", "cc0"))
         XCTAssertFalse(consistent(nil, "cc0"), "missing")
         XCTAssertFalse(consistent("https://creativecommons.org/publicdomain/mark/1.0/", "cc0"), "mismatched code")
         XCTAssertFalse(consistent("https://creativecommons.org/licenses/by/4.0/", "cc0"))

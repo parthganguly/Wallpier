@@ -6,6 +6,8 @@ import ImageIO
 /// redirect must stay within the same policy. Everything else is still shown in the source's own page.
 enum OpenverseURLPolicy {
     static let apiHost = "api.openverse.org"
+    static let discoverySource = "wikimedia"
+    static let commonsThumbnailHost = "thumb.wikimedia.org"
 
     /// Image hosts per Openverse source. A leading dot matches that domain's subdomains.
     static let imageHosts: [String: [String]] = [
@@ -43,6 +45,31 @@ enum OpenverseURLPolicy {
         return hosts.contains { $0.hasPrefix(".") ? host.hasSuffix($0) : host == $0 }
     }
 
+    static func isThumbnailOnly(_ url: URL, source: String?) -> Bool {
+        (source == "stocksnap" && url.path.hasPrefix("/img-thumbs/"))
+            || (source == discoverySource && url.path.hasPrefix("/wikipedia/commons/thumb/"))
+    }
+
+    /// Wikimedia's documented standard-width JPEG thumbnail path, using the original's catalogued shard and filename.
+    /// See https://wikitech.wikimedia.org/wiki/Image_scalers and https://www.mediawiki.org/wiki/Common_thumbnail_sizes.
+    static func commonsThumbnail(for original: URL) -> URL? {
+        guard isAllowedImageURL(original, source: discoverySource),
+              var components = URLComponents(url: original, resolvingAgainstBaseURL: false) else { return nil }
+        let parts = components.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 6, parts[0].isEmpty, parts[1] == "wikipedia", parts[2] == "commons",
+              parts[3].range(of: "^[a-f0-9]$", options: .regularExpression) != nil,
+              parts[4].range(of: "^[a-f0-9]{2}$", options: .regularExpression) != nil, parts[4].hasPrefix(parts[3]),
+              let name = parts[5].removingPercentEncoding,
+              !name.contains("/"), !name.contains("\\"),
+              !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              ["jpg", "jpeg"].contains(original.pathExtension.lowercased()) else { return nil }
+        components.host = commonsThumbnailHost
+        components.percentEncodedPath = "/wikipedia/commons/thumb/\(parts[3])/\(parts[4])/\(parts[5])/500px-\(parts[5])"
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
     static func isAllowedLandingURL(_ url: URL, source: String?) -> Bool {
         guard isSafeHTTPS(url), let source, let host = url.host?.lowercased(), let hosts = landingHosts[source] else { return false }
         return hosts.contains(host)
@@ -54,7 +81,8 @@ enum OpenverseURLPolicy {
               version == nil || version == "1.0",
               url.query == nil, url.fragment == nil, isSafeHTTPS(url), url.host?.lowercased() == "creativecommons.org" else { return false }
         let path = url.path.hasSuffix("/") ? url.path : url.path + "/"
-        return "https://creativecommons.org" + path == canonical
+        let deed = "https://creativecommons.org" + path
+        return deed == canonical || deed == canonical + "deed.en/"
     }
 
     /// API and thumbnail requests stay on the API host; an original's redirect stays on its source's CDN.
@@ -69,7 +97,7 @@ enum OpenverseEndpoint {
     static let pageSize = 20
     private static let baseURL = URL(string: "https://api.openverse.org/v1/images/")!
 
-    /// Openly licensed photographs suited to a desktop. `filter_dead` and relevance ordering are the API's defaults.
+    /// Openly licensed Commons JPEGs suited to a desktop. `filter_dead` and relevance ordering are the API's defaults.
     static func searchURL(options: OpenverseSearchOptions, page: Int) -> URL {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
         var items: [URLQueryItem] = []
@@ -77,12 +105,12 @@ enum OpenverseEndpoint {
         items += [
             URLQueryItem(name: "page", value: String(max(1, page))),
             URLQueryItem(name: "page_size", value: String(pageSize)),
-            URLQueryItem(name: "category", value: "photograph"),
+            URLQueryItem(name: "extension", value: "jpg,jpeg"),
             URLQueryItem(name: "aspect_ratio", value: "wide"),
             URLQueryItem(name: "size", value: "large"),
             URLQueryItem(name: "license", value: options.license.rawValue),
             URLQueryItem(name: "mature", value: "false"),
-            URLQueryItem(name: "source", value: OpenverseURLPolicy.imageHosts.keys.sorted().joined(separator: ","))
+            URLQueryItem(name: "source", value: OpenverseURLPolicy.discoverySource)
         ]
         components.queryItems = items
         // URLComponents leaves a literal + alone, which the API's query parsing reads as a space.
@@ -123,7 +151,12 @@ actor OpenverseProvider: RemoteWallpaperProvider {
         guard let payload = try? decoder.decode(OpenverseSearchResponse.self, from: data),
               payload.page == nil || payload.page == requestedPage else { throw RemoteProviderError.invalidData }
         let licenses = Set(options.license.rawValue.split(separator: ",").map(String.init))
-        let wallpapers = payload.results.compactMap { $0.value?.reference(allowedLicenses: licenses) }
+        let wallpapers = payload.results.compactMap { entry -> WallpaperReference? in
+            guard let reference = entry.value?.reference(allowedLicenses: licenses),
+                  reference.sourceName == OpenverseURLPolicy.discoverySource,
+                  OpenverseURLPolicy.commonsThumbnail(for: reference.originalURL) != nil else { return nil }
+            return reference
+        }
         let currentPage = requestedPage
         return RemoteSearchPage(
             wallpapers: wallpapers,
@@ -161,7 +194,7 @@ actor OpenverseProvider: RemoteWallpaperProvider {
               OpenverseURLPolicy.isAllowedImageURL(reference.originalURL, source: source) else {
             throw RemoteProviderError.untrustedURL
         }
-        guard reference.licenseIsConsistent else { throw RemoteProviderError.licenseNeedsReview }
+        if let restriction = reference.useRestriction { throw restriction }
         try checkBackoff(.originals)
         var downloadRequest = request(url: reference.originalURL)
         downloadRequest.setValue("image/*", forHTTPHeaderField: "Accept")
@@ -170,6 +203,9 @@ actor OpenverseProvider: RemoteWallpaperProvider {
             try validate(response, origin: .originals)
             guard let finalURL = response.url, OpenverseURLPolicy.isAllowedImageURL(finalURL, source: source) else {
                 throw RemoteProviderError.untrustedURL
+            }
+            guard !OpenverseURLPolicy.isThumbnailOnly(finalURL, source: source) else {
+                throw RemoteProviderError.originalUnavailable
             }
             if let type = response.value(forHTTPHeaderField: "Content-Type"), !type.lowercased().hasPrefix("image/") {
                 throw RemoteProviderError.invalidData
@@ -203,7 +239,7 @@ actor OpenverseProvider: RemoteWallpaperProvider {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Wallpier/0.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("Wallpier/0.2 (https://github.com/parthganguly/Wallpier)", forHTTPHeaderField: "User-Agent")
         return request
     }
 
@@ -298,7 +334,8 @@ private struct OpenverseImage: Decodable {
               // Wide: landscape. Openverse's own `wide` threshold isn't relied on, only confirmed loosely.
               width > height else { return nil }
         let licenseURL = self.licenseURL.flatMap(URL.init(string:)).flatMap { OpenverseURLPolicy.isSafeHTTPS($0) ? $0 : nil }
-        let thumbnail = OpenverseEndpoint.thumbnailURL(id: id)
+        let thumbnail = (source == OpenverseURLPolicy.discoverySource ? OpenverseURLPolicy.commonsThumbnail(for: original) : nil)
+            ?? OpenverseEndpoint.thumbnailURL(id: id)
         return WallpaperReference(
             providerIdentifier: RemoteProviderID.openverse.rawValue,
             wallpaperID: id.uuidString.lowercased(),
