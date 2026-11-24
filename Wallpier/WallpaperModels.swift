@@ -162,6 +162,51 @@ struct WallhavenSearchOptions: Codable, Equatable {
     }
 }
 
+/// The remote sources Discover can search. Raw values are the persisted `providerIdentifier`s.
+enum RemoteProviderID: String, Codable, CaseIterable {
+    case wallhaven
+    case openverse
+
+    var displayName: String { self == .openverse ? "Openverse" : "Wallhaven" }
+}
+
+/// Openverse's own, deliberately narrow filters: wide, large, non-mature Commons JPEGs are fixed;
+/// only the public-domain license choice is offered. Nothing here broadens licensing.
+enum OpenverseLicenseFilter: String, Codable, CaseIterable {
+    case cc0AndPublicDomain = "cc0,pdm"
+    case cc0 = "cc0"
+    case publicDomainMark = "pdm"
+
+    var displayName: String {
+        switch self {
+        case .cc0AndPublicDomain: return "CC0 & Public Domain"
+        case .cc0: return "CC0 Only"
+        case .publicDomainMark: return "Public Domain Mark Only"
+        }
+    }
+}
+
+struct OpenverseSearchOptions: Codable, Equatable {
+    var query = ""
+    var license: OpenverseLicenseFilter = .cc0AndPublicDomain
+
+    var trimmedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var resultsDescription: String { trimmedQuery.isEmpty ? "Commons Images" : "“\(trimmedQuery)”" }
+
+    private enum CodingKeys: String, CodingKey { case query, license }
+
+    init(query: String = "", license: OpenverseLicenseFilter = .cc0AndPublicDomain) {
+        self.query = query
+        self.license = license
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        query = (try? container.decodeIfPresent(String.self, forKey: .query)) ?? ""
+        license = (try? container.decodeIfPresent(OpenverseLicenseFilter.self, forKey: .license)) ?? .cc0AndPublicDomain
+    }
+}
+
 struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     let providerIdentifier: String
     let wallpaperID: String
@@ -176,6 +221,14 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     var cachedLocalPath: String?
     /// Wallhaven's `thumbs.original`: small, but in the original's proportions. Absent from older saved references.
     var uncroppedPreviewURL: URL? = nil
+    // Openverse attribution, exactly as the index reported it. Absent for Wallhaven and older saved references.
+    var title: String? = nil
+    /// The underlying source Openverse indexed the work from, e.g. `wikimedia`.
+    var sourceName: String? = nil
+    /// Reported license code (`cc0` or `pdm`); never substituted when missing.
+    var license: String? = nil
+    var licenseVersion: String? = nil
+    var licenseURL: URL? = nil
 
     var id: String { identityKey }
     var identityKey: String { "\(providerIdentifier):\(wallpaperID)" }
@@ -183,10 +236,57 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
 
     var orientation: String { width == height ? "square" : width > height ? "landscape" : "portrait" }
 
+    /// nil for a provider this build doesn't support: such references are never routed to another provider.
+    var provider: RemoteProviderID? { RemoteProviderID(rawValue: providerIdentifier) }
+    var providerName: String { provider?.displayName ?? providerIdentifier }
+    var displayTitle: String { title ?? wallpaperID }
+    /// Where the work comes from: Wallhaven itself, or the source Openverse indexed it from.
+    var sourceDisplayName: String {
+        guard provider == .openverse else { return providerName }
+        return sourceName.map { OpenverseURLPolicy.sourceNames[$0] ?? $0 } ?? "the original source"
+    }
+    /// For Openverse: the reported license code, version and URL agree with a known canonical public-domain deed.
+    /// Anything else is browse-only until the original source is reviewed; nothing is filled in.
+    var licenseIsConsistent: Bool {
+        provider == .openverse && OpenverseURLPolicy.isCanonicalLicenseURL(licenseURL, license: license, version: licenseVersion)
+    }
+    var useRestriction: RemoteProviderError? {
+        switch provider {
+        case .openverse?:
+            if OpenverseURLPolicy.isThumbnailOnly(originalURL, source: sourceName) { return .originalUnavailable }
+            return licenseIsConsistent ? nil : .licenseNeedsReview
+        case .wallhaven?: return nil
+        case nil: return .unsupportedProvider
+        }
+    }
+
+    var blocksUse: Bool { useRestriction != nil }
+
+    /// Reconstruct Openverse thumbnail addresses from validated data, including for previously saved references.
+    func galleryThumbnailURL(large: Bool) -> URL? {
+        switch provider {
+        case .wallhaven?: return large ? previewURL : thumbnailURL
+        case .openverse?:
+            guard let id = UUID(uuidString: wallpaperID) else { return nil }
+            if sourceName == OpenverseURLPolicy.discoverySource,
+               let thumbnail = OpenverseURLPolicy.commonsThumbnail(for: originalURL) { return thumbnail }
+            return OpenverseEndpoint.thumbnailURL(id: id)
+        case nil: return nil
+        }
+    }
+    /// “CC0 1.0” or “Public Domain Mark 1.0”, as reported; nil when no license was reported.
+    var licenseDescription: String? {
+        guard let license else { return nil }
+        let name = ["cc0": "CC0", "pdm": "Public Domain Mark"][license.lowercased()] ?? license.uppercased()
+        return [name, licenseVersion].compactMap { $0 }.joined(separator: " ")
+    }
+
     /// The remote image the desktop preview draws until an original is cached, and how faithful it is.
     /// `previewURL` (Wallhaven's `thumbs.large`) is a 432×243 centre crop, so it holds the whole picture
     /// only for 16:9 originals (within a pixel of rounding); other shapes need the uncropped thumbnail.
-    var remotePreview: (url: URL, fidelity: PreviewFidelity) {
+    var remotePreview: (url: URL, fidelity: PreviewFidelity)? {
+        // Openverse thumbnails are resized, not cropped: the whole picture, at low resolution.
+        if provider != .wallhaven { return galleryThumbnailURL(large: true).map { ($0, .lowResolution) } }
         guard width > 0, height > 0 else { return (previewURL, .croppedThumbnail) }
         if abs(Double(height) * 432 / Double(width) - 243) <= 1 { return (previewURL, .lowResolution) }
         if let uncroppedPreviewURL { return (uncroppedPreviewURL, .lowResolution) }
@@ -207,7 +307,7 @@ enum PreviewFidelity: Int, Comparable {
         case .none, .original: return nil
         case .lowResolution:
             return ("photo", "Low-resolution preview; detail may differ.",
-                    "The framing follows the original's proportions, but this is a small Wallhaven thumbnail, so sharpness and fine detail can differ. Set Wallpaper downloads and uses the full original.")
+                    "The framing follows the original's proportions, but this is a small thumbnail, so sharpness and fine detail can differ. Set Wallpaper downloads and uses the full original.")
         case .croppedThumbnail:
             return ("crop", "Cropped thumbnail; framing is approximate and detail may differ.",
                     "Wallhaven's larger thumbnail is cut to 16:9, so parts of this wallpaper are missing here. Set Wallpaper downloads and uses the full original.")
@@ -289,6 +389,9 @@ struct WallpaperState: Codable, Equatable {
     var currentSource: LibrarySource = .discover
     var selectedRemoteIdentity: String?
     var wallhavenSearch = WallhavenSearchOptions()
+    /// Which remote source Discover shows; each keeps its own search.
+    var discoverProvider: RemoteProviderID = .wallhaven
+    var openverseSearch = OpenverseSearchOptions()
     var favorites: [WallpaperReference] = []
     var collections: [WallpaperCollection] = []
     var selectedCollectionID: UUID?
@@ -359,6 +462,7 @@ struct WallpaperState: Codable, Equatable {
         case version, folderPath, selectedImagePath, selectedDisplayID
         case scalingMode, rotationInterval, shuffleEnabled, displayAssignments, history
         case currentSource, selectedRemoteIdentity, wallhavenSearch, favorites, collections
+        case discoverProvider, openverseSearch
         case selectedCollectionID, activeRotationCollectionID, rotationCursor
     }
 
@@ -380,6 +484,9 @@ struct WallpaperState: Codable, Equatable {
         selectedRemoteIdentity = try container.decodeIfPresent(String.self, forKey: .selectedRemoteIdentity)
         wallhavenSearch = try container.decodeIfPresent(WallhavenSearchOptions.self, forKey: .wallhavenSearch)
             ?? WallhavenSearchOptions()
+        // Absent in state saved before Openverse; an unknown value must never discard the rest of the state.
+        discoverProvider = (try? container.decodeIfPresent(RemoteProviderID.self, forKey: .discoverProvider)) ?? .wallhaven
+        openverseSearch = (try? container.decodeIfPresent(OpenverseSearchOptions.self, forKey: .openverseSearch)) ?? OpenverseSearchOptions()
         favorites = try container.decodeIfPresent([WallpaperReference].self, forKey: .favorites) ?? []
         collections = try container.decodeIfPresent([WallpaperCollection].self, forKey: .collections) ?? []
         selectedCollectionID = try container.decodeIfPresent(UUID.self, forKey: .selectedCollectionID)

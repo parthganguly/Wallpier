@@ -54,17 +54,19 @@ actor RemoteWallpaperCache {
         return "\(sanitized(reference.providerIdentifier))-\(sanitized(reference.wallpaperID))-\(digest).\(usefulExtension)"
     }
 
-    func cachedURL(for reference: WallpaperReference) throws -> URL? {
+    /// `accepting` adds a provider's own check (Openverse: the exact original); nil keeps the plain image check.
+    func cachedURL(for reference: WallpaperReference, accepting: ((URL) -> Bool)? = nil) throws -> URL? {
+        func valid(_ url: URL) -> Bool { Self.isValidImage(url) && (accepting?(url) ?? true) }
         if let path = reference.cachedLocalPath {
             let saved = URL(fileURLWithPath: path).standardizedFileURL
             if saved.deletingLastPathComponent() == rootURL.standardizedFileURL,
-               Self.isValidImage(saved) {
+               valid(saved) {
                 try? fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: saved.path)
                 return saved
             }
         }
         let url = rootURL.appendingPathComponent(Self.filename(for: reference), isDirectory: false)
-        guard Self.isValidImage(url) else { return nil }
+        guard valid(url) else { return nil }
         try? fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
         return url
     }
@@ -72,7 +74,8 @@ actor RemoteWallpaperCache {
     func installDownloadedFile(
         _ temporaryURL: URL,
         for reference: WallpaperReference,
-        protectedPaths: Set<String>
+        protectedPaths: Set<String>,
+        accepting: ((URL) -> Bool)? = nil
     ) throws -> URL {
         defer { try? fileManager.removeItem(at: temporaryURL) }
         guard Self.isValidImage(temporaryURL) else {
@@ -83,7 +86,8 @@ actor RemoteWallpaperCache {
         try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
         var destination = rootURL.appendingPathComponent(Self.filename(for: reference), isDirectory: false)
         if fileManager.fileExists(atPath: destination.path) {
-            if Self.isValidImage(destination) {
+            // A file that fails the provider's check is stale: leave it, install beside it.
+            if Self.isValidImage(destination), accepting?(destination) ?? true {
                 try? fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: destination.path)
                 return destination
             }

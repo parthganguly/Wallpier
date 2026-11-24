@@ -810,7 +810,7 @@ private final class SetAuditHarness {
         let displayList = DisplayList()
         displayList.screens = [x, y]
         controller = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
-            provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
+            provider: WallhavenProvider(client: network), openverseProvider: OpenverseProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
             historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), maximumSizeBytes: historyLimit),
             remoteThumbnailProvider: thumbnails, availableScreens: { displayList.screens })
         self.displayList = displayList
@@ -1140,7 +1140,7 @@ extension WallpierTests {
         defer { window.close() }
         let sidebar = controller.sidebarForTesting
         func row(_ title: String) -> SidebarNode? { sidebar.rows.first { $0.title == title } }
-        XCTAssertEqual(sidebar.rows.map(\.title), ["Library", "Discover", "Folder", "Favorites", "Collections", "Evening Light", "Quiet Mornings"])
+        XCTAssertEqual(sidebar.rows.map(\.title), ["Discover", "Wallhaven", "Openverse", "Library", "Folder", "Favorites", "Collections", "Evening Light", "Quiet Mornings"])
         XCTAssertEqual(row("Favorites")?.count, 6)
         XCTAssertEqual(row("Evening Light")?.count, 5)
         XCTAssertEqual(sidebar.selectedItem, .favorites)
@@ -1628,6 +1628,7 @@ extension WallpierTests {
 
     @MainActor
     func makeCaptureController(root: URL, size: NSSize, appearance: NSAppearance.Name, network: NetworkClient = OfflineNetwork(),
+                               openverse: NetworkClient = OfflineNetwork(),
                                windowClass: NSWindow.Type = NSWindow.self, desktop: WallpaperService? = nil,
                                thumbnails: RemoteThumbnailProvider? = nil, page: RemoteSearchPage? = nil, screens: [NSScreen]? = nil,
                                configure: (inout WallpaperState) -> Void) -> (MainWindowController, NSWindow) {
@@ -1652,7 +1653,7 @@ extension WallpierTests {
         window.appearance = NSAppearance(named: appearance)
         let originals = root.appendingPathComponent("Originals")
         let controller = MainWindowController(window: window, wallpaperService: desktop ?? SetAuditWallpaperService(), stateStore: store,
-            provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
+            provider: WallhavenProvider(client: network), openverseProvider: OpenverseProvider(client: openverse), originalCache: RemoteWallpaperCache(rootURL: originals),
             historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")),
             remoteThumbnailProvider: thumbnails ?? CaptureThumbnails(), availableScreens: { screens ?? [CaptureScreen()] })
         let page = page ?? RemoteSearchPage(wallpapers: references, currentPage: 1, lastPage: 54, total: 1_284,
@@ -3503,7 +3504,7 @@ private final class RotationHarness {
         let displayList = ScreenList()
         displayList.screens = [x, y]
         controller = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
-            provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
+            provider: WallhavenProvider(client: network), openverseProvider: OpenverseProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
             historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback"), maximumSizeBytes: historyLimit),
             remoteThumbnailProvider: thumbnails, availableScreens: { displayList.screens })
         self.displayList = displayList
@@ -3540,7 +3541,7 @@ private final class RotationHarness {
     /// A new controller over the same persisted state and isolated dependencies, through the real startup path.
     func relaunch() -> MainWindowController {
         let relaunched = MainWindowController(window: nil, wallpaperService: desktop, stateStore: store,
-            provider: WallhavenProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
+            provider: WallhavenProvider(client: network), openverseProvider: OpenverseProvider(client: network), originalCache: RemoteWallpaperCache(rootURL: originals),
             historyStore: WallpaperHistoryStore(root: rollbackRoot),
             remoteThumbnailProvider: thumbnails, availableScreens: { [displayList] in displayList.screens })
         relaunched.rotationTimerFactoryForTesting = controller.rotationTimerFactoryForTesting
@@ -4224,7 +4225,7 @@ extension WallpierTests {
         let screens: [NSScreen] = [h.x, h.y]
         let originals = h.root.appendingPathComponent("Originals")
         let relaunched = MainWindowController(window: nil, wallpaperService: h.desktop, stateStore: h.store,
-            provider: WallhavenProvider(client: h.network), originalCache: RemoteWallpaperCache(rootURL: originals),
+            provider: WallhavenProvider(client: h.network), openverseProvider: OpenverseProvider(client: h.network), originalCache: RemoteWallpaperCache(rootURL: originals),
             historyStore: WallpaperHistoryStore(root: h.root.appendingPathComponent("Rollback")),
             remoteThumbnailProvider: h.thumbnails, availableScreens: { screens })
         // The harness state rotates hourly; an unscheduled Timer keeps that schedule inert.
@@ -5149,7 +5150,7 @@ extension WallpierTests {
         let originals = root.appendingPathComponent("Originals")
         let controller = MainWindowController(window: window, wallpaperService: desktop,
             stateStore: WallpaperStateStore(stateURL: root.appendingPathComponent("state.json")),
-            provider: WallhavenProvider(client: OfflineNetwork()), originalCache: RemoteWallpaperCache(rootURL: originals),
+            provider: WallhavenProvider(client: OfflineNetwork()), openverseProvider: OpenverseProvider(client: OfflineNetwork()), originalCache: RemoteWallpaperCache(rootURL: originals),
             historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")),
             remoteThumbnailProvider: CaptureThumbnails(), availableScreens: { [CaptureScreen()] })
         controller.prepareForVisualCapture(discoverPage: RemoteSearchPage(wallpapers: [], currentPage: 1, lastPage: 1, total: 0,
@@ -5326,7 +5327,8 @@ extension WallpierTests {
         guard let task = c.searchTask else {
             XCTFail("never started: the boundary Next began no page request", file: file, line: line); return nil
         }
-        guard await eventually(2, { network.searchState(page: 2) == .held }) else {
+        // A bound, not a pace: the held page normally arrives at once, but a loaded Intel host has taken over 2 s.
+        guard await eventually(10, { network.searchState(page: 2) == .held }) else {
             XCTFail("never started: page 2 didn't reach the network (journal \(network.searchJournal.map { "\($0.page) \($0.state)" }))",
                     file: file, line: line)
             return nil
@@ -5798,5 +5800,988 @@ extension WallpierTests {
         h.controller.nextWallpaper(nil)
         XCTAssertNotNil(h.controller.stageView.image, "Warm revisit should complete synchronously from cache")
         XCTAssertEqual(h.controller.stageView.image?.size, NSSize(width: 28, height: 8))
+    }
+}
+
+// MARK: - Issue #8: Openverse as a second source
+//
+// Deterministic and offline: fixture JSON, fake networks and the recording wallpaper service. Nothing reaches
+// Openverse, an image host, the user's state or the desktop.
+
+/// Answers Openverse API requests with generated pages and records them; with `holds`, each request waits for the test.
+@MainActor
+final class OpenverseFakeNetwork: NetworkClient {
+    var pageCount = 2
+    var status = 200
+    var headers: [String: String] = [:]
+    var holds = false
+    /// Every result fails verification (an image host outside the allowlist).
+    var untrustedOnly = false
+    var untrustedPages: Set<Int> = []
+    private(set) var requests: [URLComponents] = []
+    private(set) var downloads: [URL] = []
+    private final class Hold { var continuation: CheckedContinuation<Void, Error>? }
+    private var held: [Hold] = []
+    var heldCount: Int { held.count }
+
+    func releaseNext() { if !held.isEmpty { held.removeFirst().continuation?.resume() } }
+    func releaseAll() { let pending = held; held = []; pending.forEach { $0.continuation?.resume(throwing: CancellationError()) } }
+
+    static func id(page: Int, index: Int) -> String { String(format: "%08x-0000-4000-8000-%012x", page, index) }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let url = request.url!
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        requests.append(components)
+        if holds {
+            let hold = Hold()
+            held.append(hold)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in hold.continuation = continuation }
+        }
+        let page = Int(components.queryItems?.first { $0.name == "page" }?.value ?? "1") ?? 1
+        let results: [[String: Any]] = (0..<2).map { index in
+            var item: [String: Any] = [
+                "id": Self.id(page: page, index: index), "title": "Fixture \(page)-\(index)",
+                "foreign_landing_url": "https://commons.wikimedia.org/w/index.php?curid=\(page * 10 + index)",
+                "url": "https://upload.wikimedia.org/wikipedia/commons/a/aa/Fixture_\(page)_\(index).jpg",
+                "creator": "Fixture Photographer", "license": "cc0", "license_version": "1.0",
+                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/", "source": "wikimedia",
+                "mature": false, "width": 3840, "height": 2160, "tags": [["name": "ridge"]]
+            ]
+            if index == 1 {
+                item["license"] = "pdm"; item["license_url"] = NSNull(); item["creator"] = NSNull()
+            }
+            if untrustedOnly || untrustedPages.contains(page) { item["url"] = "https://images.example.org/\(page)_\(index).jpg" }
+            return item
+        }
+        let body = try JSONSerialization.data(withJSONObject: [
+            "result_count": pageCount * 2, "page_count": pageCount, "page_size": 20, "page": page, "results": results
+        ])
+        return (body, HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!)
+    }
+
+    func download(for request: URLRequest) async throws -> (URL, HTTPURLResponse) {
+        downloads.append(request.url!)
+        throw URLError(.notConnectedToInternet)
+    }
+}
+
+/// Serves original downloads with a configurable final URL, status and headers, and records each request.
+private final class OpenverseDownloadClient: NetworkClient {
+    var finalURL: URL?
+    var status = 200
+    var headers = ["Content-Type": "image/jpeg"]
+    var failure: Error?
+    var body = Data([0xFF, 0xD8, 0xFF])
+    private(set) var downloads: [URL] = []
+    private(set) var temporaries: [URL] = []
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) { throw URLError(.notConnectedToInternet) }
+    func download(for request: URLRequest) async throws -> (URL, HTTPURLResponse) {
+        downloads.append(request.url!)
+        if let failure { throw failure }
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("wallpier-openverse-\(UUID()).img")
+        try body.write(to: temporary)
+        temporaries.append(temporary)
+        return (temporary, HTTPURLResponse(url: finalURL ?? request.url!, statusCode: status, httpVersion: nil, headerFields: headers)!)
+    }
+}
+
+/// Records which thumbnail URLs were requested and answers each with a small image.
+final class RecordingThumbnails: RemoteThumbnailProvider {
+    private(set) var requested: [URL] = []
+    override func requestThumbnail(for url: URL, maximumPixelSize: Int = 420, completion: @escaping (NSImage?) -> Void) {
+        requested.append(url)
+        completion(NSImage(size: NSSize(width: 64, height: 36)))
+    }
+    override func reset() {}
+}
+
+extension WallpierTests {
+    /// Dimensions default to the 32×18 images these tests generate, so the record matches the file it describes.
+    private func openverseReference(_ number: Int, source: String? = "wikimedia", original: String? = nil,
+                                    width: Int = 32, height: Int = 18) -> WallpaperReference {
+        let id = String(format: "%08x-0000-4000-8000-000000000000", number)
+        let thumbnail = OpenverseEndpoint.thumbnailURL(id: UUID(uuidString: id)!)
+        return WallpaperReference(
+            providerIdentifier: "openverse", wallpaperID: id,
+            sourcePageURL: URL(string: "https://commons.wikimedia.org/w/index.php?curid=\(number)")!,
+            originalURL: URL(string: original ?? "https://upload.wikimedia.org/wikipedia/commons/a/aa/Fixture_\(number).jpg")!,
+            previewURL: thumbnail, thumbnailURL: thumbnail, width: width, height: height,
+            uploader: "Fixture Photographer", tags: [], cachedLocalPath: nil,
+            title: "Fixture \(number)", sourceName: source, license: "cc0", licenseVersion: "1.0",
+            licenseURL: URL(string: "https://creativecommons.org/publicdomain/zero/1.0/"))
+    }
+
+    @MainActor
+    private func openverseCaptureController(_ openverse: OpenverseFakeNetwork, thumbnails: RemoteThumbnailProvider? = nil)
+        throws -> (MainWindowController, NSWindow, URL) {
+        let root = try historyTestFolder()
+        let (controller, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                         openverse: openverse, thumbnails: thumbnails) { _ in }
+        addTeardownBlock {
+            let tasks = await MainActor.run { () -> [Task<Void, Never>] in
+                let tasks = [controller.downloadTask, controller.searchTask, controller.detailTask, controller.undoValidationTask].compactMap { $0 }
+                tasks.forEach { $0.cancel() }
+                openverse.releaseAll()
+                while let sheet = window.attachedSheet { window.endSheet(sheet) }
+                window.close()
+                return tasks
+            }
+            for task in tasks { await task.value }
+            try? FileManager.default.removeItem(at: root)
+        }
+        return (controller, window, root)
+    }
+
+    // MARK: Provider: URLs, decoding, pagination
+
+    func testOpenverseURLConstructionUsesConservativeDocumentedFilters() throws {
+        func items(_ url: URL) throws -> [String: String] {
+            let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+            XCTAssertEqual(components.scheme, "https")
+            XCTAssertEqual(components.host, "api.openverse.org")
+            XCTAssertEqual(components.path, "/v1/images/")
+            return Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        }
+        let url = OpenverseEndpoint.searchURL(options: OpenverseSearchOptions(query: "  misty forest "), page: 3)
+        XCTAssertEqual(try items(url), ["q": "misty forest", "page": "3", "page_size": "20", "extension": "jpg,jpeg",
+                                        "aspect_ratio": "wide", "size": "large", "license": "cc0,pdm", "mature": "false",
+                                        "source": "wikimedia"])
+        // A literal + is escaped, so the API doesn't read it as a space.
+        let plus = OpenverseEndpoint.searchURL(options: OpenverseSearchOptions(query: "c++ sky"), page: 1)
+        XCTAssertTrue(plus.absoluteString.contains("q=c%2B%2B%20sky"), plus.absoluteString)
+        XCTAssertEqual(try items(plus)["q"], "c++ sky")
+        // No search text: no `q`. Never a page below 1. Each license choice stays within CC0/public domain.
+        let empty = try items(OpenverseEndpoint.searchURL(options: OpenverseSearchOptions(query: " "), page: 0))
+        XCTAssertNil(empty["q"]); XCTAssertEqual(empty["page"], "1")
+        XCTAssertEqual(try items(OpenverseEndpoint.searchURL(options: OpenverseSearchOptions(license: .cc0), page: 1))["license"], "cc0")
+        XCTAssertEqual(try items(OpenverseEndpoint.searchURL(options: OpenverseSearchOptions(license: .publicDomainMark), page: 1))["license"], "pdm")
+        XCTAssertFalse(url.absoluteString.contains("filter_dead"), "filter_dead keeps the API's default (true)")
+        let id = try XCTUnwrap(UUID(uuidString: "0AFF3595-8168-440B-83FF-7A80B65DEA42"))
+        XCTAssertEqual(OpenverseEndpoint.detailsURL(id: id).absoluteString, "https://api.openverse.org/v1/images/0aff3595-8168-440b-83ff-7a80b65dea42/")
+        XCTAssertEqual(OpenverseEndpoint.thumbnailURL(id: id).absoluteString, "https://api.openverse.org/v1/images/0aff3595-8168-440b-83ff-7a80b65dea42/thumb/")
+    }
+
+    func testOpenverseSearchFixtureDecodesOnlyVerifiedResultsWithAttribution() async throws {
+        let provider = OpenverseProvider(client: StubNetworkClient(data: try fixtureData(named: "openverse-search")))
+        let page = try await provider.search(options: OpenverseSearchOptions(query: "ridge"), page: 1)
+        XCTAssertEqual(page.currentPage, 1); XCTAssertEqual(page.lastPage, 12); XCTAssertEqual(page.total, 4000)
+        XCTAssertTrue(page.hasMorePages)
+        // Untrusted host, non-public-domain license, missing license, plain HTTP, missing size, bad id,
+        // malformed width, mature and a script landing page are all hidden, and counted.
+        XCTAssertEqual(page.wallpapers.count, 2)
+        XCTAssertEqual(page.hiddenCount, 9)
+        let ridge = page.wallpapers[0]
+        XCTAssertEqual(ridge.identityKey, "openverse:0aff3595-8168-440b-83ff-7a80b65dea42")
+        XCTAssertEqual(ridge.title, "Fixture Ridge at Dawn")
+        XCTAssertEqual(ridge.uploader, "Fixture Photographer")
+        XCTAssertEqual(ridge.sourceName, "wikimedia")
+        XCTAssertEqual(ridge.sourceDisplayName, "Wikimedia Commons")
+        XCTAssertEqual(ridge.sourcePageURL.absoluteString, "https://commons.wikimedia.org/w/index.php?curid=100001")
+        XCTAssertEqual(ridge.originalURL.absoluteString, "https://upload.wikimedia.org/wikipedia/commons/a/aa/Fixture_Ridge.jpg")
+        XCTAssertEqual(ridge.licenseDescription, "CC0 1.0")
+        XCTAssertEqual(ridge.licenseURL?.absoluteString, "https://creativecommons.org/publicdomain/zero/1.0/")
+        XCTAssertEqual(ridge.tags, ["mountain", "dawn"])
+        XCTAssertEqual(ridge.width, 3840); XCTAssertEqual(ridge.height, 2400)
+        XCTAssertEqual(ridge.remotePreview?.url, ridge.thumbnailURL)
+        XCTAssertEqual(ridge.remotePreview?.fidelity, .lowResolution, "Openverse thumbnails are resized, not cropped")
+        XCTAssertTrue(ridge.licenseIsConsistent, "cc0 with the canonical CC0 1.0 deed")
+        XCTAssertFalse(ridge.blocksUse)
+        let meadow = page.wallpapers[1]
+        XCTAssertNil(meadow.title, "An empty title is absent, not invented"); XCTAssertEqual(meadow.displayTitle, meadow.wallpaperID)
+        XCTAssertNil(meadow.uploader)
+        XCTAssertNil(meadow.licenseURL, "A missing license URL stays missing")
+        XCTAssertFalse(meadow.licenseIsConsistent, "Browse-only until the source is reviewed")
+        XCTAssertTrue(meadow.blocksUse)
+        XCTAssertEqual(meadow.licenseDescription, "Public Domain Mark 1.0")
+        XCTAssertEqual(meadow.sourceDisplayName, "Wikimedia Commons")
+        XCTAssertEqual(meadow.thumbnailURL.absoluteString,
+                       "https://thumb.wikimedia.org/wikipedia/commons/thumb/b/bb/Fixture_Meadow.jpg/500px-Fixture_Meadow.jpg",
+                       "The response's own thumbnail URL is never used")
+        // A last page has no more.
+        let last = try JSONSerialization.data(withJSONObject: ["result_count": 1, "page_count": 1, "page": 1, "results": []])
+        let lastPage = try await OpenverseProvider(client: StubNetworkClient(data: last)).search(options: OpenverseSearchOptions(), page: 1)
+        XCTAssertFalse(lastPage.hasMorePages); XCTAssertTrue(lastPage.wallpapers.isEmpty)
+    }
+
+    func testOpenverseDetailDecodesAndNeverPatchesChangedMetadata() async throws {
+        let ridge = openverseReference(1)
+        let detailJSON = try fixtureData(named: "openverse-detail")
+        var listed = try XCTUnwrap(try JSONSerialization.jsonObject(with: detailJSON) as? [String: Any])
+        listed["id"] = ridge.wallpaperID
+        var cached = ridge; cached.cachedLocalPath = "/tmp/cached.jpg"
+        let detailed = try await OpenverseProvider(client: StubNetworkClient(data: try JSONSerialization.data(withJSONObject: listed)))
+            .fetchDetails(for: cached)
+        XCTAssertEqual(detailed.identityKey, ridge.identityKey)
+        XCTAssertEqual(detailed.tags, ["mountain", "dawn", "ridge"])
+        XCTAssertEqual(detailed.cachedLocalPath, "/tmp/cached.jpg")
+        // A license that no longer verifies is an error, never substituted.
+        listed["license"] = "by-nc"
+        do {
+            _ = try await OpenverseProvider(client: StubNetworkClient(data: try JSONSerialization.data(withJSONObject: listed))).fetchDetails(for: ridge)
+            XCTFail("A changed license must not be accepted")
+        } catch { XCTAssertEqual(error as? RemoteProviderError, .invalidData) }
+        // A different work answering for this identity is rejected.
+        listed["license"] = "cc0"; listed["id"] = openverseReference(2).wallpaperID
+        do {
+            _ = try await OpenverseProvider(client: StubNetworkClient(data: try JSONSerialization.data(withJSONObject: listed))).fetchDetails(for: ridge)
+            XCTFail("A mismatched identity must not be accepted")
+        } catch { XCTAssertEqual(error as? RemoteProviderError, .invalidData) }
+        // A saved reference with a non-UUID identifier never builds a request.
+        let client = SequencedNetworkClient(responses: [(Data(), HTTPURLResponse(url: URL(string: "https://api.openverse.org/")!, statusCode: 200, httpVersion: nil, headerFields: nil)!)])
+        var bogus = ridge
+        bogus = WallpaperReference(providerIdentifier: "openverse", wallpaperID: "../../v1/other", sourcePageURL: bogus.sourcePageURL,
+                                   originalURL: bogus.originalURL, previewURL: bogus.previewURL, thumbnailURL: bogus.thumbnailURL,
+                                   width: 1, height: 1, uploader: nil, tags: [], cachedLocalPath: nil)
+        do { _ = try await OpenverseProvider(client: client).fetchDetails(for: bogus); XCTFail("Expected invalid data") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .invalidData) }
+        XCTAssertEqual(client.requestCount, 0)
+    }
+
+    // MARK: Provider: security, failures, throttling
+
+    func testOpenverseURLPolicyAllowsOnlyCuratedHTTPSHostsAndSameSourceRedirects() throws {
+        func url(_ string: String) -> URL { URL(string: string)! }
+        let wikimedia = url("https://upload.wikimedia.org/wikipedia/commons/a/aa/A.jpg")
+        XCTAssertTrue(OpenverseURLPolicy.isAllowedImageURL(wikimedia, source: "wikimedia"))
+        XCTAssertTrue(OpenverseURLPolicy.isAllowedImageURL(url("https://live.staticflickr.com/1/2_b.jpg"), source: "flickr"))
+        XCTAssertTrue(OpenverseURLPolicy.isAllowedImageURL(url("https://farm4.staticflickr.com/1/2_b.jpg"), source: "flickr"))
+        XCTAssertTrue(OpenverseURLPolicy.isAllowedImageURL(url("https://cdn.stocksnap.io/img-thumbs/a.jpg"), source: "stocksnap"))
+        for rejected in ["http://upload.wikimedia.org/a.jpg", "https://user:pw@upload.wikimedia.org/a.jpg",
+                         "https://upload.wikimedia.org:8443/a.jpg", "https://upload.wikimedia.org.evil.example/a.jpg",
+                         "https://localhost/a.jpg", "https://127.0.0.1/a.jpg", "https://10.0.0.5/a.jpg", "https://[::1]/a.jpg",
+                         "file:///etc/passwd", "https://staticflickr.com.evil.example/a.jpg"] {
+            XCTAssertFalse(OpenverseURLPolicy.isAllowedImageURL(url(rejected), source: "wikimedia"), rejected)
+            XCTAssertFalse(OpenverseURLPolicy.isAllowedImageURL(url(rejected), source: "flickr"), rejected)
+        }
+        XCTAssertFalse(OpenverseURLPolicy.isAllowedImageURL(wikimedia, source: "flickr"), "Hosts are per source")
+        XCTAssertFalse(OpenverseURLPolicy.isAllowedImageURL(wikimedia, source: "unknown"))
+        // Redirects keep the same policy.
+        XCTAssertTrue(OpenverseURLPolicy.allowsRedirect(from: wikimedia, to: url("https://upload.wikimedia.org/b.jpg")))
+        XCTAssertFalse(OpenverseURLPolicy.allowsRedirect(from: wikimedia, to: url("https://live.staticflickr.com/b.jpg")))
+        XCTAssertFalse(OpenverseURLPolicy.allowsRedirect(from: wikimedia, to: url("http://upload.wikimedia.org/b.jpg")))
+        XCTAssertFalse(OpenverseURLPolicy.allowsRedirect(from: wikimedia, to: url("https://169.254.169.254/latest/meta-data")))
+        XCTAssertFalse(OpenverseURLPolicy.allowsRedirect(from: url("https://images.example.org/a.jpg"), to: wikimedia))
+        let api = url("https://api.openverse.org/v1/images/x/thumb/")
+        XCTAssertTrue(OpenverseURLPolicy.allowsRedirect(from: api, to: url("https://api.openverse.org/v1/images/x/thumb")))
+        XCTAssertFalse(OpenverseURLPolicy.allowsRedirect(from: api, to: wikimedia))
+        // The URLSession delegate that enforces it refuses the redirect (returning nil keeps the 3xx as final).
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let delegate = RedirectPolicyDelegate(allows: OpenverseURLPolicy.allowsRedirect)
+        func follow(_ from: URL, _ to: URL) -> URLRequest? {
+            var result: URLRequest?? = .none
+            delegate.urlSession(session, task: session.dataTask(with: from),
+                                willPerformHTTPRedirection: HTTPURLResponse(url: from, statusCode: 302, httpVersion: nil, headerFields: nil)!,
+                                newRequest: URLRequest(url: to)) { result = .some($0) }
+            return result ?? nil
+        }
+        XCTAssertNil(follow(wikimedia, url("https://127.0.0.1/admin")))
+        XCTAssertEqual(follow(wikimedia, url("https://upload.wikimedia.org/b.jpg"))?.url, url("https://upload.wikimedia.org/b.jpg"))
+    }
+
+    func testOpenverseDownloadRejectsUntrustedURLsRedirectsNonImagesAndFailures() async throws {
+        let ridge = openverseReference(1)
+        func attempt(_ reference: WallpaperReference, _ configure: (OpenverseDownloadClient) -> Void = { _ in })
+            async -> (Result<URL, Error>, OpenverseDownloadClient) {
+            let client = OpenverseDownloadClient(); configure(client)
+            let provider = OpenverseProvider(client: client)
+            do { return (.success(try await provider.downloadOriginal(for: reference)), client) }
+            catch { return (.failure(error), client) }
+        }
+        func failure(_ result: Result<URL, Error>) -> Error? { if case .failure(let error) = result { return error }; return nil }
+
+        // Saved references are re-checked at the download boundary: an untrusted host, a missing source,
+        // or a Wallhaven reference is never requested.
+        var unconfirmed = openverseReference(5); unconfirmed.licenseURL = URL(string: "https://creativecommons.org/licenses/by/4.0/")
+        let (review, reviewClient) = await attempt(unconfirmed)
+        XCTAssertEqual(failure(review) as? RemoteProviderError, .licenseNeedsReview)
+        XCTAssertTrue(reviewClient.downloads.isEmpty)
+        for reference in [openverseReference(2, original: "https://images.example.org/a.jpg"), openverseReference(3, source: nil),
+                          openverseReference(4, original: "https://127.0.0.1/a.jpg"), remoteReference(id: "notours")] {
+            let (result, client) = await attempt(reference)
+            XCTAssertEqual(failure(result) as? RemoteProviderError, .untrustedURL)
+            XCTAssertTrue(client.downloads.isEmpty, "\(reference.originalURL) must never be requested")
+        }
+        // A redirect that ended elsewhere, a non-image body, a missing original and a network failure all fail closed
+        // and remove the temporary file.
+        let cases: [(String, (OpenverseDownloadClient) -> Void, RemoteProviderError?)] = [
+            ("redirected", { $0.finalURL = URL(string: "https://evil.example/a.jpg") }, .untrustedURL),
+            ("html", { $0.headers = ["Content-Type": "text/html"] }, .invalidData),
+            ("404", { $0.status = 404 }, .originalUnavailable),
+            ("refused redirect", { $0.status = 302 }, .untrustedURL),
+            ("500", { $0.status = 500 }, .httpStatus(500)),
+            ("not an image", { _ in }, .invalidData),
+            ("wrong shape", { $0.body = Self.pngData(width: 20, height: 20) }, .invalidData),
+            ("downsized, same shape", { $0.body = Self.pngData(width: 16, height: 9) }, .invalidData),
+            ("oversized", { $0.body = Self.pngData(width: 32, height: 18); $0.headers["Content-Length"] = "999999999999" }, .invalidData)
+        ]
+        for (name, configure, expected) in cases {
+            let (result, client) = await attempt(ridge, configure)
+            XCTAssertEqual(failure(result) as? RemoteProviderError, expected, name)
+            XCTAssertEqual(client.downloads, [ridge.originalURL], name)
+            XCTAssertFalse(client.temporaries.contains { FileManager.default.fileExists(atPath: $0.path) }, "\(name): temporary removed")
+        }
+        let (offline, _) = await attempt(ridge) { $0.failure = URLError(.notConnectedToInternet) }
+        XCTAssertEqual((failure(offline) as? URLError)?.code, .notConnectedToInternet)
+        // A valid original on its own CDN is returned for the cache to validate and install.
+        let (valid, client) = await attempt(ridge) { $0.body = Self.pngData(width: 32, height: 18) }
+        let file = try valid.get()
+        XCTAssertTrue(OpenverseProvider.isFaithfulOriginal(at: file, for: ridge))
+        // Orientation is respected: portrait pixels tagged to display rotated match a landscape report, untagged don't.
+        let rotated = FileManager.default.temporaryDirectory.appendingPathComponent("wallpier-rotated-\(UUID()).jpg")
+        defer { try? FileManager.default.removeItem(at: rotated) }
+        try Self.imageData(width: 18, height: 32, type: "public.jpeg", orientation: 6).write(to: rotated)
+        XCTAssertTrue(OpenverseProvider.isFaithfulOriginal(at: rotated, for: ridge))
+        try Self.imageData(width: 18, height: 32, type: "public.jpeg").write(to: rotated)
+        XCTAssertFalse(OpenverseProvider.isFaithfulOriginal(at: rotated, for: ridge))
+        XCTAssertEqual(client.downloads, [ridge.originalURL])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        try? FileManager.default.removeItem(at: file)
+        // A 429 on originals holds further downloads back without another request.
+        let throttled = OpenverseDownloadClient(); throttled.status = 429; throttled.headers = ["Retry-After": "40"]
+        let provider = OpenverseProvider(client: throttled)
+        for _ in 0..<2 {
+            do { _ = try await provider.downloadOriginal(for: ridge); XCTFail("Expected a rate limit") }
+            catch RemoteProviderError.rateLimited(let delay) { XCTAssertLessThanOrEqual(delay ?? 0, 40) }
+        }
+        XCTAssertEqual(throttled.downloads.count, 1)
+    }
+
+    func testOpenverseRateLimitTransientRetryAndInvalidResponses() async throws {
+        let url = URL(string: "https://api.openverse.org/v1/images/")!
+        func response(_ status: Int, _ headers: [String: String] = [:]) -> HTTPURLResponse {
+            HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: headers)!
+        }
+        let ok = try fixtureData(named: "openverse-search")
+        // 429 uses Retry-After and suppresses further searches locally.
+        let limited = SequencedNetworkClient(responses: [(Data(), response(429, ["Retry-After": "7"]))])
+        let provider = OpenverseProvider(client: limited)
+        do { _ = try await provider.search(options: OpenverseSearchOptions(), page: 1); XCTFail("Expected 429") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .rateLimited(retryAfter: 7)) }
+        do { _ = try await provider.search(options: OpenverseSearchOptions(), page: 2); XCTFail("Expected backoff") }
+        catch RemoteProviderError.rateLimited { }
+        XCTAssertEqual(limited.requestCount, 1, "No request is sent while throttled")
+        XCTAssertTrue(RemoteProviderError.rateLimited(retryAfter: 7).localizedDescription.contains("rate-limiting"))
+        // One bounded retry for a transient gateway failure.
+        let transient = SequencedNetworkClient(responses: [(Data(), response(503)), (ok, response(200))])
+        let page = try await OpenverseProvider(client: transient).search(options: OpenverseSearchOptions(), page: 1)
+        XCTAssertEqual(page.wallpapers.count, 2); XCTAssertEqual(transient.requestCount, 2)
+        let down = SequencedNetworkClient(responses: [(Data(), response(503))])
+        do { _ = try await OpenverseProvider(client: down).search(options: OpenverseSearchOptions(), page: 1); XCTFail("Expected 503") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .httpStatus(503)) }
+        XCTAssertEqual(down.requestCount, 2, "Exactly one retry")
+        // Other statuses and unreadable bodies fail without retrying.
+        for (status, body, expected) in [(500, ok, RemoteProviderError.httpStatus(500)), (200, Data("<html>".utf8), .invalidData),
+                                         (200, Data(#"{"results": "x"}"#.utf8), .invalidData)] {
+            let client = SequencedNetworkClient(responses: [(body, response(status))])
+            do { _ = try await OpenverseProvider(client: client).search(options: OpenverseSearchOptions(), page: 1); XCTFail("\(status)") }
+            catch { XCTAssertEqual(error as? RemoteProviderError, expected) }
+            XCTAssertEqual(client.requestCount, 1)
+        }
+        // Openverse's daily quota: a Retry-After of hours is honoured (and described in hours); beyond a day is malformed.
+        for (header, expected) in [("50000", 50_000.0), ("90000", 60.0)] {
+            let client = SequencedNetworkClient(responses: [(Data(), response(429, ["Retry-After": header]))])
+            do { _ = try await OpenverseProvider(client: client).search(options: OpenverseSearchOptions(), page: 1); XCTFail(header) }
+            catch { XCTAssertEqual(error as? RemoteProviderError, .rateLimited(retryAfter: expected), header) }
+        }
+        XCTAssertTrue(RemoteProviderError.rateLimited(retryAfter: 50_000).localizedDescription.contains("about 14 hours"))
+        // Wallhaven keeps its one-hour ceiling.
+        let wallhaven = SequencedNetworkClient(responses: [(Data(), HTTPURLResponse(url: URL(string: "https://wallhaven.cc/api/v1/search")!,
+                                                                                    statusCode: 429, httpVersion: nil, headerFields: ["Retry-After": "5000"])!)])
+        do { _ = try await WallhavenProvider(client: wallhaven).search(options: WallhavenSearchOptions(), page: 1); XCTFail("429") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .rateLimited(retryAfter: 60)) }
+        // A page other than the one requested never advances pagination.
+        let wrongPage = try JSONSerialization.data(withJSONObject: ["result_count": 40, "page_count": 2, "page": 1, "results": []])
+        do { _ = try await OpenverseProvider(client: StubNetworkClient(data: wrongPage)).search(options: OpenverseSearchOptions(), page: 2); XCTFail("page") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .invalidData) }
+        // A network failure surfaces as itself.
+        do { _ = try await OpenverseProvider(client: OfflineNetwork()).search(options: OpenverseSearchOptions(), page: 1); XCTFail("offline") }
+        catch { XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet) }
+    }
+
+    // MARK: State: migration and provider-qualified references
+
+    func testWallhavenOnlyStateMigratesAndMixedReferencesRoundTrip() throws {
+        let collectionID = UUID()
+        let saved = """
+        {"version":2,"currentSource":"collections","selectedRemoteIdentity":"wallhaven:94x38z","selectedDisplayID":"101",
+         "scalingMode":"fill","rotationInterval":"oneHour","shuffleEnabled":false,
+         "wallhavenSearch":{"query":"forest","category":"100","usesDisplayMinimum":false,"minimumWidth":2560,"minimumHeight":1440,"aspectRatio":"16x9","sorting":"toplist"},
+         "favorites":[{"providerIdentifier":"wallhaven","wallpaperID":"94x38z","sourcePageURL":"https://wallhaven.cc/w/94x38z",
+           "originalURL":"https://w.wallhaven.cc/full/94/wallhaven-94x38z.jpg","previewURL":"https://th.wallhaven.cc/lg/94/94x38z.jpg",
+           "thumbnailURL":"https://th.wallhaven.cc/small/94/94x38z.jpg","width":3840,"height":2160,"uploader":"someone","tags":["forest"],
+           "cachedLocalPath":"/Caches/wallhaven-94x38z.jpg"}],
+         "collections":[{"id":"\(collectionID.uuidString)","name":"Evening","wallpapers":[{"providerIdentifier":"wallhaven","wallpaperID":"abc123",
+           "sourcePageURL":"https://wallhaven.cc/w/abc123","originalURL":"https://w.wallhaven.cc/full/ab/wallhaven-abc123.png",
+           "previewURL":"https://th.wallhaven.cc/lg/ab/abc123.jpg","thumbnailURL":"https://th.wallhaven.cc/small/ab/abc123.jpg",
+           "width":2560,"height":1440,"tags":[]}]}],
+         "selectedCollectionID":"\(collectionID.uuidString)","activeRotationCollectionID":"\(collectionID.uuidString)",
+         "rotationCursor":"wallhaven:abc123",
+         "displayAssignments":[{"displayID":"101","displayName":"Display","imagePath":"/Rollback/wallhaven-abc123.png","scaling":"fill"}],
+         "history":[{"previous":{"displayID":"101","displayName":"Display","imagePath":"/old.png","scaling":"fit"},
+           "replacement":{"displayID":"101","displayName":"Display","imagePath":"/Rollback/wallhaven-abc123.png","scaling":"fill"},
+           "timestamp":"2026-11-01T10:00:00Z","rollbackPath":"/Rollback/rollback-1.png"}]}
+        """
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        var state = try decoder.decode(WallpaperState.self, from: Data(saved.utf8))
+        XCTAssertEqual(state.discoverProvider, .wallhaven, "Existing installations keep Wallhaven's Discover")
+        XCTAssertEqual(state.openverseSearch, OpenverseSearchOptions())
+        XCTAssertEqual(state.wallhavenSearch.query, "forest"); XCTAssertEqual(state.wallhavenSearch.sorting, .toplist)
+        XCTAssertEqual(state.wallhavenSearch.minimumResolution, "2560x1440")
+        XCTAssertEqual(state.favorites.map(\.identityKey), ["wallhaven:94x38z"])
+        XCTAssertEqual(state.favorites[0].cachedLocalPath, "/Caches/wallhaven-94x38z.jpg")
+        XCTAssertEqual(state.favorites[0].provider, .wallhaven)
+        XCTAssertNil(state.favorites[0].license); XCTAssertEqual(state.favorites[0].displayTitle, "94x38z")
+        XCTAssertEqual(state.collections[0].wallpapers.map(\.identityKey), ["wallhaven:abc123"])
+        XCTAssertEqual(state.activeRotationCollectionID, collectionID)
+        XCTAssertEqual(state.rotationCursor, "wallhaven:abc123")
+        XCTAssertEqual(state.assignment(for: "101")?.imagePath, "/Rollback/wallhaven-abc123.png")
+        XCTAssertEqual(state.history.first?.rollbackPath, "/Rollback/rollback-1.png")
+        XCTAssertEqual(state.history.first?.previous.imagePath, "/old.png")
+        // Wallhaven references are re-saved without Openverse-only keys.
+        let favorite = try XCTUnwrap(try JSONSerialization.jsonObject(with: encoder.encode(state.favorites[0])) as? [String: Any])
+        XCTAssertEqual(Set(favorite.keys), ["providerIdentifier", "wallpaperID", "sourcePageURL", "originalURL", "previewURL",
+                                            "thumbnailURL", "width", "height", "uploader", "tags", "cachedLocalPath"])
+        // Both providers in one favorites list and collection, with distinct identities, survive a save and load.
+        let openverse = openverseReference(7)
+        state.favorites.append(openverse)
+        state.collections[0].add(openverse)
+        state.discoverProvider = .openverse
+        state.openverseSearch = OpenverseSearchOptions(query: "lake", license: .cc0)
+        let reloaded = try decoder.decode(WallpaperState.self, from: encoder.encode(state))
+        XCTAssertEqual(reloaded, state)
+        XCTAssertEqual(reloaded.collections[0].wallpapers.map(\.identityKey), ["wallhaven:abc123", "openverse:\(openverse.wallpaperID)"])
+        XCTAssertEqual(reloaded.favorites[1].licenseURL, openverse.licenseURL)
+        // A provider the build doesn't know, or a malformed Openverse search, never discards the rest of the state.
+        var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: encoder.encode(state)) as? [String: Any])
+        object["discoverProvider"] = "pexels"; object["openverseSearch"] = ["license": 42]
+        let tolerant = try decoder.decode(WallpaperState.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(tolerant.discoverProvider, .wallhaven)
+        XCTAssertEqual(tolerant.openverseSearch.license, .cc0AndPublicDomain)
+        XCTAssertEqual(tolerant.favorites, state.favorites)
+        XCTAssertEqual(tolerant.collections, state.collections)
+    }
+
+    // MARK: Controller: search, pagination, switching, failures and attribution
+
+    @MainActor
+    func testOpenverseDiscoverPaginatesAndSwitchingSourcesNeverMixesResults() async throws {
+        let openverse = OpenverseFakeNetwork(); openverse.holds = true
+        let (c, window, root) = try openverseCaptureController(openverse)
+        c.showDiscover(nil)
+        let wallhaven = c.remoteResults.map(\.identityKey)
+        XCTAssertFalse(wallhaven.isEmpty)
+        XCTAssertEqual(c.searchField.placeholderString, "Search Wallhaven")
+        XCTAssertFalse(c.categoryPopUp.isHidden)
+
+        c.showOpenverse(nil)
+        XCTAssertEqual(c.state.discoverProvider, .openverse)
+        XCTAssertEqual(c.sidebarForTesting.selectedItem, .openverse)
+        XCTAssertTrue(c.remoteResults.isEmpty)
+        XCTAssertEqual(c.searchField.placeholderString, "Search Openverse")
+        XCTAssertEqual(c.searchField.stringValue, "", "Each source keeps its own search text")
+        XCTAssertTrue(c.categoryPopUp.isHidden, "Wallhaven's filters aren't offered for Openverse")
+        XCTAssertFalse(c.openverseLicensePopUp.isHidden)
+        XCTAssertFalse(c.openverseNoticeLabel.isHidden)
+        XCTAssertTrue(c.openverseNoticeLabel.stringValue.contains("Powered by Openverse; not endorsed by Openverse"))
+        var reached = await eventually { openverse.heldCount == 1 }
+        XCTAssertTrue(reached)
+        XCTAssertEqual(c.emptyStateView.title, "Searching Openverse…")
+        XCTAssertEqual(value(openverse.requests.first, "source"), "wikimedia")
+        XCTAssertEqual(value(openverse.requests.first, "mature"), "false")
+
+        // Back to Wallhaven while Openverse is answering: Wallhaven's results, search and filters return untouched,
+        // and the late Openverse answer is discarded.
+        c.showWallhaven(nil)
+        XCTAssertEqual(c.remoteResults.map(\.identityKey), wallhaven)
+        XCTAssertEqual(c.searchField.stringValue, "landscape")
+        openverse.releaseNext()
+        await pause(0.3)
+        XCTAssertEqual(c.remoteResults.map(\.identityKey), wallhaven, "A superseded Openverse response never reaches Wallhaven's results")
+        XCTAssertTrue(c.remoteResults.allSatisfy { $0.provider == .wallhaven })
+
+        // Openverse again: a fresh first page, then exactly the next page, and none past page_count.
+        c.showOpenverse(nil)
+        reached = await eventually { openverse.heldCount == 1 }
+        XCTAssertTrue(reached)
+        openverse.releaseNext()
+        reached = await eventually { c.remoteResults.count == 2 }
+        XCTAssertTrue(reached)
+        await pause(0.3)
+        XCTAssertEqual(openverse.heldCount, 0, "Openverse never loads pages by itself")
+        XCTAssertFalse(c.loadMoreButton.isHidden); XCTAssertTrue(c.loadMoreButton.isEnabled)
+        c.loadMoreResults(nil)
+        reached = await eventually { openverse.heldCount == 1 }
+        XCTAssertTrue(reached)
+        openverse.releaseNext()
+        reached = await eventually { c.remoteResults.count == 4 }
+        XCTAssertTrue(reached)
+        await pause(0.3)
+        XCTAssertEqual(openverse.requests.map { value($0, "page") }, ["1", "1", "2"])
+        XCTAssertTrue(c.loadMoreButton.isHidden, "No Load More past page_count")
+        XCTAssertEqual(Set(c.remoteResults.map(\.identityKey)).count, 4)
+        XCTAssertTrue(c.remoteResults.allSatisfy { $0.provider == .openverse })
+        XCTAssertTrue(window.subtitle.contains("on Openverse"), window.subtitle)
+        XCTAssertEqual(c.state.wallhavenSearch.query, "landscape", "Wallhaven's saved search is untouched")
+
+        // Searching Openverse saves only Openverse's text.
+        c.searchField.stringValue = "lake"
+        c.search(nil)
+        XCTAssertEqual(c.state.openverseSearch.query, "lake")
+        XCTAssertEqual(c.state.wallhavenSearch.query, "landscape")
+        reached = await eventually { openverse.heldCount == 1 }
+        XCTAssertTrue(reached)
+        XCTAssertEqual(value(openverse.requests.last, "q"), "lake")
+        openverse.releaseNext()
+        // The saved state reopens on Openverse with its own search.
+        let saved = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json")).load()
+        XCTAssertEqual(saved.discoverProvider, .openverse)
+        XCTAssertEqual(saved.openverseSearch.query, "lake")
+        XCTAssertEqual(saved.wallhavenSearch.query, "landscape")
+    }
+
+    @MainActor
+    func testOpenverseFailuresAndEmptyResultsAreTruthfulAndLeaveWallhavenIntact() async throws {
+        let openverse = OpenverseFakeNetwork(); openverse.status = 429; openverse.headers = ["Retry-After": "30"]
+        let (c, _, _) = try openverseCaptureController(openverse)
+        c.showDiscover(nil)
+        let wallhaven = c.remoteResults.map(\.identityKey)
+        c.showOpenverse(nil)
+        var reached = await eventually { c.emptyStateView.title == "Couldn’t Load Wallpapers" }
+        XCTAssertTrue(reached)
+        XCTAssertTrue(c.emptyStateView.message.contains("rate-limiting"), c.emptyStateView.message)
+        // Trying again while throttled is answered locally, not sent.
+        c.search(nil)
+        reached = await eventually { c.emptyStateView.title == "Couldn’t Load Wallpapers" }
+        XCTAssertTrue(reached)
+        XCTAssertEqual(openverse.requests.count, 1)
+        c.showWallhaven(nil)
+        XCTAssertEqual(c.remoteResults.map(\.identityKey), wallhaven)
+
+        // Nothing verifiable: an honest empty state that counts what was hidden, and no broadened retry.
+        let untrusted = OpenverseFakeNetwork(); untrusted.untrustedOnly = true; untrusted.pageCount = 1
+        let (e, _, _) = try openverseCaptureController(untrusted)
+        e.showOpenverse(nil)
+        reached = await eventually { e.emptyStateView.title == "No Results" }
+        XCTAssertTrue(reached)
+        XCTAssertTrue(e.emptyStateView.message.contains("2 results were hidden"), e.emptyStateView.message)
+        XCTAssertEqual(untrusted.requests.count, 1)
+        XCTAssertEqual(value(untrusted.requests[0], "license"), "cc0,pdm")
+        XCTAssertTrue(untrusted.downloads.isEmpty)
+    }
+
+    @MainActor
+    func testOpenverseSelectionShowsAttributionLinksAndAFaithfulLowResolutionPreview() async throws {
+        let openverse = OpenverseFakeNetwork(); openverse.pageCount = 1
+        let thumbnails = RecordingThumbnails()
+        let (c, _, _) = try openverseCaptureController(openverse, thumbnails: thumbnails)
+        c.showOpenverse(nil)
+        let reached = await eventually { c.remoteResults.count == 2 }
+        XCTAssertTrue(reached)
+        let ridge = c.remoteResults[0], meadow = c.remoteResults[1]
+        XCTAssertEqual(c.state.selectedRemoteIdentity, ridge.identityKey)
+        let text = c.previewAttributionLabel.attributedStringValue
+        XCTAssertFalse(c.previewAttributionLabel.isHidden)
+        XCTAssertTrue(text.string.contains("CC0 1.0 as reported"), text.string)
+        XCTAssertTrue(text.string.contains("Source: Wikimedia Commons"), text.string)
+        XCTAssertFalse(c.previewAcknowledgementLabel.isHidden)
+        XCTAssertTrue(c.previewAcknowledgementLabel.stringValue.contains("Powered by Openverse; not endorsed by Openverse"))
+        XCTAssertTrue(c.previewAcknowledgementLabel.stringValue.contains("as reported, not verified"))
+        XCTAssertTrue(c.reviewSourceButton.isHidden)
+        XCTAssertTrue(c.setWallpaperButton.isEnabled)
+        func link(_ fragment: String) -> URL? {
+            let range = (text.string as NSString).range(of: fragment)
+            return range.location == NSNotFound ? nil : text.attribute(.link, at: range.location, effectiveRange: nil) as? URL
+        }
+        XCTAssertEqual(link("CC0 1.0"), ridge.licenseURL)
+        XCTAssertEqual(link("Source:"), ridge.sourcePageURL)
+        XCTAssertTrue(c.selectionLabel.stringValue.contains("Fixture 1-0"))
+        XCTAssertTrue(c.selectionLabel.stringValue.contains("CC0 1.0"))
+        XCTAssertEqual(c.previewMetadataLabel.stringValue, "3840 × 2160 · by Fixture Photographer")
+        let menu = c.itemMenu().items.map(\.title)
+        XCTAssertTrue(menu.contains("Open on Wikimedia Commons"), "\(menu)")
+        XCTAssertTrue(menu.contains("View License (CC0 1.0)"), "\(menu)")
+
+        // No creator, no license URL: nothing is invented.
+        c.nextWallpaper(nil)
+        let meadowText = c.previewAttributionLabel.attributedStringValue
+        XCTAssertTrue(meadowText.string.contains("Public Domain Mark 1.0 · unconfirmed, review source"), meadowText.string)
+        XCTAssertNil(meadowText.attribute(.link, at: 0, effectiveRange: nil), "No license link without a matching license URL")
+        XCTAssertEqual(c.previewMetadataLabel.stringValue, "3840 × 2160")
+        XCTAssertFalse(c.itemMenu().items.contains { $0.title.hasPrefix("View License") })
+        XCTAssertTrue(c.itemMenu().items.contains { $0.title == "Review Original Source" })
+        XCTAssertFalse(c.reviewSourceButton.isHidden, "A visible review affordance")
+        XCTAssertFalse(c.setWallpaperButton.isEnabled, "Set is refused until the license is consistent")
+        XCTAssertTrue(c.selectionLabel.stringValue.contains("License unconfirmed"))
+
+        // The preview draws the uncropped Openverse thumbnail, says it is low resolution, and downloads nothing.
+        c.toggleViewer(nil)
+        let drawn = await eventually { c.stageView.image != nil }
+        XCTAssertTrue(drawn)
+        XCTAssertEqual(thumbnails.requested.last, meadow.thumbnailURL)
+        XCTAssertTrue(notice(c).hasPrefix("Low-resolution preview"), notice(c))
+        XCTAssertTrue(openverse.downloads.isEmpty, "Previewing never downloads an original")
+        XCTAssertTrue(thumbnails.requested.allSatisfy { $0.host == "thumb.wikimedia.org" })
+
+        // Wallhaven selections carry no Openverse attribution.
+        c.showWallhaven(nil)
+        XCTAssertTrue(c.previewAttributionLabel.isHidden)
+        XCTAssertTrue(c.previewAcknowledgementLabel.isHidden)
+        XCTAssertTrue(c.reviewSourceButton.isHidden)
+    }
+
+    // MARK: Controller: ownership, Set, rotation and Undo across both providers
+
+    @MainActor
+    func testUntrustedOpenverseOriginalIsNeverRequestedBySet() async throws {
+        let root = try historyTestFolder()
+        let harness = SetAuditHarness(root: root, references: [openverseReference(9, original: "https://images.example.org/a.jpg")])
+        try writeTestImage(to: harness.prior, width: 3)
+        addTeardownBlock {
+            await MainActor.run { harness.network.downloadGate.release(.failure(CancellationError())) }
+            try? FileManager.default.removeItem(at: root)
+        }
+        harness.controller.setWallpaper(nil)
+        try await finishAuditTask(harness.controller.downloadTask)
+        XCTAssertTrue(harness.network.downloads.isEmpty, "An untrusted image URL is never requested")
+        XCTAssertTrue(harness.desktop.calls.isEmpty)
+        XCTAssertTrue(harness.store.load().history.isEmpty)
+        XCTAssertTrue(harness.controller.statusLabel.stringValue.contains("doesn’t download from"), harness.controller.statusLabel.stringValue)
+        XCTAssertTrue(harness.controller.setWallpaperButton.isEnabled, "The pending-operation state is released")
+    }
+
+    @MainActor
+    func testMixedProviderCollectionRotatesSetsOwnsAndUndoesThroughFakeServices() async throws {
+        let wallhaven = remoteReference(id: "mixwh1"), openverse = openverseReference(11, width: 14, height: 8), wallhaven2 = remoteReference(id: "mixwh2")
+        let h = try rotationHarness(references: [wallhaven, openverse, wallhaven2])
+        try writeTestImage(to: h.incoming, width: 14)   // Exactly the Openverse member's reported 14×8.
+        h.selectRotationInterval(.fifteenMinutes)
+        // The cursor is on the first member: the next tick sets the Openverse member, downloading only its original.
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        XCTAssertEqual(h.network.downloads, [openverse.originalURL])
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(openverse)], "The desktop references Wallpier-owned storage")
+        XCTAssertTrue(h.owned(openverse).lastPathComponent.hasPrefix("openverse-\(openverse.wallpaperID)-"))
+        let openverseBytes = try Data(contentsOf: h.owned(openverse))
+
+        // Then the Wallhaven member, through Wallhaven's provider.
+        h.network.downloadGate = SetAuditGate<URL>()
+        try writeTestImage(to: h.incoming, width: 5)
+        h.scheduledTimers[0].fire()
+        await fulfillment(of: [h.network.downloadGate.started], timeout: 5)
+        XCTAssertEqual(h.network.downloads, [openverse.originalURL, wallhaven2.originalURL])
+        h.network.downloadGate.release(.success(h.incoming))
+        try await finishAuditTask(h.controller.rotationTask)
+        XCTAssertEqual(h.desktop.calls.map(\.image), [h.owned(openverse), h.owned(wallhaven2)])
+        XCTAssertEqual(h.store.load().rotationCursor, wallhaven2.identityKey)
+
+        // Undo restores the Openverse wallpaper's bytes even after the cache is purged.
+        try FileManager.default.removeItem(at: h.originals)
+        try await finishAuditTask(h.controller.undoValidationTask)
+        h.controller.undoWallpaperChange(nil)
+        try await finishAuditTask(h.controller.downloadTask)
+        XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(h.desktop.calls.last?.image)), openverseBytes)
+
+        // Saved state keeps both identities and the Openverse attribution.
+        let saved = h.store.load()
+        XCTAssertEqual(saved.collections[0].wallpapers.map(\.identityKey), [wallhaven, openverse, wallhaven2].map(\.identityKey))
+        XCTAssertEqual(saved.collections[0].wallpapers[1].license, "cc0")
+        XCTAssertEqual(saved.collections[0].wallpapers[1].sourceName, "wikimedia")
+        XCTAssertEqual(h.relaunch().state.collections[0].wallpapers.map(\.provider), [.wallhaven, .openverse, .wallhaven])
+    }
+}
+
+// MARK: - Issue #8 review fixes
+
+extension WallpierTests {
+    static func imageData(width: Int, height: Int, type: String = "public.png", orientation: Int? = nil) -> Data {
+        let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.7, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let data = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(data, type as CFString, 1, nil)!
+        let properties = orientation.map { [kCGImagePropertyOrientation: $0] as CFDictionary }
+        CGImageDestinationAddImage(destination, context.makeImage()!, properties)
+        CGImageDestinationFinalize(destination)
+        return data as Data
+    }
+
+    static func pngData(width: Int, height: Int) -> Data { imageData(width: width, height: height) }
+
+    // 1. Filtered Openverse pages are never traversed automatically; an empty page offers Load More.
+    @MainActor
+    func testOpenverseEmptyFilteredPageOffersLoadMoreAndNeverAutoPaginates() async throws {
+        let openverse = OpenverseFakeNetwork(); openverse.pageCount = 3; openverse.untrustedPages = [1]
+        let (c, _, _) = try openverseCaptureController(openverse)
+        c.showOpenverse(nil)
+        var reached = await eventually { c.emptyStateView.title == "No Verifiable Results Yet" }
+        XCTAssertTrue(reached, c.emptyStateView.title)
+        await pause(0.3)
+        XCTAssertEqual(openverse.requests.count, 1, "An empty filtered page doesn't pull the next one")
+        XCTAssertEqual(c.emptyStateView.actionButton.title, "Load More")
+        XCTAssertTrue(c.emptyStateView.message.contains("2 results were hidden"), c.emptyStateView.message)
+        c.emptyStateView.actionButton.performClick(nil)
+        reached = await eventually { c.remoteResults.count == 2 }
+        XCTAssertTrue(reached)
+        XCTAssertEqual(c.state.selectedRemoteIdentity, c.remoteResults.first?.identityKey, "The first accepted page is selected")
+        XCTAssertNotNil(c.collectionView.selectionIndexPaths.first)
+        await pause(0.3)
+        XCTAssertEqual(openverse.requests.map { value($0, "page") }, ["1", "2"])
+        XCTAssertFalse(c.loadMoreButton.isHidden)
+        // Preview Next at the last loaded result still asks for the next page.
+        c.toggleViewer(nil)
+        c.nextWallpaper(nil); c.nextWallpaper(nil)
+        reached = await eventually { openverse.requests.count == 3 }
+        XCTAssertTrue(reached)
+        XCTAssertEqual(value(openverse.requests.last, "page"), "3")
+    }
+
+    // 2. Saved Openverse references never steer thumbnail requests; responses are bounded and must end on the API host.
+    @MainActor
+    func testSavedOpenverseThumbnailURLsAreIgnoredAndResponsesChecked() async throws {
+        var tampered = openverseReference(21)
+        tampered = WallpaperReference(providerIdentifier: "openverse", wallpaperID: tampered.wallpaperID, sourcePageURL: tampered.sourcePageURL,
+                                      originalURL: tampered.originalURL, previewURL: URL(string: "https://127.0.0.1/admin.jpg")!,
+                                      thumbnailURL: URL(string: "http://169.254.169.254/latest")!, width: 3840, height: 2160,
+                                      uploader: nil, tags: [], cachedLocalPath: nil, title: "Tampered", sourceName: "wikimedia",
+                                      license: "cc0", licenseVersion: "1.0", licenseURL: tampered.licenseURL)
+        let canonical = try XCTUnwrap(OpenverseURLPolicy.commonsThumbnail(for: tampered.originalURL))
+        XCTAssertEqual(tampered.galleryThumbnailURL(large: true), canonical)
+        XCTAssertEqual(tampered.galleryThumbnailURL(large: false), canonical)
+        XCTAssertEqual(tampered.remotePreview?.url, canonical)
+        let badID = WallpaperReference(providerIdentifier: "openverse", wallpaperID: "../../x", sourcePageURL: tampered.sourcePageURL,
+                                       originalURL: tampered.originalURL, previewURL: tampered.previewURL, thumbnailURL: tampered.thumbnailURL,
+                                       width: 3840, height: 2160, uploader: nil, tags: [], cachedLocalPath: nil)
+        XCTAssertNil(badID.galleryThumbnailURL(large: true)); XCTAssertNil(badID.remotePreview)
+        let unknown = WallpaperReference(providerIdentifier: "pexels", wallpaperID: "1", sourcePageURL: tampered.sourcePageURL,
+                                         originalURL: tampered.originalURL, previewURL: tampered.previewURL, thumbnailURL: tampered.thumbnailURL,
+                                         width: 1, height: 1, uploader: nil, tags: [], cachedLocalPath: nil)
+        XCTAssertNil(unknown.galleryThumbnailURL(large: true)); XCTAssertNil(unknown.remotePreview)
+
+        let thumbnails = RecordingThumbnails()
+        let root = try historyTestFolder()
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                thumbnails: thumbnails) { $0.favorites = [tampered, badID] }
+        defer { window.close(); try? FileManager.default.removeItem(at: root) }
+        c.showFavorites(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        c.collectionView.layoutSubtreeIfNeeded()
+        c.toggleViewer(nil)
+        let drawn = await eventually { c.stageView.image != nil }
+        XCTAssertTrue(drawn)
+        c.nextWallpaper(nil)
+        await pause(0.2)
+        XCTAssertFalse(thumbnails.requested.isEmpty)
+        XCTAssertTrue(thumbnails.requested.allSatisfy { $0 == canonical }, "\(thumbnails.requested)")
+        XCTAssertEqual(c.stageView.placeholder, .unavailable, "An unusable identifier shows no thumbnail")
+
+        // Responses: bounded, and an Openverse thumbnail must have ended on its HTTPS API host.
+        func response(_ url: String, _ status: Int = 200) -> HTTPURLResponse {
+            HTTPURLResponse(url: URL(string: url)!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        }
+        XCTAssertTrue(RemoteThumbnailProvider.accepts(response(canonical.absoluteString), for: canonical, byteCount: 10))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(response("https://upload.wikimedia.org/a.jpg"), for: canonical, byteCount: 10))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(response(canonical.absoluteString), for: canonical, byteCount: 0))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(response(canonical.absoluteString), for: canonical,
+                                                       byteCount: RemoteThumbnailProvider.maximumThumbnailBytes + 1))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(response(canonical.absoluteString, 302), for: canonical, byteCount: 10))
+        let wallhaven = URL(string: "https://th.wallhaven.cc/small/ab/abc.jpg")!
+        XCTAssertTrue(RemoteThumbnailProvider.accepts(response(wallhaven.absoluteString), for: wallhaven, byteCount: 10))
+    }
+
+    func testOpenverseThumbnailNegotiationAndCommonsRedirects() throws {
+        let openverse = OpenverseEndpoint.thumbnailURL(id: UUID())
+        XCTAssertEqual(RemoteThumbnailProvider.thumbnailRequest(for: openverse).value(forHTTPHeaderField: "Accept"), "*/*")
+        let refused = try XCTUnwrap(HTTPURLResponse(url: openverse, statusCode: 406, httpVersion: nil, headerFields: nil))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(refused, for: openverse, byteCount: 57))
+
+        let original = try XCTUnwrap(URL(string: "https://upload.wikimedia.org/wikipedia/commons/4/4f/Pass%2C_Ridge.jpg"))
+        let commons = try XCTUnwrap(OpenverseURLPolicy.commonsThumbnail(for: original))
+        XCTAssertEqual(commons.absoluteString, "https://thumb.wikimedia.org/wikipedia/commons/thumb/4/4f/Pass%2C_Ridge.jpg/500px-Pass%2C_Ridge.jpg")
+        XCTAssertEqual(RemoteThumbnailProvider.thumbnailRequest(for: commons).value(forHTTPHeaderField: "Accept"), "image/*")
+        let unrelated = try XCTUnwrap(HTTPURLResponse(url: original, statusCode: 200, httpVersion: nil, headerFields: nil))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(unrelated, for: commons, byteCount: 1024))
+        XCTAssertNil(OpenverseURLPolicy.commonsThumbnail(for: URL(string: "https://upload.wikimedia.org/wikipedia/commons/4/4f/file%2Fname.jpg")!))
+    }
+
+    func testStockSnapThumbnailCannotReachSetEvenWithMatchingLicense() async throws {
+        let reference = openverseReference(60, source: "stocksnap",
+            original: "https://cdn.stocksnap.io/img-thumbs/960w/RKS9M8PY0X.jpg", width: 2048, height: 1365)
+        XCTAssertTrue(reference.licenseIsConsistent)
+        XCTAssertEqual(reference.useRestriction, .originalUnavailable)
+        let client = OpenverseDownloadClient()
+        client.body = Self.pngData(width: 960, height: 640)
+        do {
+            _ = try await OpenverseProvider(client: client).downloadOriginal(for: reference)
+            XCTFail("A known thumbnail URL was used as a full original")
+        } catch {
+            XCTAssertEqual(error as? RemoteProviderError, .originalUnavailable)
+        }
+        XCTAssertTrue(client.downloads.isEmpty)
+        let smaller = FileManager.default.temporaryDirectory.appendingPathComponent("wallpier-stocksnap-\(UUID()).png")
+        defer { try? FileManager.default.removeItem(at: smaller) }
+        try client.body.write(to: smaller)
+        XCTAssertFalse(OpenverseProvider.isFaithfulOriginal(at: smaller, for: reference))
+    }
+
+    // 4. License deeds, landing hosts and the acknowledgement at the minimum window width.
+    @MainActor
+    func testOpenverseLicenseConsistencyLandingHostsAndMinimumWidthAttribution() async throws {
+        func consistent(_ url: String?, _ license: String?, _ version: String? = "1.0") -> Bool {
+            OpenverseURLPolicy.isCanonicalLicenseURL(url.flatMap(URL.init(string:)), license: license, version: version)
+        }
+        XCTAssertTrue(consistent("https://creativecommons.org/publicdomain/zero/1.0/", "cc0"))
+        XCTAssertTrue(consistent("https://creativecommons.org/publicdomain/zero/1.0", "CC0", nil))
+        XCTAssertTrue(consistent("https://creativecommons.org/publicdomain/mark/1.0/", "pdm"))
+        XCTAssertTrue(consistent("https://creativecommons.org/publicdomain/zero/1.0/deed.en/", "cc0"))
+        XCTAssertFalse(consistent("https://creativecommons.org/publicdomain/mark/1.0/deed.en", "cc0"))
+        XCTAssertFalse(consistent(nil, "cc0"), "missing")
+        XCTAssertFalse(consistent("https://creativecommons.org/publicdomain/mark/1.0/", "cc0"), "mismatched code")
+        XCTAssertFalse(consistent("https://creativecommons.org/licenses/by/4.0/", "cc0"))
+        XCTAssertFalse(consistent("http://creativecommons.org/publicdomain/zero/1.0/", "cc0"))
+        XCTAssertFalse(consistent("https://creativecommons.org.evil.example/publicdomain/zero/1.0/", "cc0"))
+        XCTAssertFalse(consistent("https://creativecommons.org/publicdomain/zero/1.0/?x=1", "cc0"))
+        XCTAssertFalse(consistent("https://creativecommons.org/publicdomain/zero/1.0/", "cc0", "2.0"), "version disagrees")
+        XCTAssertFalse(consistent("https://creativecommons.org/publicdomain/zero/1.0/", nil))
+        XCTAssertTrue(OpenverseURLPolicy.isAllowedLandingURL(URL(string: "https://www.flickr.com/photos/a/1")!, source: "flickr"))
+        XCTAssertFalse(OpenverseURLPolicy.isAllowedLandingURL(URL(string: "https://evil.example/photos/a/1")!, source: "flickr"))
+        XCTAssertFalse(OpenverseURLPolicy.isAllowedLandingURL(URL(string: "https://commons.wikimedia.org/x")!, source: "flickr"))
+        XCTAssertFalse(OpenverseURLPolicy.isAllowedLandingURL(URL(string: "https://commons.wikimedia.org/x")!, source: nil))
+
+        // A saved Openverse reference on an unknown landing host isn't linked.
+        var offsite = openverseReference(31)
+        offsite = WallpaperReference(providerIdentifier: "openverse", wallpaperID: offsite.wallpaperID,
+                                     sourcePageURL: URL(string: "https://evil.example/landing")!, originalURL: offsite.originalURL,
+                                     previewURL: offsite.previewURL, thumbnailURL: offsite.thumbnailURL, width: 3840, height: 2160,
+                                     uploader: nil, tags: [], cachedLocalPath: nil, title: "Offsite", sourceName: "wikimedia",
+                                     license: "cc0", licenseVersion: "1.0", licenseURL: offsite.licenseURL)
+        let text = try XCTUnwrap(MainWindowController.attribution(for: offsite))
+        let source = (text.string as NSString).range(of: "Source:")
+        XCTAssertNil(text.attribute(.link, at: source.location, effectiveRange: nil))
+
+        // At the minimum window width the bar's acknowledgement and the preview's attribution are whole.
+        let openverse = OpenverseFakeNetwork(); openverse.pageCount = 2
+        let (c, window, _) = try openverseCaptureController(openverse, thumbnails: RecordingThumbnails())
+        window.setFrame(NSRect(origin: window.frame.origin, size: window.minSize), display: true)
+        c.showOpenverse(nil)
+        let loaded = await eventually { c.remoteResults.count == 2 }
+        XCTAssertTrue(loaded)
+        window.contentView?.layoutSubtreeIfNeeded()
+        func whole(_ label: NSTextField, _ name: String) {
+            XCTAssertFalse(label.isHiddenOrHasHiddenAncestor, name)
+            XCTAssertGreaterThanOrEqual(label.frame.width + 0.5, label.intrinsicContentSize.width, "\(name) is truncated")
+        }
+        whole(c.openverseNoticeLabel, "acknowledgement")
+        XCTAssertFalse(c.loadMoreButton.isHiddenOrHasHiddenAncestor)
+        c.toggleViewer(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        whole(c.previewAttributionLabel, "attribution"); whole(c.previewAcknowledgementLabel, "preview acknowledgement")
+        whole(c.previewMetadataLabel, "creator")
+        c.nextWallpaper(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        whole(c.previewAttributionLabel, "unconfirmed attribution")
+        XCTAssertFalse(c.reviewSourceButton.isHiddenOrHasHiddenAncestor)
+    }
+
+    // 5. Attribution never outlives its Openverse selection.
+    @MainActor
+    func testOpenverseAttributionClearsForLocalEmptyAndWallhavenSelections() async throws {
+        let openverse = OpenverseFakeNetwork(); openverse.pageCount = 1
+        let (c, _, _) = try openverseCaptureController(openverse, thumbnails: RecordingThumbnails())
+        c.showOpenverse(nil)
+        let loaded = await eventually { c.remoteResults.count == 2 }
+        XCTAssertTrue(loaded)
+        c.toggleViewer(nil)
+        XCTAssertFalse(c.previewAttributionLabel.isHidden)
+        c.showLocal(nil)   // No folder chosen: an empty selection.
+        XCTAssertNil(c.state.folderPath)
+        XCTAssertTrue(c.previewAttributionLabel.isHidden)
+        XCTAssertEqual(c.previewAttributionLabel.stringValue, "")
+        XCTAssertTrue(c.previewAcknowledgementLabel.isHidden)
+        XCTAssertTrue(c.reviewSourceButton.isHidden)
+        c.showOpenverse(nil)
+        XCTAssertFalse(c.previewAttributionLabel.isHidden)
+        c.showFavorites(nil)   // Wallhaven favorites.
+        XCTAssertTrue(c.previewAttributionLabel.isHidden)
+        XCTAssertTrue(c.previewAcknowledgementLabel.isHidden)
+    }
+
+    // 6. Unsupported providers and unconfirmed licenses fail closed for Set and rotation, before any cache or network.
+    @MainActor
+    func testUnsupportedProviderAndUnconfirmedLicenseNeverReachNetworkSetOrRotation() async throws {
+        var unconfirmed = openverseReference(41); unconfirmed.licenseURL = nil
+        let unsupported = WallpaperReference(providerIdentifier: "pexels", wallpaperID: "777", sourcePageURL: URL(string: "https://www.pexels.com/photo/777")!,
+                                             originalURL: URL(string: "https://images.pexels.com/777.jpg")!, previewURL: URL(string: "https://images.pexels.com/777s.jpg")!,
+                                             thumbnailURL: URL(string: "https://images.pexels.com/777t.jpg")!, width: 3840, height: 2160,
+                                             uploader: nil, tags: [], cachedLocalPath: nil)
+        XCTAssertNil(unsupported.provider)
+        for (reference, message) in [(unsupported, "doesn’t support"), (unconfirmed, "Review the original source")] {
+            let root = try historyTestFolder()
+            let harness = SetAuditHarness(root: root, references: [reference])
+            try writeTestImage(to: harness.prior, width: 3)
+            defer { harness.network.downloadGate.release(.failure(CancellationError())); try? FileManager.default.removeItem(at: root) }
+            XCTAssertFalse(harness.controller.setWallpaperButton.isEnabled)
+            harness.controller.setWallpaper(nil)
+            try await finishAuditTask(harness.controller.downloadTask)
+            XCTAssertTrue(harness.controller.statusLabel.stringValue.contains(message), harness.controller.statusLabel.stringValue)
+            harness.controller.rotateWallpaper()
+            try await finishAuditTask(harness.controller.rotationTask)
+            XCTAssertTrue(harness.network.downloads.isEmpty, "\(reference.providerIdentifier): never requested")
+            XCTAssertTrue(harness.desktop.calls.isEmpty)
+            XCTAssertTrue(harness.store.load().history.isEmpty)
+        }
+        // And search results only keep wide, explicitly non-mature, sane-sized works under the selected license.
+        let data = try fixtureData(named: "openverse-search")
+        let cc0Only = try await OpenverseProvider(client: StubNetworkClient(data: data)).search(options: OpenverseSearchOptions(license: .cc0), page: 1)
+        XCTAssertEqual(cc0Only.wallpapers.map(\.license), ["cc0"], "A pdm result isn't shown for a CC0-only search")
+        var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var results = try XCTUnwrap(object["results"] as? [[String: Any]])
+        let base = results[0]
+        let variants: [[String: Any?]] = [["width": 2000, "height": 2400], ["mature": nil], ["width": 800, "height": 450], ["width": 200_000]]
+        results = variants.map { change in var item = base; for (k, v) in change { item[k] = v ?? NSNull() }; return item }
+        object["results"] = results
+        let filtered = try await OpenverseProvider(client: StubNetworkClient(data: JSONSerialization.data(withJSONObject: object)))
+            .search(options: OpenverseSearchOptions(), page: 1)
+        XCTAssertTrue(filtered.wallpapers.isEmpty, "portrait, unknown mature flag, too small, absurd size")
+        XCTAssertEqual(filtered.hiddenCount, 4)
+    }
+}
+
+extension WallpierTests {
+    /// A cached Openverse file that isn't the exact reported original (stale or replaced by a downsized copy) is
+    /// neither reused nor shown as the original: Set downloads the original and installs it beside the stale file.
+    @MainActor
+    func testStaleCachedOpenverseOriginalIsNotReusedOrAdvertised() async throws {
+        let reference = openverseReference(51)
+        let root = try historyTestFolder()
+        let harness = SetAuditHarness(root: root, references: [reference])
+        defer { harness.network.downloadGate.release(.failure(CancellationError())); try? FileManager.default.removeItem(at: root) }
+        try writeTestImage(to: harness.prior, width: 3)
+        let stale = harness.cached(reference)
+        try FileManager.default.createDirectory(at: stale.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Self.pngData(width: 16, height: 9).write(to: stale)
+        try Self.pngData(width: 32, height: 18).write(to: harness.incoming)
+        let cache = RemoteWallpaperCache(rootURL: stale.deletingLastPathComponent())
+        let unchecked = try await cache.cachedURL(for: reference)
+        XCTAssertEqual(unchecked, stale, "The plain image check (Wallhaven's) is unchanged")
+        let checked = try await cache.cachedURL(for: reference) { OpenverseProvider.isFaithfulOriginal(at: $0, for: reference) }
+        XCTAssertNil(checked)
+
+        harness.controller.setWallpaper(nil)
+        await fulfillment(of: [harness.network.downloadGate.started], timeout: 5)
+        XCTAssertEqual(harness.network.downloads, [reference.originalURL], "The stale file is not reused")
+        harness.network.downloadGate.release(.success(harness.incoming))
+        try await finishAuditTask(harness.controller.downloadTask)
+        let applied = try XCTUnwrap(harness.desktop.calls.last?.image)
+        XCTAssertTrue(OpenverseProvider.isFaithfulOriginal(at: applied, for: reference), "The desktop gets the full original")
+        let saved = try XCTUnwrap(harness.store.load().favorites.first?.cachedLocalPath)
+        XCTAssertNotEqual(saved, stale.path)
+        XCTAssertTrue(OpenverseProvider.isFaithfulOriginal(at: URL(fileURLWithPath: saved), for: reference))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stale.path), "The stale file is left, never overwritten")
     }
 }

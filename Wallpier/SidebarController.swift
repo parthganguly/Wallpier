@@ -1,12 +1,13 @@
 import AppKit
 
 enum SidebarItem: Equatable {
-    case discover, local, favorites
+    /// `discover` is Wallhaven's Discover; `openverse` is Openverse's.
+    case discover, openverse, local, favorites
     case collection(UUID)
 }
 
 extension NSPasteboard.PasteboardType {
-    /// A Wallhaven reference's identity key, for drags within Wallpier.
+    /// A remote reference's provider-qualified identity key, for drags within Wallpier.
     static let wallpierReference = NSPasteboard.PasteboardType("com.parth.Wallpier.reference")
 }
 

@@ -23,6 +23,29 @@ private final class SearchField: NSSearchField {
     override var undoManager: UndoManager? { textUndoManager }
 }
 
+/// The request Discover's results came from, in the terms of the source that answered it.
+private enum DiscoverQuery: Equatable {
+    case wallhaven(WallhavenSearchOptions)
+    case openverse(OpenverseSearchOptions)
+
+    var provider: RemoteProviderID { if case .openverse = self { return .openverse }; return .wallhaven }
+    /// The search field's text for this source, as typed.
+    var queryText: String {
+        switch self { case .wallhaven(let o): return o.query; case .openverse(let o): return o.query }
+    }
+    var trimmedQuery: String { queryText.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var resultsDescription: String {
+        switch self { case .wallhaven(let o): return o.resultsDescription; case .openverse(let o): return o.resultsDescription }
+    }
+    var minimumResolution: String? { if case .wallhaven(let o) = self { return o.minimumResolution }; return nil }
+    var firstPageURL: URL {
+        switch self {
+        case .wallhaven(let o): return WallhavenEndpoint.searchURL(options: o, page: 1)
+        case .openverse(let o): return OpenverseEndpoint.searchURL(options: o, page: 1)
+        }
+    }
+}
+
 @MainActor
 final class MainWindowController: NSWindowController, NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout,
     NSMenuItemValidation, NSSearchFieldDelegate, NSToolbarDelegate, NSMenuDelegate {
@@ -43,14 +66,18 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         var title: String {
             switch self {
             case .local(let url): return url.deletingPathExtension().lastPathComponent
-            case .remote(let ref): return ref.wallpaperID
+            case .remote(let ref): return ref.displayTitle
             }
         }
         /// Also the gallery cell's accessibility help, so VoiceOver hears more than an opaque ID.
         var toolTip: String {
             switch self {
             case .local(let url): return url.path
-            case .remote(let ref): return "Wallhaven \(ref.wallpaperID) — \(ref.width) × \(ref.height), \(ref.orientation)"
+            case .remote(let ref):
+                let base = "\(ref.providerName) \(ref.displayTitle) — \(ref.width) × \(ref.height), \(ref.orientation)"
+                guard ref.provider == .openverse else { return base }
+                let credits = [ref.uploader.map { "by \($0)" }, "\(ref.licenseDescription ?? "license not reported") via \(ref.sourceDisplayName)"]
+                return ([base] + credits.compactMap { $0 }).joined(separator: " · ")
             }
         }
     }
@@ -60,6 +87,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private let thumbnailProvider = ThumbnailProvider()
     private let remoteThumbnailProvider: RemoteThumbnailProvider
     private let provider: WallhavenProvider
+    private let openverseProvider: OpenverseProvider
     private let originalCache: RemoteWallpaperCache
     private let historyStore: WallpaperHistoryStore
     private let availableScreens: () -> [NSScreen]
@@ -85,18 +113,33 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private(set) var rotationTask: Task<Void, Never>?
     private var isSearching = false
     private var searchGeneration = UUID()
-    private var resultOptions: WallhavenSearchOptions?
+    private var resultOptions: DiscoverQuery?
     private var searchErrorText: String?
+    /// Results the source returned that couldn't be verified and so aren't shown.
+    private var hiddenResults = 0
+    /// Each Discover source keeps its own results, pages, request and failure while the other is shown.
+    private struct DiscoverSession {
+        var results: [WallpaperReference] = []
+        var currentPage = 0, lastPage = 0, total = 0, hidden = 0
+        var options: DiscoverQuery?
+        var errorText: String?
+        var selectedIdentity: String?
+    }
+    private var parkedSessions: [RemoteProviderID: DiscoverSession] = [:]
     private var lastAppendFailure: Date?
     /// After a failed page, further pages wait this long; Next is re-enabled when it ends.
     private let appendRetryCooldown: TimeInterval = 5
     private var appendRetryTask: Task<Void, Never>?
     /// Next at the last loaded result asked for a page; it completes when that page arrives, if nothing changed meanwhile.
-    private struct PendingAdvance { let generation: UUID; let identity: String; let revision: Int; let query: WallhavenSearchOptions? }
+    private struct PendingAdvance { let generation: UUID; let identity: String; let revision: Int; let query: DiscoverQuery? }
     private var pendingAdvance: PendingAdvance?
     /// Bumped by every selection change, so a pending move can tell the user went elsewhere and came back.
     private var selectionRevision = 0
-    private static let loadingMoreStatus = "Loading more results from Wallhaven…"
+    private var loadingMoreStatus: String { "Loading more results from \(discoverName)…" }
+    private var discoverName: String { state.discoverProvider.displayName }
+    private var draftQuery: DiscoverQuery {
+        state.discoverProvider == .openverse ? .openverse(state.openverseSearch) : .wallhaven(state.wallhavenSearch)
+    }
     /// Closing the preview, by any path, cancels its pending detail request so reopening can ask again.
     private(set) var isViewerVisible = false { didSet { if oldValue && !isViewerVisible { endPreviewSession() } } }
     /// How faithful the stage's image is. Completions may only replace it with an equal or better one.
@@ -118,6 +161,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private let resolutionPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let aspectPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let sortingPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    let openverseLicensePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Openverse's fixed filters and its acknowledgement, shown whenever its results are.
+    let openverseNoticeLabel = NSTextField(labelWithString: "Powered by Openverse; not endorsed by Openverse.")
+    /// Openverse pages are loaded on request, never by scrolling: filtered pages can be short or empty.
+    let loadMoreButton = NSButton(title: "Load More", target: nil, action: nil)
+    /// Shown for an Openverse work whose reported license can't be confirmed: Set is refused until the source is reviewed.
+    let reviewSourceButton = NSButton(title: "Review Original Source", target: nil, action: nil)
     private let scopeBar = NSStackView()
     private lazy var scopeBarCollapsed = scopeBar.heightAnchor.constraint(equalToConstant: 0)
     private var statusClearTask: Task<Void, Never>?
@@ -141,6 +191,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     let previewPositionLabel = NSTextField(labelWithString: "")
     let previewMetadataLabel = NSTextField(labelWithString: "")
     private let previewTagsLabel = NSTextField(labelWithString: "")
+    /// An Openverse work's reported license, its source page and the Openverse acknowledgement, as links.
+    let previewAttributionLabel = NSTextField(labelWithString: "")
+    let previewAcknowledgementLabel = NSTextField(labelWithString: "Powered by Openverse; not endorsed by Openverse. Licenses are as reported, not verified.")
     /// Says what the stage is drawn from when it isn't the original: a low-resolution or a cropped thumbnail.
     let approximatePreviewNotice = NSStackView()
     private let previewNoticeIcon = NSImageView()
@@ -189,12 +242,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     // Inject before any state restoration, search, or rotation can start.
     init(window: NSWindow?, wallpaperService: WallpaperService, stateStore: WallpaperStateStore,
-         provider: WallhavenProvider, originalCache: RemoteWallpaperCache,
+         provider: WallhavenProvider, openverseProvider: OpenverseProvider = OpenverseProvider(), originalCache: RemoteWallpaperCache,
          historyStore: WallpaperHistoryStore, remoteThumbnailProvider: RemoteThumbnailProvider,
          availableScreens: @escaping () -> [NSScreen]) {
         self.wallpaperService = wallpaperService
         self.stateStore = stateStore
         self.provider = provider
+        self.openverseProvider = openverseProvider
         self.originalCache = originalCache
         self.historyStore = historyStore
         self.remoteThumbnailProvider = remoteThumbnailProvider
@@ -213,7 +267,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         currentPage = discoverPage.currentPage
         lastPage = discoverPage.lastPage
         totalResults = discoverPage.total
-        resultOptions = state.wallhavenSearch
+        resultOptions = draftQuery
         configureUI()
         restoreState()
     }
@@ -300,18 +354,17 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func configureControls() {
-        searchField.placeholderString = "Search Wallhaven"
         searchField.target = self; searchField.action = #selector(search(_:))
         searchField.delegate = self
         searchField.sendsWholeSearchString = true
-        searchField.setAccessibilityHelp("Searches safe-for-work wallpapers on Wallhaven")
-        searchField.toolTip = "Search Wallhaven (⌘F). Results appear in Discover."
+        configureSearchField()
         categoryPopUp.addItems(withTitles: WallhavenCategory.allCases.map(\.displayName))
         resolutionPopUp.addItems(withTitles: ["At Least Display Size", "Any Resolution", "1080p or Larger", "1440p or Larger", "4K or Larger"])
         aspectPopUp.addItems(withTitles: WallhavenAspectRatio.allCases.map(\.displayName))
         sortingPopUp.addItems(withTitles: WallhavenSorting.allCases.map(\.displayName))
-        let filterNames = ["Category", "Minimum resolution", "Aspect ratio", "Sort order"]
-        for (popup, name) in zip([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp], filterNames) {
+        openverseLicensePopUp.addItems(withTitles: OpenverseLicenseFilter.allCases.map(\.displayName))
+        let filterNames = ["Category", "Minimum resolution", "Aspect ratio", "Sort order", "License"]
+        for (popup, name) in zip([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp, openverseLicensePopUp], filterNames) {
             popup.target = self; popup.action = #selector(searchOptionChanged(_:))
             popup.controlSize = .small
             popup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -399,7 +452,19 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     private func makeContentView() -> NSView {
         // Scope bar: Discover filters or the current folder, only where relevant.
-        discoverBar.setViews([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp], in: .leading)
+        openverseNoticeLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        openverseNoticeLabel.textColor = .secondaryText
+        openverseNoticeLabel.lineBreakMode = .byTruncatingTail
+        openverseNoticeLabel.toolTip = "Wide, large, non-mature Wikimedia Commons JPEGs reported as CC0 or public domain. Openverse doesn’t verify licenses: review the source before reuse."
+        // The acknowledgement stays whole at the minimum window width; the pending-search note gives way first.
+        openverseNoticeLabel.setContentCompressionResistancePriority(.defaultHigh + 1, for: .horizontal)
+        loadMoreButton.controlSize = .small
+        loadMoreButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        loadMoreButton.target = self; loadMoreButton.action = #selector(loadMoreResults(_:))
+        loadMoreButton.toolTip = "Load the next page of Openverse results"
+        reviewSourceButton.toolTip = selectedReference?.useRestriction?.errorDescription
+        loadMoreButton.isHidden = true
+        discoverBar.setViews([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp, openverseLicensePopUp, openverseNoticeLabel], in: .leading)
         pendingSearchLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         pendingSearchLabel.textColor = .secondaryLabelColor
         pendingSearchLabel.lineBreakMode = .byTruncatingTail
@@ -408,7 +473,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         updateResultsButton.controlSize = .small
         updateResultsButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         updateResultsButton.target = self; updateResultsButton.action = #selector(search(_:))
-        discoverBar.setViews([pendingSearchLabel, updateResultsButton], in: .trailing)
+        discoverBar.setViews([pendingSearchLabel, updateResultsButton, loadMoreButton], in: .trailing)
         discoverBar.setVisibilityPriority(.detachOnlyIfNecessary, for: pendingSearchLabel)
         discoverBar.spacing = 8
         let folderIcon = NSImageView(image: NSImage(systemSymbolName: "folder", accessibilityDescription: nil) ?? NSImage())
@@ -520,7 +585,18 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         previewPositionLabel.alignment = .center
         let pager = NSStackView(views: [previewPreviousButton, previewPositionLabel, previewNextButton])
         pager.spacing = 4
-        let caption = NSStackView(views: [pager, previewTitleLabel, previewMetadataLabel, previewTagsLabel, approximatePreviewNotice])
+        // Links must be clickable: selectable, with attributes.
+        previewAttributionLabel.isSelectable = true
+        previewAttributionLabel.allowsEditingTextAttributes = true
+        previewAttributionLabel.lineBreakMode = .byTruncatingTail
+        previewAttributionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        previewAttributionLabel.isHidden = true
+        previewAcknowledgementLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        previewAcknowledgementLabel.textColor = .secondaryText
+        previewAcknowledgementLabel.alignment = .center
+        previewAcknowledgementLabel.lineBreakMode = .byTruncatingTail
+        previewAcknowledgementLabel.isHidden = true
+        let caption = NSStackView(views: [pager, previewTitleLabel, previewMetadataLabel, previewTagsLabel, previewAttributionLabel, previewAcknowledgementLabel, approximatePreviewNotice])
         caption.orientation = .vertical
         caption.spacing = 3
         caption.setHuggingPriority(.required, for: .vertical)
@@ -572,7 +648,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         // The heart and ⋯ keep one place whatever the selection's name or status line, so they never
         // shift while browsing; a wider gap separates them from the three controls that apply.
         applyBar.setViews([busyIndicator, text], in: .leading)
-        applyBar.setViews([favoriteButton, moreButton, displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
+        reviewSourceButton.target = self; reviewSourceButton.action = #selector(openSourcePage(_:))
+        reviewSourceButton.controlSize = .small
+        reviewSourceButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        reviewSourceButton.toolTip = "Openverse’s reported license for this image is missing or doesn’t match its license link. Review the original source; Wallpier won’t set it."
+        reviewSourceButton.isHidden = true
+        applyBar.setViews([reviewSourceButton, favoriteButton, moreButton, displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
         applyBar.setCustomSpacing(4, after: favoriteButton)
         applyBar.setCustomSpacing(14, after: moreButton)
         applyBar.spacing = 8
@@ -623,7 +704,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     // Internal for development tests: real startup path with injected, isolated dependencies.
     func restoreState() {
-        searchField.stringValue = state.wallhavenSearch.query
+        searchField.stringValue = draftQuery.queryText
+        configureSearchField()
+        openverseLicensePopUp.selectItem(at: OpenverseLicenseFilter.allCases.firstIndex(of: state.openverseSearch.license) ?? 0)
         categoryPopUp.selectItem(at: WallhavenCategory.allCases.firstIndex(of: state.wallhavenSearch.category) ?? 0)
         aspectPopUp.selectItem(at: WallhavenAspectRatio.allCases.firstIndex(of: state.wallhavenSearch.aspectRatio) ?? 0)
         sortingPopUp.selectItem(at: WallhavenSorting.allCases.firstIndex(of: state.wallhavenSearch.sorting) ?? 0)
@@ -677,14 +760,45 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     // MARK: - Sources
 
+    /// Discover, showing whichever source was shown last.
     @objc func showDiscover(_ sender: Any?) { selectSource(.discover) }
+    @objc func showWallhaven(_ sender: Any?) { showDiscover(provider: .wallhaven) }
+    @objc func showOpenverse(_ sender: Any?) { showDiscover(provider: .openverse) }
+
+    /// Switches Discover's source. The other source's results, pages and failure are kept aside, untouched,
+    /// and any request still running for it is cancelled by `selectSource`, so no result crosses sources.
+    private func showDiscover(provider: RemoteProviderID) {
+        if provider != state.discoverProvider {
+            parkedSessions[state.discoverProvider] = DiscoverSession(
+                results: remoteResults, currentPage: currentPage, lastPage: lastPage, total: totalResults, hidden: hiddenResults,
+                options: resultOptions, errorText: searchErrorText,
+                selectedIdentity: state.currentSource == .discover ? selectedReference?.identityKey : nil)
+            let next = parkedSessions.removeValue(forKey: provider) ?? DiscoverSession()
+            state.discoverProvider = provider
+            remoteResults = next.results
+            currentPage = next.currentPage; lastPage = next.lastPage; totalResults = next.total; hiddenResults = next.hidden
+            resultOptions = next.options; searchErrorText = next.errorText; lastAppendFailure = nil
+            if let identity = next.selectedIdentity { state.selectedRemoteIdentity = identity }
+            searchField.stringValue = draftQuery.queryText
+            configureSearchField()
+        }
+        selectSource(.discover)
+    }
+
+    private func configureSearchField() {
+        let openverse = state.discoverProvider == .openverse
+        searchField.placeholderString = "Search \(discoverName)"
+        searchField.setAccessibilityHelp(openverse ? "Searches openly licensed Wikimedia Commons images on Openverse" : "Searches safe-for-work wallpapers on Wallhaven")
+        searchField.toolTip = "Search \(discoverName) (⌘F). Results appear in Discover."
+    }
     @objc func showLocal(_ sender: Any?) { selectSource(.local) }
     @objc func showFavorites(_ sender: Any?) { selectSource(.favorites) }
     @objc func showCollections(_ sender: Any?) { selectSource(.collections) }
 
     private func activate(_ item: SidebarItem) {
         switch item {
-        case .discover: selectSource(.discover)
+        case .discover: showDiscover(provider: .wallhaven)
+        case .openverse: showDiscover(provider: .openverse)
         case .local: selectSource(.local)
         case .favorites: selectSource(.favorites)
         case .collection(let id): state.selectedCollectionID = id; selectSource(.collections)
@@ -708,7 +822,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     private var currentSidebarItem: SidebarItem? {
         switch state.currentSource {
-        case .discover: return .discover
+        case .discover: return state.discoverProvider == .openverse ? .openverse : .discover
         case .local: return .local
         case .favorites: return .favorites
         case .collections: return selectedCollection.map { .collection($0.id) }
@@ -746,7 +860,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         persistSearchOptions()
         invalidateSearch()
         // Typing elsewhere doesn't filter the folder or library: say where the search goes.
-        let scope = "Press Return to search Wallhaven in Discover."
+        let scope = "Press Return to search \(discoverName) in Discover."
         if state.currentSource != .discover, statusLabel.stringValue != scope { showStatus(scope, isError: false) }
     }
 
@@ -760,7 +874,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func persistSearchOptions() {
-        state.wallhavenSearch.query = searchField.stringValue
+        if state.discoverProvider == .openverse { state.openverseSearch.query = searchField.stringValue }
+        else { state.wallhavenSearch.query = searchField.stringValue }
+        if OpenverseLicenseFilter.allCases.indices.contains(openverseLicensePopUp.indexOfSelectedItem) { state.openverseSearch.license = OpenverseLicenseFilter.allCases[openverseLicensePopUp.indexOfSelectedItem] }
         if WallhavenCategory.allCases.indices.contains(categoryPopUp.indexOfSelectedItem) { state.wallhavenSearch.category = WallhavenCategory.allCases[categoryPopUp.indexOfSelectedItem] }
         if WallhavenAspectRatio.allCases.indices.contains(aspectPopUp.indexOfSelectedItem) { state.wallhavenSearch.aspectRatio = WallhavenAspectRatio.allCases[aspectPopUp.indexOfSelectedItem] }
         if WallhavenSorting.allCases.indices.contains(sortingPopUp.indexOfSelectedItem) { state.wallhavenSearch.sorting = WallhavenSorting.allCases[sortingPopUp.indexOfSelectedItem] }
@@ -803,7 +919,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             pendingAdvance = nil
             remoteThumbnailProvider.reset()
             remoteResults = []
-            currentPage = 0; lastPage = 0; totalResults = 0
+            currentPage = 0; lastPage = 0; totalResults = 0; hiddenResults = 0
             lastAppendFailure = nil
             collectionView.reloadData()
             restoreSelection()
@@ -811,20 +927,27 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         isSearching = true
         updateEmptyAndPagination(); updateControlAvailability()
         // A further page extends the visible results, so it repeats their request, not the edited controls.
-        let options = appending ? resultOptions ?? state.wallhavenSearch : state.wallhavenSearch
+        let query = appending ? resultOptions ?? draftQuery : draftQuery
         searchTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await provider.search(options: options, page: page)
+                let result: RemoteSearchPage
+                switch query {
+                case .wallhaven(let options): result = try await provider.search(options: options, page: page)
+                case .openverse(let options): result = try await openverseProvider.search(options: options, page: page)
+                }
                 try Task.checkCancellation()
-                guard searchGeneration == generation, state.currentSource == .discover else { return }
-                resultOptions = options
+                guard searchGeneration == generation, state.currentSource == .discover, state.discoverProvider == query.provider else { return }
+                resultOptions = query
+                hiddenResults += result.hiddenCount
                 if appending {
                     let known = Set(remoteResults.map(\.identityKey))
                     let added = result.wallpapers.filter { !known.contains($0.identityKey) }
                     let start = remoteResults.count
                     remoteResults.append(contentsOf: added)
-                    collectionView.insertItems(at: Set((start..<remoteResults.count).map { IndexPath(item: $0, section: 0) }))
+                    // After an empty filtered page there is nothing to extend: show and select the first results.
+                    if start == 0 { collectionView.reloadData(); restoreSelection() }
+                    else { collectionView.insertItems(at: Set((start..<remoteResults.count).map { IndexPath(item: $0, section: 0) })) }
                 } else {
                     remoteResults = result.wallpapers
                     state.selectedRemoteIdentity = remoteResults.first?.identityKey
@@ -833,9 +956,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 currentPage = result.currentPage; lastPage = result.lastPage; totalResults = result.total
                 isSearching = false
                 updateEmptyAndPagination(); updateControlAvailability(); stateStore.save(state)
-                if appending, statusLabel.stringValue == Self.loadingMoreStatus { showStatus("", isError: false) }
+                if appending, statusLabel.stringValue == loadingMoreStatus { showStatus("", isError: false) }
                 if let remaining = result.rateLimit.remaining, remaining < 10 {
-                    showStatus("Wallhaven allows \(remaining) more requests this minute.", isError: false)
+                    showStatus("\(query.provider.displayName) allows \(remaining) more requests this minute.", isError: false)
+                }
+                if result.hiddenCount > 0 {
+                    showStatus("\(hiddenResults) \(query.provider.displayName) result\(hiddenResults == 1 ? " was" : "s were") hidden: the image host, license or links couldn’t be verified.", isError: false)
                 }
                 if appending { finishPendingAdvance(generation) }
                 DispatchQueue.main.async { [weak self] in self?.loadMoreIfNeeded() }
@@ -854,9 +980,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                         guard let self, !Task.isCancelled, lastAppendFailure == failure else { return }
                         updateControlAvailability()
                     }
-                    showStatus("Couldn’t load more results. \(friendlyMessage(for: error))", isError: true)
+                    showStatus("Couldn’t load more results. \(friendlyMessage(for: error, source: query.provider.displayName))", isError: true)
                 } else {
-                    searchErrorText = friendlyMessage(for: error)
+                    searchErrorText = friendlyMessage(for: error, source: query.provider.displayName)
                     showStatus("", isError: false)
                 }
                 updateEmptyAndPagination(); updateControlAvailability()
@@ -875,9 +1001,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func loadMoreIfNeeded() {
-        guard canLoadMoreResults, !galleryScroll.isHidden else { return }
+        guard state.discoverProvider == .wallhaven, canLoadMoreResults, !galleryScroll.isHidden else { return }
         let visible = galleryScroll.documentVisibleRect
         guard visible.maxY >= collectionView.frame.height - max(visible.height * 0.5, 200) else { return }
+        performSearch(page: currentPage + 1, appending: true)
+    }
+
+    /// Openverse's explicit next page: from the bar, or an empty filtered page's empty state.
+    @objc func loadMoreResults(_ sender: Any?) {
+        guard canLoadMoreResults else { NSSound.beep(); return }
         performSearch(page: currentPage + 1, appending: true)
     }
 
@@ -973,17 +1105,30 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func localOriginal(for reference: WallpaperReference) async throws -> URL {
-        if let cached = try await originalCache.cachedURL(for: reference) {
+        // Checked before any cached copy is reused, so Set and rotation both fail closed.
+        if let restriction = reference.useRestriction { throw restriction }
+        if let cached = try await originalCache.cachedURL(for: reference, accepting: Self.originalCheck(for: reference)) {
             updateReference(reference, cachedPath: cached.path); showOriginalIfSelected(reference, at: cached); return cached
         }
-        showStatus("Downloading the \(reference.resolution) original from Wallhaven…", isError: false)
-        let temporary = try await provider.downloadOriginal(for: reference)
+        showStatus("Downloading the \(reference.resolution) original from \(reference.sourceDisplayName)…", isError: false)
+        let temporary: URL
+        switch reference.provider {
+        case .openverse?: temporary = try await openverseProvider.downloadOriginal(for: reference)
+        case .wallhaven?: temporary = try await provider.downloadOriginal(for: reference)
+        case nil: throw RemoteProviderError.unsupportedProvider
+        }
         defer { try? FileManager.default.removeItem(at: temporary) }
         try Task.checkCancellation()
-        let installed = try await originalCache.installDownloadedFile(temporary, for: reference, protectedPaths: currentProtectedPaths())
+        let installed = try await originalCache.installDownloadedFile(temporary, for: reference, protectedPaths: currentProtectedPaths(),
+                                                                      accepting: Self.originalCheck(for: reference))
         updateReference(reference, cachedPath: installed.path)
         showOriginalIfSelected(reference, at: installed)
         return installed
+    }
+
+    /// Openverse cache files must still be the exact reported original; Wallhaven keeps the cache's own check.
+    private static func originalCheck(for reference: WallpaperReference) -> ((URL) -> Bool)? {
+        reference.provider == .openverse ? { OpenverseProvider.isFaithfulOriginal(at: $0, for: reference) } : nil
     }
 
     private func updateReference(_ reference: WallpaperReference, cachedPath: String? = nil) {
@@ -1072,7 +1217,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func moveSelection(direction: Int) {
         if let next = navigationIndex(direction) { selectItem(at: next); return }
         if direction > 0, let identity = selectedItem?.identifier, canLoadMoreResults {
-            showStatus(Self.loadingMoreStatus, isError: false)
+            showStatus(loadingMoreStatus, isError: false)
             performSearch(page: currentPage + 1, appending: true)
             pendingAdvance = PendingAdvance(generation: searchGeneration, identity: identity, revision: selectionRevision, query: resultOptions)
             return
@@ -1112,7 +1257,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             previewPositionLabel.stringValue = ""
         }
         previewPositionLabel.toolTip = hasUnloadedResults
-            ? "\(count.formatted()) of \(totalResults.formatted()) Wallhaven results are loaded. Next at the last one loads more." : nil
+            ? "\(count.formatted()) of \(totalResults.formatted()) \(discoverName) results are loaded. Next at the last one loads more." : nil
         previewPositionLabel.setAccessibilityLabel(previewPositionLabel.stringValue.isEmpty ? nil : "Wallpaper \(previewPositionLabel.stringValue)")
         previewPreviousButton.isEnabled = canNavigate(-1)
         previewNextButton.isEnabled = canNavigate(1)
@@ -1154,6 +1299,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         stageView.placeholder = .none
         stageFidelity = .none
         updatePreviewNotice()
+        // Attribution belongs to one Openverse selection; nothing else inherits it.
+        previewAttributionLabel.attributedStringValue = NSAttributedString()
+        previewAttributionLabel.isHidden = true
+        previewAcknowledgementLabel.isHidden = true
+        previewTagsLabel.isHidden = false
         guard let item else {
             previewTitleLabel.stringValue = "No Wallpaper Selected"
             previewMetadataLabel.stringValue = ""
@@ -1197,7 +1347,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             // thumbnail meanwhile unless an original is expected. Nothing here downloads an original.
             if ref.cachedLocalPath == nil { loadRemotePreview(ref) }
             Task { [weak self] in
-                let cached = try? await self?.originalCache.cachedURL(for: ref)
+                let cached = try? await self?.originalCache.cachedURL(for: ref, accepting: Self.originalCheck(for: ref))
                 guard let self, selectedItem?.identifier == ref.identityKey else { return }
                 if let cached { loadLocalPreview(cached, identity: ref.identityKey) { [weak self] in self?.loadRemotePreview(ref) } }
                 else if ref.cachedLocalPath != nil { loadRemotePreview(ref) }
@@ -1238,7 +1388,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func loadRemotePreview(_ ref: WallpaperReference) {
-        let (url, fidelity) = ref.remotePreview
+        guard let (url, fidelity) = ref.remotePreview else {
+            if isViewerVisible, selectedItem?.identifier == ref.identityKey, stageFidelity == .none { stageView.placeholder = .unavailable }
+            return
+        }
         remoteThumbnailProvider.requestThumbnail(for: url, maximumPixelSize: 1000) { [weak self] image in
             guard let self else { return }
             guard let image else {
@@ -1279,14 +1432,43 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let parts = [WallpaperShape.summary(width: reference.width, height: reference.height), reference.uploader.map { "by \($0)" },
                      reference.cachedLocalPath == nil ? nil : "Original downloaded"]
         previewMetadataLabel.stringValue = parts.compactMap { $0 }.joined(separator: " · ")
-        previewTagsLabel.stringValue = reference.tags.isEmpty ? "Wallhaven · SFW" : reference.tags.joined(separator: " · ")
+        let openverse = reference.provider == .openverse
+        previewTagsLabel.stringValue = reference.tags.isEmpty ? (openverse ? "" : "Wallhaven · SFW") : reference.tags.joined(separator: " · ")
+        previewTagsLabel.isHidden = previewTagsLabel.stringValue.isEmpty
+        previewAttributionLabel.attributedStringValue = Self.attribution(for: reference) ?? NSAttributedString()
+        previewAttributionLabel.isHidden = !openverse
+        previewAcknowledgementLabel.isHidden = !openverse
         updateSelectionSummary()
+    }
+
+    /// Reported license (linked when a license URL was reported), the source page, and Openverse's acknowledgement.
+    /// Never fills in a license the source didn't report.
+    static func attribution(for reference: WallpaperReference) -> NSAttributedString? {
+        guard reference.provider == .openverse else { return nil }
+        let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center; paragraph.lineBreakMode = .byTruncatingTail
+        let text = NSMutableAttributedString()
+        func add(_ string: String, link: URL? = nil) {
+            var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                                                             .foregroundColor: NSColor.secondaryText, .paragraphStyle: paragraph]
+            if let link { attributes[.link] = link }
+            text.append(NSAttributedString(string: string, attributes: attributes))
+        }
+        if reference.licenseIsConsistent {
+            add("\(reference.licenseDescription ?? "") as reported", link: reference.licenseURL)
+        } else {
+            add("\(reference.licenseDescription ?? "No license reported") · unconfirmed, review source")
+        }
+        add(" · ")
+        let landing = OpenverseURLPolicy.isAllowedLandingURL(reference.sourcePageURL, source: reference.sourceName) ? reference.sourcePageURL : nil
+        add("Source: \(reference.sourceDisplayName)", link: landing)
+        return text
     }
 
     /// Uploader and tags, and the uncropped thumbnail older references lack, come from the API. Requested
     /// once per selected wallpaper, after a short dwell, and a throttled API only leaves them missing.
     private func fetchDetailsIfNeeded(for reference: WallpaperReference) {
-        guard reference.uploader == nil || reference.tags.isEmpty || reference.remotePreview.fidelity == .croppedThumbnail,
+        guard reference.provider != nil,
+              reference.uploader == nil || reference.tags.isEmpty || reference.remotePreview?.fidelity == .croppedThumbnail,
               detailIdentity != reference.identityKey else { return }
         detailTask?.cancel()
         detailIdentity = reference.identityKey
@@ -1294,13 +1476,18 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             do {
                 try await Task.sleep(nanoseconds: Self.detailDwellNanoseconds)
                 guard let self, isViewerVisible, selectedReference?.identityKey == reference.identityKey else { return }
-                let detailed = try await provider.fetchDetails(for: reference)
+                let detailed: WallpaperReference
+                switch reference.provider {
+                case .openverse?: detailed = try await openverseProvider.fetchDetails(for: reference)
+                case .wallhaven?: detailed = try await provider.fetchDetails(for: reference)
+                case nil: return
+                }
                 try Task.checkCancellation(); updateReference(detailed)
                 guard let current = selectedReference, current.identityKey == detailed.identityKey else { return }
                 configureRemoteMetadata(current)
-                if current.remotePreview.fidelity > stageFidelity { loadRemotePreview(current) }
+                if (current.remotePreview?.fidelity ?? .none) > stageFidelity { loadRemotePreview(current) }
             } catch is CancellationError { return }
-            catch { self?.logger.error("Wallhaven detail failed: \(error.localizedDescription, privacy: .public)") }
+            catch { self?.logger.error("\(reference.providerName, privacy: .public) detail failed: \(error.localizedDescription, privacy: .public)") }
         }
     }
 
@@ -1315,7 +1502,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch selectedItem {
         case nil: title = "No Wallpaper Selected"; detail = ""
         case .local(let url)?: title = url.deletingPathExtension().lastPathComponent; detail = url.pathExtension.uppercased()
-        case .remote(let ref)?: title = ref.wallpaperID; detail = WallpaperShape.summary(width: ref.width, height: ref.height)
+        case .remote(let ref)?:
+            title = ref.displayTitle
+            detail = ([WallpaperShape.summary(width: ref.width, height: ref.height)] + (ref.provider == .openverse ? [ref.licenseIsConsistent ? ref.licenseDescription ?? "" : "License unconfirmed"] : []))
+                .joined(separator: " · ")
         }
         let text = NSMutableAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium),
@@ -1466,7 +1656,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             undoManager.registerUndo(withTarget: self) { $0.setMembership(ref, in: list, at: index, member: !member, addition: addition) }
             undoManager.setActionName(addition ? "Add to \(name)" : "Remove from \(name)")
         }
-        showStatus(member ? "\(addition ? "Added" : "Restored") \(ref.wallpaperID) to \(name)." : "Removed \(ref.wallpaperID) from \(name).", isError: false)
+        showStatus(member ? "\(addition ? "Added" : "Restored") \(ref.displayTitle) to \(name)." : "Removed \(ref.displayTitle) from \(name).", isError: false)
     }
 
     /// Adds dropped wallpapers (by identity) to Favorites or a collection.
@@ -1491,16 +1681,33 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             setMembership(ref, in: list, at: members.count + offset, member: true, addition: true)
         }
         window?.undoManager?.endUndoGrouping()
-        showStatus("Added \(adding.count == 1 ? adding[0].wallpaperID : "\(adding.count) wallpapers") to \(name).", isError: false)
+        showStatus("Added \(adding.count == 1 ? adding[0].displayTitle : "\(adding.count) wallpapers") to \(name).", isError: false)
         return true
     }
 
     @objc func openSourcePage(_ sender: Any?) {
         switch selectedItem {
-        case .remote(let ref)?: NSWorkspace.shared.open(ref.sourcePageURL)
+        case .remote(let ref)?:
+            guard let url = browsableSourceURL(ref) else { NSSound.beep(); showStatus("This wallpaper’s source page isn’t on a known host for its source.", isError: true); return }
+            NSWorkspace.shared.open(url)
         case .local(let url)?: NSWorkspace.shared.activateFileViewerSelecting([url])
         case nil: NSSound.beep()
         }
+    }
+
+    /// Wallhaven pages as before; an Openverse source page only on its source's known landing host.
+    private func browsableSourceURL(_ ref: WallpaperReference) -> URL? {
+        switch ref.provider {
+        case .wallhaven?: return ref.sourcePageURL
+        case .openverse?: return OpenverseURLPolicy.isAllowedLandingURL(ref.sourcePageURL, source: ref.sourceName) ? ref.sourcePageURL : nil
+        case nil: return nil
+        }
+    }
+
+    /// Only a canonical deed that matches the reported license is opened.
+    @objc func openLicense(_ sender: Any?) {
+        guard let ref = selectedReference, ref.licenseIsConsistent, let url = ref.licenseURL else { NSSound.beep(); return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc func copy(_ sender: Any?) {
@@ -1508,7 +1715,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         switch item {
-        case .remote(let ref): pasteboard.writeObjects([ref.sourcePageURL as NSURL])
+        case .remote(let ref): if let url = browsableSourceURL(ref) { pasteboard.writeObjects([url as NSURL]) }
         case .local(let url): pasteboard.writeObjects([url as NSURL])
         }
     }
@@ -1582,8 +1789,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func refreshSidebar() {
         let rotating = state.rotationInterval != .off
         let folderName = state.folderPath.map { URL(fileURLWithPath: $0).lastPathComponent }
+        let discover = [
+            SidebarNode(.discover, title: RemoteProviderID.wallhaven.displayName, symbolName: "globe"),
+            SidebarNode(.openverse, title: RemoteProviderID.openverse.displayName, symbolName: "camera")
+        ]
         let library = [
-            SidebarNode(.discover, title: "Discover", symbolName: "globe"),
             SidebarNode(.local, title: folderName ?? "Folder", symbolName: "folder",
                         count: state.folderPath == nil || isLoadingFolder ? nil : localURLs.count,
                         isRotating: rotating && state.activeRotationCollectionID == nil),
@@ -1593,7 +1803,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             SidebarNode(.collection($0.id), title: $0.name, symbolName: "rectangle.stack", count: $0.wallpapers.count,
                         isRotating: rotating && state.activeRotationCollectionID == $0.id)
         }
-        var groups = [SidebarNode(group: "Library", children: library)]
+        var groups = [SidebarNode(group: "Discover", children: discover), SidebarNode(group: "Library", children: library)]
         if !collections.isEmpty { groups.append(SidebarNode(group: "Collections", children: collections)) }
         sidebar.reload(groups: groups, selection: currentSidebarItem)
     }
@@ -1886,6 +2096,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     /// Filters and the folder bar act on the gallery's results; the preview inspects one wallpaper, so they step aside.
     private func updateScopeBar() {
+        let openverse = state.discoverProvider == .openverse
+        [categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp].forEach { $0.isHidden = openverse }
+        [openverseLicensePopUp, openverseNoticeLabel].forEach { $0.isHidden = !openverse }
         discoverBar.isHidden = state.currentSource != .discover
         localBar.isHidden = state.currentSource != .local || state.folderPath == nil
         scopeBar.isHidden = (discoverBar.isHidden && localBar.isHidden) || !viewerView.isHidden
@@ -1915,7 +2128,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         case .discover:
             window.title = "Discover"
             // Names the request the results came from, which the edited controls may no longer describe.
-            window.subtitle = totalResults > 0 ? "\(resultOptions?.resultsDescription ?? "Results") on Wallhaven · \(remoteResults.count.formatted()) of \(totalResults.formatted())" : ""
+            window.subtitle = totalResults > 0 ? "\(resultOptions?.resultsDescription ?? "Results") on \(discoverName) · \(remoteResults.count.formatted()) of \(totalResults.formatted())" : ""
         case .local:
             window.title = state.folderPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Folder"
             window.subtitle = state.folderPath == nil || isLoadingFolder ? "" : wallpapers
@@ -1929,22 +2142,22 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     /// When the visible results no longer match the search text, filters or display-derived size, say
     /// which request they show and offer to apply the new one (as Return in the search field does).
     private func updatePendingSearch() {
-        let draft = state.wallhavenSearch
-        sortingPopUp.toolTip = draft.effectiveSorting == draft.sorting ? "Sort order"
+        let wallhaven = state.wallhavenSearch, draft = draftQuery
+        sortingPopUp.toolTip = wallhaven.effectiveSorting == wallhaven.sorting ? "Sort order"
             : "Without search text Wallhaven has no relevance order, so Discover shows this month’s top wallpapers."
         var note: String?
-        if let applied = resultOptions, !remoteResults.isEmpty,
-           WallhavenEndpoint.searchURL(options: applied, page: 1) != WallhavenEndpoint.searchURL(options: draft, page: 1) {
+        if let applied = resultOptions, !remoteResults.isEmpty, applied.firstPageURL != draft.firstPageURL {
             if applied.trimmedQuery != draft.trimmedQuery { note = "Showing \(applied.resultsDescription)" }
-            else if applied.minimumResolution != draft.minimumResolution, draft.usesDisplayMinimum { note = "Showing results for the previous display size" }
+            else if applied.minimumResolution != draft.minimumResolution, draft.provider == .wallhaven, wallhaven.usesDisplayMinimum { note = "Showing results for the previous display size" }
             else { note = "Showing results for earlier filters" }
         }
         pendingSearchLabel.stringValue = note ?? ""
         pendingSearchLabel.toolTip = note.map { "\($0). Press Return in the search field or click Update Results to search with the current settings." }
         pendingSearchLabel.isHidden = note == nil
         updateResultsButton.isHidden = note == nil
-        updateResultsButton.toolTip = draft.trimmedQuery.isEmpty ? "Show \(draft.effectiveSorting.displayName) on Wallhaven"
-            : "Search Wallhaven for “\(draft.trimmedQuery)”"
+        updateResultsButton.toolTip = draft.trimmedQuery.isEmpty
+            ? (draft.provider == .openverse ? "Show Wikimedia Commons images on Openverse" : "Show \(wallhaven.effectiveSorting.displayName) on Wallhaven")
+            : "Search \(discoverName) for “\(draft.trimmedQuery)”"
     }
 
     private func updateEmptyAndPagination() {
@@ -1954,15 +2167,27 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch state.currentSource {
         case .discover:
             if isSearching {
-                emptyStateView.show(symbolName: nil, title: "Searching Wallhaven…", message: "")
+                emptyStateView.show(symbolName: nil, title: "Searching \(discoverName)…", message: "")
             } else if let searchErrorText {
-                let offline = searchErrorText.contains("offline") || searchErrorText.contains("reach Wallhaven")
+                let offline = searchErrorText.contains("offline") || searchErrorText.contains("reach \(discoverName)")
                 emptyStateView.show(symbolName: offline ? "wifi.exclamationmark" : "exclamationmark.triangle",
                                     title: "Couldn’t Load Wallpapers", message: searchErrorText,
                                     action: ("Try Again", #selector(search(_:)), self))
-            } else if resultOptions == nil || resultOptions != state.wallhavenSearch {
-                emptyStateView.show(symbolName: "magnifyingglass", title: "Search Wallhaven",
-                                    message: "Press Return in the search field to see safe-for-work wallpapers.")
+            } else if resultOptions == nil || resultOptions != draftQuery {
+                emptyStateView.show(symbolName: "magnifyingglass", title: "Search \(discoverName)",
+                                    message: state.discoverProvider == .openverse ? "Press Return in the search field to find openly licensed Wikimedia Commons images."
+                                        : "Press Return in the search field to see safe-for-work wallpapers.")
+            } else if state.discoverProvider == .openverse {
+                // Truthful: Wallpier never broadens the license or content filters to fill the page.
+                let hidden = hiddenResults == 0 ? "" : " \(hiddenResults) result\(hiddenResults == 1 ? " was" : "s were") hidden because the image host, license or links couldn’t be verified."
+                if hasUnloadedResults {
+                    emptyStateView.show(symbolName: "magnifyingglass", title: "No Verifiable Results Yet",
+                                        message: "Nothing on the pages loaded so far could be shown." + hidden + " Openverse has more pages.",
+                                        action: ("Load More", #selector(loadMoreResults(_:)), self))
+                } else {
+                    emptyStateView.show(symbolName: "magnifyingglass", title: "No Results",
+                                        message: "No wide, large Wikimedia Commons JPEGs with this public-domain license matched on Openverse." + hidden)
+                }
             } else {
                 emptyStateView.show(symbolName: "magnifyingglass", title: "No Results",
                                     message: "No safe-for-work Wallhaven wallpapers matched these filters.")
@@ -1981,7 +2206,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             }
         case .favorites:
             emptyStateView.show(symbolName: "heart", title: "No Favorites Yet",
-                                message: "Click the heart or press ⌘D on any Wallhaven wallpaper to keep it here.",
+                                message: "Click the heart or press ⌘D on any wallpaper in Discover to keep it here.",
                                 action: ("Browse Discover", #selector(showDiscover(_:)), self))
         case .collections:
             if let collection = selectedCollection {
@@ -1989,7 +2214,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                                     message: "Drag wallpapers onto this collection in the sidebar, or choose Add to Collection.")
             } else {
                 emptyStateView.show(symbolName: "rectangle.stack", title: "No Collections",
-                                    message: "Collections keep Wallhaven wallpapers together, and can be used for automatic rotation.",
+                                    message: "Collections keep wallpapers from Wallhaven and Openverse together, and can be used for automatic rotation.",
                                     action: ("New Collection…", #selector(createCollection(_:)), self))
             }
         }
@@ -1998,7 +2223,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func updateControlAvailability() {
         let canMutate = downloadTask == nil && rotationTask == nil
         let hasSelection = selectedItem != nil
-        setWallpaperButton.isEnabled = hasSelection && selectedScreen != nil && canMutate
+        let blocked = selectedReference?.blocksUse == true
+        setWallpaperButton.isEnabled = hasSelection && selectedScreen != nil && canMutate && !blocked
+        setWallpaperButton.toolTip = selectedReference?.useRestriction?.errorDescription
+        reviewSourceButton.isHidden = !(selectedReference.map { $0.provider == .openverse && $0.blocksUse } ?? false)
+        reviewSourceButton.toolTip = selectedReference?.useRestriction?.errorDescription
+        loadMoreButton.isHidden = !(state.discoverProvider == .openverse && hasUnloadedResults && !currentItems.isEmpty)
+        loadMoreButton.isEnabled = canLoadMoreResults
         undoButton.isEnabled = canUndoWallpaper && canMutate
         undoButton.toolTip = canUndoWallpaper ? "Undo Wallpaper Change" : "No restorable wallpaper change"
         favoriteButton.isHidden = selectedReference == nil
@@ -2022,13 +2253,14 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         rotationSummaryLabel.stringValue = rotationSummary
     }
 
-    private func friendlyMessage(for error: Error) -> String {
+    private func friendlyMessage(for error: Error, source: String? = nil) -> String {
+        let source = source ?? discoverName
         if let urlError = error as? URLError {
             switch urlError.code {
             case .notConnectedToInternet, .networkConnectionLost: return "You appear to be offline. Check your connection and try again."
-            case .timedOut: return "Wallhaven took too long to respond. Try again."
+            case .timedOut: return "\(source) took too long to respond. Try again."
             case .cancelled: return "The request was cancelled."
-            default: return "Could not reach Wallhaven. \(urlError.localizedDescription)"
+            default: return "Could not reach \(source). \(urlError.localizedDescription)"
             }
         }
         return error.localizedDescription
@@ -2059,7 +2291,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     // Saved scaling choices are never rewritten: an old saved Fill can't be told from a deliberate one.
     static let helpText = """
-        Discover searches safe-for-work wallpapers on Wallhaven. Your folder, Favorites and collections are in the sidebar.
+        Discover searches safe-for-work wallpapers on Wallhaven, or openly licensed Wikimedia Commons images on Openverse. \
+        Your folder, Favorites and collections are in the sidebar, and can mix both sources.
+
+        Openverse results are wide, large, non-mature Wikimedia Commons JPEGs reported as CC0 or public domain. Wallpier shows each \
+        one's creator, source and reported license; Openverse doesn't verify licenses, so review the source page before reuse.
 
         Select a wallpaper and press Space to preview it on your display’s shape; ← and → browse, Esc returns. \
         Set Wallpaper (Return) downloads only that original and applies it with the display and scaling shown beside it. \
@@ -2102,7 +2338,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 add("Remove from “\(collection.name)”", #selector(removeFromCollection(_:)))
             }
             menu.addItem(.separator())
-            add("Open on Wallhaven", #selector(openSourcePage(_:)))
+            if ref.provider == .openverse, !ref.licenseIsConsistent { add("Review Original Source", #selector(openSourcePage(_:))) }
+            else { add("Open on \(ref.sourceDisplayName)", #selector(openSourcePage(_:))) }
+            if ref.licenseIsConsistent { add("View License (\(ref.licenseDescription ?? ""))", #selector(openLicense(_:))) }
             add("Copy Link", #selector(copy(_:)))
         } else if selectedItem != nil {
             add("Show in Finder", #selector(openSourcePage(_:)))
@@ -2143,7 +2381,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         }
         let rotating = state.rotationInterval != .off
         switch item {
-        case .discover: return nil
+        case .discover, .openverse: return nil
         case .favorites: return nil
         case .local:
             add(state.folderPath == nil ? "Choose Folder…" : "Change Folder…", #selector(chooseFolder(_:)))
@@ -2178,7 +2416,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             return isViewerVisible || selectedItem != nil
         case #selector(makeThumbnailsLarger(_:)): return thumbnailSizeIndex < GalleryLayout.thumbnailWidths.count - 1
         case #selector(makeThumbnailsSmaller(_:)): return thumbnailSizeIndex > 0
-        case #selector(setWallpaper(_:)): return selectedItem != nil && selectedScreen != nil && canMutate
+        case #selector(setWallpaper(_:)): return selectedItem != nil && selectedScreen != nil && canMutate && selectedReference?.blocksUse != true
         case #selector(previousWallpaper(_:)): return canNavigate(-1)
         case #selector(nextWallpaper(_:)): return canNavigate(1)
         case #selector(undoWallpaperChange(_:)): return canUndoWallpaper && canMutate
@@ -2186,8 +2424,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             menuItem.title = selectedReference.map(state.isFavorite) == true ? "Remove from Favorites" : "Add to Favorites"
             return selectedReference != nil
         case #selector(openSourcePage(_:)):
-            if menuItem.keyEquivalent == "o" { menuItem.title = selectedReference == nil && selectedItem != nil ? "Show in Finder" : "Open on Wallhaven" }
+            if menuItem.keyEquivalent == "o" {
+                menuItem.title = selectedReference.map { "Open on \($0.sourceDisplayName)" } ?? (selectedItem != nil ? "Show in Finder" : "Open on \(discoverName)")
+            }
             return selectedItem != nil
+        case #selector(openLicense(_:)): return selectedReference?.licenseIsConsistent == true
+        case #selector(focusSearch(_:)): menuItem.title = "Search \(discoverName)"; return true
         case #selector(copy(_:)): return selectedItem != nil
         case #selector(addToCollection(_:)): return selectedReference != nil
         case #selector(createCollection(_:)):
@@ -2208,6 +2450,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             return shuffleButton.isEnabled
         case #selector(showRotationSettings(_:)): return window != nil
         case #selector(showDiscover(_:)): menuItem.state = state.currentSource == .discover ? .on : .off; return true
+        case #selector(showWallhaven(_:)), #selector(showOpenverse(_:)):
+            let provider: RemoteProviderID = menuItem.action == #selector(showOpenverse(_:)) ? .openverse : .wallhaven
+            menuItem.state = state.currentSource == .discover && state.discoverProvider == provider ? .on : .off; return true
         case #selector(showLocal(_:)): menuItem.state = state.currentSource == .local ? .on : .off; return true
         case #selector(showFavorites(_:)): menuItem.state = state.currentSource == .favorites ? .on : .off; return true
         case #selector(showCollections(_:)): menuItem.state = state.currentSource == .collections ? .on : .off; return true
@@ -2235,7 +2480,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 guard (item?.representedObject as? String) == represented.identifier else { return }; item?.setThumbnail(image)
             }
         case .remote(let ref):
-            remoteThumbnailProvider.requestThumbnail(for: pixels > 340 ? ref.previewURL : ref.thumbnailURL, maximumPixelSize: maximumPixelSize) { [weak item] image in
+            guard let url = ref.galleryThumbnailURL(large: pixels > 340) else { item.setThumbnail(nil); return item }
+            remoteThumbnailProvider.requestThumbnail(for: url, maximumPixelSize: maximumPixelSize) { [weak item] image in
                 guard (item?.representedObject as? String) == represented.identifier else { return }; item?.setThumbnail(image)
             }
         }
