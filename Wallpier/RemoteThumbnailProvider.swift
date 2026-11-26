@@ -17,6 +17,17 @@ class RemoteThumbnailProvider {
     private var generation = 0
     private var tasks: [String: URLSessionDataTask] = [:]
     private var completions: [String: [(NSImage?) -> Void]] = [:]
+    // CMA's CDN stalls when many thumbnail tasks run at once, so only its tasks are queued
+    // and at most a couple are ever resumed concurrently.
+    private struct PendingCMATask {
+        let key: String
+        let generation: Int
+        let priority: Int
+    }
+    private static let cmaConcurrentRequestLimit = 2
+    private static let cmaPreviewPixelSize = 1000
+    private var pendingCMATasks: [PendingCMATask] = []
+    private var activeCMACount = 0
 
     /// `memoryOnly` keeps every cached thumbnail in memory (no disk cache at all), for isolated runs.
     init(memoryOnly: Bool = false) {
@@ -47,6 +58,8 @@ class RemoteThumbnailProvider {
         let currentTasks = Array(tasks.values)
         tasks.removeAll()
         completions.removeAll()
+        pendingCMATasks.removeAll()
+        activeCMACount = 0
         lock.unlock()
         currentTasks.forEach { $0.cancel() }
         decodeQueue.cancelAllOperations()
@@ -77,13 +90,18 @@ class RemoteThumbnailProvider {
         lock.unlock()
 
         let request = Self.thumbnailRequest(for: url)
+        // Only CMA tasks go through the bounded queue; other providers keep their old behavior.
+        let isCMACDN = url.host?.lowercased() == CMAURLPolicy.imageHost
         let task = session.dataTask(with: request) { [weak self] data, response, error in
             guard let self else { return }
             self.lock.lock()
             let isCurrent = self.generation == requestGeneration
-            if isCurrent { self.tasks.removeValue(forKey: key as String) }
+            var wasActive = false
+            if isCurrent { wasActive = self.tasks.removeValue(forKey: key as String) != nil }
+            if wasActive && isCMACDN { self.activeCMACount -= 1 }
             self.lock.unlock()
             guard isCurrent else { return }
+            if wasActive && isCMACDN { self.startNextCMATasks() }
             guard error == nil,
                   let response = response as? HTTPURLResponse,
                   let data, Self.accepts(response, for: url, byteCount: data.count) else {
@@ -104,9 +122,38 @@ class RemoteThumbnailProvider {
         }
 
         lock.lock()
+        guard generation == requestGeneration else {
+            // Reset already cleared the old completions. A new request may now own this key.
+            lock.unlock()
+            task.cancel()
+            return
+        }
         tasks[key as String] = task
+        if isCMACDN {
+            // Queued suspended; a slot must free up before it resumes.
+            let priority = maximumPixelSize >= Self.cmaPreviewPixelSize ? 1 : 0
+            pendingCMATasks.append(PendingCMATask(key: key as String, generation: requestGeneration, priority: priority))
+        } else {
+            task.resume()
+        }
         lock.unlock()
-        task.resume()
+        if isCMACDN { startNextCMATasks() }
+    }
+
+    /// Resumes queued CMA tasks, highest priority first, while a concurrency slot is free.
+    private func startNextCMATasks() {
+        lock.lock()
+        defer { lock.unlock() }
+        while activeCMACount < Self.cmaConcurrentRequestLimit, !pendingCMATasks.isEmpty {
+            var next = 0
+            for index in 1..<pendingCMATasks.count where pendingCMATasks[index].priority > pendingCMATasks[next].priority {
+                next = index
+            }
+            let pending = pendingCMATasks.remove(at: next)
+            guard let task = tasks[pending.key], generation == pending.generation else { continue }
+            activeCMACount += 1
+            task.resume()
+        }
     }
 
     private func finish(key: NSString, generation: Int, result: (image: NSImage, cost: Int)?) {
@@ -133,6 +180,8 @@ class RemoteThumbnailProvider {
         } else {
             request.setValue("Wallpier/0.2", forHTTPHeaderField: "User-Agent")
         }
+        // CMA's CDN can be slow to first byte; queued tasks stay suspended until a slot frees.
+        if url.host?.lowercased() == CMAURLPolicy.imageHost { request.timeoutInterval = 30 }
         return request
     }
 

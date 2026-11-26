@@ -6833,7 +6833,7 @@ final class CMAFakeNetwork: NetworkClient, @unchecked Sendable {
         let url = request.url!
         let key = Self.key(for: url)
         record("api:\(key)", url)
-        lock.lock(); let found = routes[key]; lock.unlock()
+        let found = lock.withLock { routes[key] }
         let route = found ?? Route(status: 404, body: Data(#"{"error":"Not found"}"#.utf8))
         return (route.body, HTTPURLResponse(url: route.finalURL ?? url, statusCode: route.status, httpVersion: "HTTP/1.1", headerFields: route.headers)!)
     }
@@ -6843,7 +6843,7 @@ final class CMAFakeNetwork: NetworkClient, @unchecked Sendable {
         record("media:\(url.absoluteString)", url)
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("wallpier-cma-\(UUID().uuidString).jpg")
         try media.body.write(to: file)
-        lock.lock(); recordedTemporaries.append(file); lock.unlock()
+        lock.withLock { recordedTemporaries.append(file) }
         return (file, HTTPURLResponse(url: media.finalURL ?? url, statusCode: media.status, httpVersion: "HTTP/1.1", headerFields: media.headers)!)
     }
 
@@ -7813,8 +7813,10 @@ extension WallpierTests {
         }
 
         // Isolation: memory-only HTTP caches apart from the app's, memory-only thumbnails, a private defaults suite,
-        // temporary state/cache/history folders, and the recording wallpaper service. Other providers are offline.
+        // temporary state/cache/history folders, and the recording wallpaper service. Wallhaven is offline;
+        // Cleveland's API and Openverse run live through their own ephemeral sessions.
         let cmaClient = URLSessionNetworkClient.isolated(allowsRedirect: CMAURLPolicy.allowsRedirect)
+        let openverseClient = URLSessionNetworkClient.isolated(allowsRedirect: OpenverseURLPolicy.allowsRedirect)
         let provider = CMAProvider(client: cmaClient)
         let suite = "com.parth.Wallpier.live-test.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -7825,11 +7827,15 @@ extension WallpierTests {
         let prior = root.appendingPathComponent("prior.png")
         try writeTestImage(to: prior); desktop.current = prior
         let (controller, window) = makeCaptureController(
-            root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua, cma: cmaClient, desktop: desktop,
+            root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua, openverse: openverseClient, cma: cmaClient, desktop: desktop,
             thumbnails: RemoteThumbnailProvider(memoryOnly: true), defaults: defaults) { state in
             state.favorites = []; state.collections = []; state.selectedCollectionID = nil; state.currentSource = .favorites
         }
-        defer { controller.creatorTaskForTesting?.cancel(); window.close() }
+        defer {
+            controller.creatorTaskForTesting?.cancel(); controller.searchTask?.cancel()
+            controller.detailTask?.cancel(); controller.undoValidationTask?.cancel()
+            window.close()
+        }
 
         // A real Discover search for Hokusai, through the controller.
         controller.showCMA(nil)
@@ -7847,6 +7853,7 @@ extension WallpierTests {
         XCTAssertEqual(anchor.cmaCreditName, "Katsushika Hokusai")
         let thumbnailsLoaded = await eventually(30) { (controller.collectionView.item(at: IndexPath(item: anchorIndex, section: 0)) as? WallpaperCollectionViewItem)?.hasThumbnail == true }
         note("real thumbnail drawn in the grid: \(thumbnailsLoaded)")
+        XCTAssertTrue(thumbnailsLoaded, "The selected live artwork displays a thumbnail")
         captureWindow(window, named: "cma-01-discover-hokusai")
 
         controller.moreByButton.performClick(nil)
@@ -7889,6 +7896,7 @@ extension WallpierTests {
         await wait(controller.downloadTask, seconds: 180)
         XCTAssertEqual(desktop.calls.count, 1, controller.statusLabel.stringValue)
         let applied = try XCTUnwrap(desktop.calls.first?.image)
+        XCTAssertEqual(desktop.calls[0].scaling, .fit, "The recording service captured the scaling mode")
         let source = try XCTUnwrap(CGImageSourceCreateWithURL(applied as CFURL, nil))
         let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
         let width = properties[kCGImagePropertyPixelWidth] as? Int ?? 0, height = properties[kCGImagePropertyPixelHeight] as? Int ?? 0
@@ -7920,6 +7928,7 @@ extension WallpierTests {
         note("favorites saved: \(saved.favorites.map(\.identityKey))")
         XCTAssertTrue(saved.favorites.contains { $0.identityKey == target.identityKey })
         controller.closeCreator(nil)
+        controller.showFavorites(nil)
 
         let relaunchWindow = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 1120, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                       backing: .buffered, defer: false)
@@ -7944,5 +7953,118 @@ extension WallpierTests {
         XCTAssertEqual(link, target.sourcePageURL)
         XCTAssertTrue(attribution.string.contains("Cleveland Museum of Art"))
         captureWindow(relaunchWindow, named: "cma-05-relaunch")
+
+        // A live browse-only report: Kara Walker's copyrighted record straight from the production API.
+        // What the museum's own rights state allows is exactly one action — viewing it there — so the row
+        // is text only: no thumbnail URL, no preview, no Set, no Favorite, no service write, no invented license.
+        let serviceWritesBefore = desktop.calls.count
+        controller.searchField.stringValue = "Kara Walker"
+        controller.search(nil)
+        var walkerFound = await eventually(60) { controller.visibleItemIdentitiesForTesting.contains("cma:287051") }
+        for _ in 0..<3 where !walkerFound { controller.loadMoreResults(nil); walkerFound = await eventually(60) { controller.visibleItemIdentitiesForTesting.contains("cma:287051") } }
+        note("typed search \"Kara Walker\": \(controller.visibleItemIdentitiesForTesting.count) rows; notice: \(controller.cmaNoticeLabel.stringValue)")
+        guard walkerFound else {
+            note("observed rows: \(controller.visibleItemIdentitiesForTesting.joined(separator: ", "))")
+            return XCTFail("Record 287051 was not in the live Kara Walker search results")
+        }
+        let walkerIndex = try XCTUnwrap(controller.visibleItemIdentitiesForTesting.firstIndex(of: "cma:287051"),
+                                        "cma:287051 was not in the live results: \(controller.visibleItemIdentitiesForTesting)")
+        selectCMAItem(walkerIndex, in: controller)
+        XCTAssertEqual(controller.selectedIdentityForTesting, "cma:287051", "Selection is closed-loop")
+        let walker = try XCTUnwrap(controller.selectedReferenceForTesting)
+        XCTAssertEqual(walker.identityKey, "cma:287051"); XCTAssertEqual(walker.provider, .cma)
+        XCTAssertEqual(walker.cmaKind, .metadataOnly, "The live record still has no usable image")
+        XCTAssertTrue(walker.isCMABrowseOnly); XCTAssertEqual(walker.useRestriction, .browseOnly)
+        XCTAssertFalse(walker.cma?.isCC0 ?? true, "A browse-only record never gains an invented license")
+        XCTAssertNil(walker.remotePreview); XCTAssertNil(walker.galleryThumbnailURL(large: true))
+        XCTAssertEqual(walker.originalURL, walker.sourcePageURL, "A text row's media URLs are the inert record page, never an image")
+        XCTAssertTrue(CMAURLPolicy.isAllowedPageURL(walker.sourcePageURL), "\(walker.sourcePageURL)")
+        let walkerRow = try XCTUnwrap(controller.collectionView(controller.collectionView, itemForRepresentedObjectAt: IndexPath(item: walkerIndex, section: 0)) as? WallpaperCollectionViewItem)
+        XCTAssertFalse(walkerRow.hasThumbnail, "A text row never draws or requests an image")
+        let walkerCaption = walkerRow.captionText
+        note("browse-only row \(walkerIndex): \"\(walkerCaption.replacingOccurrences(of: "\n", with: " / "))\" · summary \"\(controller.selectionLabel.stringValue)\" · page \(walker.sourcePageURL)")
+        XCTAssertTrue(walkerCaption.contains(walker.cmaCreditName), walkerCaption)
+        XCTAssertTrue(walkerCaption.contains("View on Cleveland Museum of Art ↗"), walkerCaption)
+        XCTAssertTrue(controller.selectionLabel.stringValue.contains("View on Cleveland Museum of Art"), controller.selectionLabel.stringValue)
+        XCTAssertFalse(controller.selectionLabel.stringValue.contains("CC0"), controller.selectionLabel.stringValue)
+        XCTAssertFalse(controller.setWallpaperButton.isEnabled)
+        XCTAssertTrue(controller.favoriteButton.isHidden); XCTAssertFalse(controller.viewOnMuseumButton.isHidden)
+        XCTAssertTrue(controller.moreByButton.isHidden, "A browse-only record offers no creator pivot")
+        controller.toggleFavorite(nil)
+        XCTAssertFalse(controller.state.favorites.contains { $0.identityKey == walker.identityKey }, "A browse-only record is never favorited")
+        controller.toggleViewer(nil)
+        XCTAssertFalse(controller.isViewerVisible, "A browse-only record has no desktop preview")
+        controller.setWallpaper(nil)
+        XCTAssertNil(controller.downloadTask, "Set is refused before any download")
+        XCTAssertEqual(desktop.calls.count, serviceWritesBefore, "No recording-service write for a browse-only record")
+        // The one action, captured without launching anything: a fake click through the injected opener.
+        var opened: [URL] = []
+        controller.urlOpenerForTesting = { opened.append($0) }
+        controller.viewOnMuseumButton.performClick(nil)
+        XCTAssertEqual(try XCTUnwrap(opened.first), walker.sourcePageURL, "The click opens exactly the museum's own record page")
+        XCTAssertEqual(try XCTUnwrap(opened.first), walker.cmaPageURL)
+        XCTAssertTrue(opened.allSatisfy { CMAURLPolicy.isAllowedPageURL($0) })
+        captureWindow(window, named: "cma-06-browse-only")
+
+        // The live Openverse walk on the same controller: its injected client is now live. The record is the
+        // documented first result of this typed search; the stored title keeps the source's markup and only
+        // the display layer cleans it.
+        controller.showOpenverse(nil)
+        controller.searchField.stringValue = "Entry of Alexander the Great into Babylon"
+        controller.search(nil)
+        let liveID = "openverse:811e7030-bcad-4c4a-b497-30f892cc2d24"
+        var triumphFound = await eventually(60) { controller.visibleItemIdentitiesForTesting.contains(liveID) }
+        for _ in 0..<3 where !triumphFound { controller.loadMoreResults(nil); triumphFound = await eventually(60) { controller.visibleItemIdentitiesForTesting.contains(liveID) } }
+        note("typed Openverse search: \(controller.visibleItemIdentitiesForTesting.count) rows; notice: \(controller.openverseNoticeLabel.stringValue)")
+        guard triumphFound else {
+            note("observed rows: \(controller.visibleItemIdentitiesForTesting.joined(separator: ", "))")
+            return XCTFail("The live Openverse record was not returned for the typed search; the API may be unavailable")
+        }
+        let triumphIndex = try XCTUnwrap(controller.visibleItemIdentitiesForTesting.firstIndex(of: liveID),
+                                         "openverse:811e7030-bcad-4c4a-b497-30f892cc2d24 was not in the live results: \(controller.visibleItemIdentitiesForTesting)")
+        selectCMAItem(triumphIndex, in: controller)
+        XCTAssertEqual(controller.selectedIdentityForTesting, liveID, "Selection is closed-loop")
+        let triumph = try XCTUnwrap(controller.selectedReferenceForTesting)
+        XCTAssertEqual(triumph.identityKey, liveID); XCTAssertEqual(triumph.provider, .openverse)
+        XCTAssertEqual(triumph.sourceName, "wikimedia"); XCTAssertEqual(triumph.sourceDisplayName, "Wikimedia Commons")
+        XCTAssertEqual(triumph.license, "cc0"); XCTAssertEqual(triumph.licenseVersion, "1.0")
+        XCTAssertTrue(triumph.licenseIsConsistent, "\(String(describing: triumph.licenseURL))"); XCTAssertNil(triumph.useRestriction)
+        let rawTitle = try XCTUnwrap(triumph.title, "The record keeps the source's own title")
+        note("raw source title: \"\(rawTitle)\"")
+        XCTAssertTrue(rawTitle.contains("<i>"), "The stored title keeps the source's markup: \(rawTitle)")
+        XCTAssertTrue(rawTitle.contains("</i>"), rawTitle)
+        XCTAssertTrue(rawTitle.contains("Entry of Alexander the Great into Babylon"), rawTitle)
+        XCTAssertEqual(triumph.displayTitle, "Entry of Alexander the Great into Babylon, or The Triumph of Alexander")
+        XCTAssertEqual(triumph.displayCreator, "after Charles Le Brun")
+        XCTAssertEqual(triumph.displayCredit, "after Charles Le Brun", "A credit that carries its own qualifier is never re-prefixed with “by”")
+        let triumphRow = try XCTUnwrap(controller.collectionView(controller.collectionView, itemForRepresentedObjectAt: IndexPath(item: triumphIndex, section: 0)) as? WallpaperCollectionViewItem)
+        XCTAssertEqual(triumphRow.view.accessibilityLabel(), triumph.displayTitle, "The visible row shows the cleaned title")
+        let thumbnailDrawn = await eventually(30) {
+            (controller.collectionView.item(at: IndexPath(item: triumphIndex, section: 0)) as? WallpaperCollectionViewItem)?.hasThumbnail == true
+        }
+        note("real thumbnail drawn in the grid: \(thumbnailDrawn)")
+        XCTAssertTrue(thumbnailDrawn, "A real thumbnail is decoded for the live record")
+        captureWindow(window, named: "cma-07-openverse-discover")
+
+        controller.toggleViewer(nil)
+        let staged = await eventually(30) { controller.stageView.image != nil }
+        XCTAssertTrue(staged, "The rendered preview draws the real thumbnail")
+        XCTAssertEqual(controller.previewTitleLabel.stringValue, "Entry of Alexander the Great into Babylon, or The Triumph of Alexander")
+        XCTAssertTrue(controller.previewMetadataLabel.stringValue.contains("after Charles Le Brun"), controller.previewMetadataLabel.stringValue)
+        let triumphAttribution = controller.previewAttributionLabel.attributedStringValue
+        func attributionLink(_ fragment: String) -> URL? {
+            let range = (triumphAttribution.string as NSString).range(of: fragment)
+            guard range.location != NSNotFound else { return nil }
+            return triumphAttribution.attribute(.link, at: range.location, effectiveRange: nil) as? URL
+        }
+        XCTAssertEqual(try XCTUnwrap(attributionLink("CC0 1.0"), "No license link in “\(triumphAttribution.string)”"), triumph.licenseURL)
+        XCTAssertEqual(try XCTUnwrap(attributionLink("Source: Wikimedia Commons"), "No source link in “\(triumphAttribution.string)”"), triumph.sourcePageURL)
+        XCTAssertTrue(triumphAttribution.string.contains("as reported"), triumphAttribution.string)
+        XCTAssertTrue(controller.previewAcknowledgementLabel.stringValue.contains("Powered by Openverse; not endorsed by Openverse"))
+        XCTAssertTrue(controller.setWallpaperButton.isEnabled, "CC0 as reported stays settable")
+        XCTAssertTrue(controller.reviewSourceButton.isHidden, "A consistent license is never flagged for review")
+        XCTAssertTrue(controller.selectionLabel.stringValue.contains("CC0 1.0"), controller.selectionLabel.stringValue)
+        note("openverse attribution: \"\(triumphAttribution.string)\" · metadata \"\(controller.previewMetadataLabel.stringValue)\" · page \(triumph.sourcePageURL) · license \(triumph.licenseDescription ?? "none")")
+        captureWindow(window, named: "cma-07-openverse")
     }
 }
