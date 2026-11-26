@@ -1,8 +1,8 @@
 import AppKit
 
 enum SidebarItem: Equatable {
-    /// `discover` is Wallhaven's Discover; `openverse` is Openverse's.
-    case discover, openverse, local, favorites
+    /// `discover` is Wallhaven's Discover; `openverse` is Openverse's; `cma` is the Cleveland Museum of Art's.
+    case discover, openverse, cma, local, favorites
     case collection(UUID)
 }
 

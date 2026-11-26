@@ -66,6 +66,10 @@ final class GalleryLayout: NSCollectionViewFlowLayout {
 /// default button (Set Wallpaper, with its own enabled-state guard) receives them.
 final class GalleryCollectionView: NSCollectionView {
     var onActivate: (() -> Void)?
+    /// Double-click; falls back to `onActivate` when unset.
+    var onOpen: (() -> Void)?
+    /// Esc: returns whether it was handled (a creator view going back); unhandled Esc continues as before.
+    var onCancel: (() -> Bool)?
     var onDelete: (() -> Void)?
     var contextMenu: (() -> NSMenu?)?
     /// True while arrow keys and Space act on the gallery (first responder in the key window);
@@ -105,6 +109,7 @@ final class GalleryCollectionView: NSCollectionView {
     override func keyDown(with event: NSEvent) {
         let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
         if plain, event.keyCode == 36 || event.keyCode == 76 { return nextResponder?.keyDown(with: event) ?? super.keyDown(with: event) }  // Return, Enter
+        if plain, event.keyCode == 53, onCancel?() == true { return }   // Esc
         switch (event.charactersIgnoringModifiers ?? "", plain) {
         case (" ", true): onActivate?()
         case ("\u{7f}", true), ("\u{f728}", true): onDelete?()   // Delete, Forward Delete
@@ -114,7 +119,7 @@ final class GalleryCollectionView: NSCollectionView {
 
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
-        if event.clickCount == 2, indexPathForItem(at: convert(event.locationInWindow, from: nil)) != nil { onActivate?() }
+        if event.clickCount == 2, indexPathForItem(at: convert(event.locationInWindow, from: nil)) != nil { (onOpen ?? onActivate)?() }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

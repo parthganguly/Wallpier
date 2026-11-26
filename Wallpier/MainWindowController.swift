@@ -27,23 +27,56 @@ private final class SearchField: NSSearchField {
 private enum DiscoverQuery: Equatable {
     case wallhaven(WallhavenSearchOptions)
     case openverse(OpenverseSearchOptions)
+    case cma(CMASearchOptions)
 
-    var provider: RemoteProviderID { if case .openverse = self { return .openverse }; return .wallhaven }
+    var provider: RemoteProviderID {
+        switch self { case .wallhaven: return .wallhaven; case .openverse: return .openverse; case .cma: return .cma }
+    }
     /// The search field's text for this source, as typed.
     var queryText: String {
-        switch self { case .wallhaven(let o): return o.query; case .openverse(let o): return o.query }
+        switch self { case .wallhaven(let o): return o.query; case .openverse(let o): return o.query; case .cma(let o): return o.query }
     }
     var trimmedQuery: String { queryText.trimmingCharacters(in: .whitespacesAndNewlines) }
     var resultsDescription: String {
-        switch self { case .wallhaven(let o): return o.resultsDescription; case .openverse(let o): return o.resultsDescription }
+        switch self {
+        case .wallhaven(let o): return o.resultsDescription
+        case .openverse(let o): return o.resultsDescription
+        case .cma(let o): return o.resultsDescription
+        }
     }
     var minimumResolution: String? { if case .wallhaven(let o) = self { return o.minimumResolution }; return nil }
     var firstPageURL: URL {
         switch self {
         case .wallhaven(let o): return WallhavenEndpoint.searchURL(options: o, page: 1)
         case .openverse(let o): return OpenverseEndpoint.searchURL(options: o, page: 1)
+        case .cma(let o): return CMAEndpoint.searchURL(options: o, page: 1)
         }
     }
+}
+
+/// One level of navigation over a source: a Cleveland Museum of Art creator's works, shown in place of the gallery
+/// that opened it. Back (or Esc) restores that gallery, its scroll position, selection and focus.
+private struct CreatorLevel {
+    enum Phase: Equatable { case loading, loaded, failed(String) }
+
+    /// The source view that opened it (Discover's CMA, Favorites, a collection): parked with it when the source changes.
+    let originKey: String
+    let creatorID: Int
+    var name: String
+    let anchorIdentity: String
+    let anchorPageURL: URL?
+    let parentScrollY: CGFloat
+    var results: [WallpaperReference] = []
+    var selectedIdentity: String?
+    var scrollY: CGFloat = 0
+    var phase: Phase = .loading
+    var matchTotal: Int?
+    var returnedCount = 0
+
+    /// Every shown work is explicit CC0, so "Open-access works" is true of the whole view.
+    var allOpenAccess: Bool { results.allSatisfy { $0.cma?.isCC0 == true } }
+    var isTruncated: Bool { (matchTotal ?? 0) > returnedCount }
+    var cacheKey: String { "cma:\(creatorID)" }
 }
 
 @MainActor
@@ -69,14 +102,20 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             case .remote(let ref): return ref.displayTitle
             }
         }
+        /// A museum work shown for browsing only (no preview, Set, Favorite or collection).
+        var isBrowseOnly: Bool {
+            if case .remote(let ref) = self { return ref.isCMABrowseOnly }
+            return false
+        }
         /// Also the gallery cell's accessibility help, so VoiceOver hears more than an opaque ID.
         var toolTip: String {
             switch self {
             case .local(let url): return url.path
             case .remote(let ref):
+                if ref.provider == .cma { return ref.cmaToolTip }
                 let base = "\(ref.providerName) \(ref.displayTitle) — \(ref.width) × \(ref.height), \(ref.orientation)"
                 guard ref.provider == .openverse else { return base }
-                let credits = [ref.uploader.map { "by \($0)" }, "\(ref.licenseDescription ?? "license not reported") via \(ref.sourceDisplayName)"]
+                let credits = [ref.displayCredit, "\(ref.licenseDescription ?? "license not reported") via \(ref.sourceDisplayName)"]
                 return ([base] + credits.compactMap { $0 }).joined(separator: " · ")
             }
         }
@@ -88,6 +127,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private let remoteThumbnailProvider: RemoteThumbnailProvider
     private let provider: WallhavenProvider
     private let openverseProvider: OpenverseProvider
+    private let cmaProvider: CMAProvider
+    /// Where the thumbnail-size preference lives; isolated runs pass their own suite.
+    private let defaults: UserDefaults
     private let originalCache: RemoteWallpaperCache
     private let historyStore: WallpaperHistoryStore
     private let availableScreens: () -> [NSScreen]
@@ -126,6 +168,14 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         var selectedIdentity: String?
     }
     private var parkedSessions: [RemoteProviderID: DiscoverSession] = [:]
+    /// The visible creator view, if any; it replaces the gallery's items without touching the results beneath it.
+    private var creatorLevel: CreatorLevel?
+    /// Creator views left behind by a source change, restored when their source returns.
+    private var parkedCreators: [String: CreatorLevel] = [:]
+    /// Loaded creator results for this session, by provider and creator ID; Retry clears an entry.
+    private var creatorCache: [String: CMACreatorPage] = [:]
+    private var creatorTask: Task<Void, Never>?
+    private var creatorGeneration = UUID()
     private var lastAppendFailure: Date?
     /// After a failed page, further pages wait this long; Next is re-enabled when it ends.
     private let appendRetryCooldown: TimeInterval = 5
@@ -138,7 +188,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private var loadingMoreStatus: String { "Loading more results from \(discoverName)…" }
     private var discoverName: String { state.discoverProvider.displayName }
     private var draftQuery: DiscoverQuery {
-        state.discoverProvider == .openverse ? .openverse(state.openverseSearch) : .wallhaven(state.wallhavenSearch)
+        switch state.discoverProvider {
+        case .wallhaven: return .wallhaven(state.wallhavenSearch)
+        case .openverse: return .openverse(state.openverseSearch)
+        case .cma: return .cma(state.cmaSearch)
+        }
     }
     /// Closing the preview, by any path, cancels its pending detail request so reopening can ask again.
     private(set) var isViewerVisible = false { didSet { if oldValue && !isViewerVisible { endPreviewSession() } } }
@@ -168,6 +222,22 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     let loadMoreButton = NSButton(title: "Load More", target: nil, action: nil)
     /// Shown for an Openverse work whose reported license can't be confirmed: Set is refused until the source is reviewed.
     let reviewSourceButton = NSButton(title: "Review Original Source", target: nil, action: nil)
+    /// Cleveland Museum of Art: what the source is, shown whenever its results are.
+    let cmaNoticeLabel = NSTextField(labelWithString: "Open-access (CC0) works from the Cleveland Museum of Art.")
+    /// Opens the selected work's credited creator, one level deep, in place of the gallery.
+    let moreByButton = NSButton(title: "More by", target: nil, action: nil)
+    /// The museum's own page for a work that can only be browsed.
+    let viewOnMuseumButton = NSButton(title: "View on Cleveland Museum of Art ↗", target: nil, action: nil)
+    /// Beside the confirmation after a museum work is set.
+    let statusUndoButton = NSButton(title: "Undo", target: nil, action: nil)
+    // The creator view's header: Back, the creator's name, what the works are, and a truthful count with a link.
+    let creatorBar = NSStackView()
+    let creatorBackButton = NSButton(title: "← Gallery", target: nil, action: nil)
+    let creatorTitleLabel = NSTextField(labelWithString: "")
+    let creatorSubtitleLabel = NSTextField(labelWithString: "")
+    let creatorStatusLabel = NSTextField(labelWithString: "")
+    /// Opens the artwork page the creator view started from; the museum's record, not a catalog of the creator.
+    let creatorLinkButton = NSButton(title: "View starting work on Cleveland Museum of Art ↗", target: nil, action: nil)
     private let scopeBar = NSStackView()
     private lazy var scopeBarCollapsed = scopeBar.heightAnchor.constraint(equalToConstant: 0)
     private var statusClearTask: Task<Void, Never>?
@@ -235,6 +305,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         view.setDraggingSourceOperationMask(.copy, forLocal: false)
         view.setAccessibilityLabel("Wallpapers")
         view.onActivate = { [weak self] in self?.setViewerVisible(true) }
+        // Double-clicking a work that can only be browsed opens its museum page: its one action.
+        view.onOpen = { [weak self] in
+            guard let self else { return }
+            if selectedItem?.isBrowseOnly == true { openSourcePage(nil) } else { setViewerVisible(true) }
+        }
+        view.onCancel = { [weak self] in self?.handleEscape() ?? false }
         view.onDelete = { [weak self] in self?.removeSelected(nil) }
         view.contextMenu = { [weak self] in self?.itemMenu() }
         return view
@@ -242,13 +318,16 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     // Inject before any state restoration, search, or rotation can start.
     init(window: NSWindow?, wallpaperService: WallpaperService, stateStore: WallpaperStateStore,
-         provider: WallhavenProvider, openverseProvider: OpenverseProvider = OpenverseProvider(), originalCache: RemoteWallpaperCache,
+         provider: WallhavenProvider, openverseProvider: OpenverseProvider = OpenverseProvider(),
+         cmaProvider: CMAProvider = CMAProvider(), originalCache: RemoteWallpaperCache,
          historyStore: WallpaperHistoryStore, remoteThumbnailProvider: RemoteThumbnailProvider,
-         availableScreens: @escaping () -> [NSScreen]) {
+         availableScreens: @escaping () -> [NSScreen], defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         self.wallpaperService = wallpaperService
         self.stateStore = stateStore
         self.provider = provider
         self.openverseProvider = openverseProvider
+        self.cmaProvider = cmaProvider
         self.originalCache = originalCache
         self.historyStore = historyStore
         self.remoteThumbnailProvider = remoteThumbnailProvider
@@ -311,6 +390,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         undoValidationTask?.cancel()
         statusClearTask?.cancel()
         appendRetryTask?.cancel()
+        creatorTask?.cancel()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -380,6 +460,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         setWallpaperButton.setAccessibilityHelp("Downloads the original if needed and sets it on the selected display")
         configureSymbolButton(favoriteButton, symbol: "heart", label: "Favorite", action: #selector(toggleFavorite(_:)))
         configureSymbolButton(moreButton, symbol: "ellipsis.circle", label: "More Actions", action: #selector(showMoreMenu(_:)))
+        configureCreatorControls()
 
         rotationPopUp.addItems(withTitles: RotationInterval.allCases.map(rotationTitle))
         rotationPopUp.target = self; rotationPopUp.action = #selector(rotationSelectionChanged)
@@ -400,7 +481,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         configureToolbarButton(undoButton, symbol: "arrow.uturn.backward", label: "Undo Wallpaper Change", action: #selector(undoWallpaperChange(_:)))
         undoButton.isEnabled = false
 
-        let width = UserDefaults.standard.object(forKey: "GalleryThumbnailSize") as? Int ?? 1
+        let width = defaults.object(forKey: "GalleryThumbnailSize") as? Int ?? 1
         galleryLayout.targetWidth = GalleryLayout.thumbnailWidths[GalleryLayout.thumbnailWidths.indices.contains(width) ? width : 1]
     }
 
@@ -464,7 +545,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         loadMoreButton.toolTip = "Load the next page of Openverse results"
         reviewSourceButton.toolTip = selectedReference?.useRestriction?.errorDescription
         loadMoreButton.isHidden = true
-        discoverBar.setViews([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp, openverseLicensePopUp, openverseNoticeLabel], in: .leading)
+        discoverBar.setViews([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp, openverseLicensePopUp, openverseNoticeLabel, cmaNoticeLabel], in: .leading)
         pendingSearchLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         pendingSearchLabel.textColor = .secondaryLabelColor
         pendingSearchLabel.lineBreakMode = .byTruncatingTail
@@ -491,13 +572,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         localBar.setViews([changeFolder], in: .trailing)
         localBar.spacing = 6
         let scopeSeparator = NSBox(); scopeSeparator.boxType = .separator
-        let scopeRows = NSStackView(views: [discoverBar, localBar])
+        let scopeRows = NSStackView(views: [discoverBar, localBar, creatorBar])
         scopeRows.orientation = .vertical
         scopeRows.edgeInsets = NSEdgeInsets(top: 7, left: 14, bottom: 7, right: 14)
         scopeBar.setViews([scopeRows, scopeSeparator], in: .top)
         scopeBar.orientation = .vertical
         scopeBar.spacing = 0
-        [discoverBar, localBar].forEach { $0.widthAnchor.constraint(equalTo: scopeRows.widthAnchor, constant: -28).isActive = true }
+        [discoverBar, localBar, creatorBar].forEach { $0.widthAnchor.constraint(equalTo: scopeRows.widthAnchor, constant: -28).isActive = true }
         [scopeRows, scopeSeparator].forEach { $0.widthAnchor.constraint(equalTo: scopeBar.widthAnchor).isActive = true }
 
         // Gallery, desktop preview and empty state share one area; only one is visible.
@@ -647,13 +728,16 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         setWallpaperButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 118).isActive = true
         // The heart and ⋯ keep one place whatever the selection's name or status line, so they never
         // shift while browsing; a wider gap separates them from the three controls that apply.
-        applyBar.setViews([busyIndicator, text], in: .leading)
+        applyBar.setViews([busyIndicator, text, statusUndoButton], in: .leading)
         reviewSourceButton.target = self; reviewSourceButton.action = #selector(openSourcePage(_:))
         reviewSourceButton.controlSize = .small
         reviewSourceButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         reviewSourceButton.toolTip = "Openverse’s reported license for this image is missing or doesn’t match its license link. Review the original source; Wallpier won’t set it."
         reviewSourceButton.isHidden = true
-        applyBar.setViews([reviewSourceButton, favoriteButton, moreButton, displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
+        applyBar.setViews([moreByButton, viewOnMuseumButton, reviewSourceButton, favoriteButton, moreButton, displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
+        // Between the two, a narrow window gives up these shortcuts first; the same actions are in the ⋯ menu.
+        applyBar.setVisibilityPriority(.detachOnlyIfNecessary, for: moreByButton)
+        applyBar.setVisibilityPriority(.detachOnlyIfNecessary, for: viewOnMuseumButton)
         applyBar.setCustomSpacing(4, after: favoriteButton)
         applyBar.setCustomSpacing(14, after: moreButton)
         applyBar.spacing = 8
@@ -721,6 +805,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private var currentItems: [BrowserItem] {
+        // A creator view replaces whatever source opened it; every reload, selection and count reads this.
+        if let creatorLevel { return creatorLevel.results.map(BrowserItem.remote) }
         switch state.currentSource {
         case .discover: return remoteResults.map(BrowserItem.remote)
         case .local: return localURLs.map(BrowserItem.local)
@@ -764,6 +850,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     @objc func showDiscover(_ sender: Any?) { selectSource(.discover) }
     @objc func showWallhaven(_ sender: Any?) { showDiscover(provider: .wallhaven) }
     @objc func showOpenverse(_ sender: Any?) { showDiscover(provider: .openverse) }
+    @objc func showCMA(_ sender: Any?) { showDiscover(provider: .cma) }
 
     /// Switches Discover's source. The other source's results, pages and failure are kept aside, untouched,
     /// and any request still running for it is cancelled by `selectSource`, so no result crosses sources.
@@ -772,7 +859,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             parkedSessions[state.discoverProvider] = DiscoverSession(
                 results: remoteResults, currentPage: currentPage, lastPage: lastPage, total: totalResults, hidden: hiddenResults,
                 options: resultOptions, errorText: searchErrorText,
-                selectedIdentity: state.currentSource == .discover ? selectedReference?.identityKey : nil)
+                selectedIdentity: state.currentSource == .discover ? (creatorLevel?.anchorIdentity ?? selectedReference?.identityKey) : nil)
             let next = parkedSessions.removeValue(forKey: provider) ?? DiscoverSession()
             state.discoverProvider = provider
             remoteResults = next.results
@@ -786,9 +873,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func configureSearchField() {
-        let openverse = state.discoverProvider == .openverse
         searchField.placeholderString = "Search \(discoverName)"
-        searchField.setAccessibilityHelp(openverse ? "Searches openly licensed Wikimedia Commons images on Openverse" : "Searches safe-for-work wallpapers on Wallhaven")
+        switch state.discoverProvider {
+        case .wallhaven: searchField.setAccessibilityHelp("Searches safe-for-work wallpapers on Wallhaven")
+        case .openverse: searchField.setAccessibilityHelp("Searches openly licensed Wikimedia Commons images on Openverse")
+        case .cma: searchField.setAccessibilityHelp("Searches open-access works at the Cleveland Museum of Art")
+        }
         searchField.toolTip = "Search \(discoverName) (⌘F). Results appear in Discover."
     }
     @objc func showLocal(_ sender: Any?) { selectSource(.local) }
@@ -799,6 +889,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch item {
         case .discover: showDiscover(provider: .wallhaven)
         case .openverse: showDiscover(provider: .openverse)
+        case .cma: showDiscover(provider: .cma)
         case .local: selectSource(.local)
         case .favorites: selectSource(.favorites)
         case .collection(let id): state.selectedCollectionID = id; selectSource(.collections)
@@ -815,14 +906,21 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         pendingAdvance = nil
         remoteThumbnailProvider.reset(); cancelDetails()
         isViewerVisible = false
+        reconcileCreatorLevel()
         updateSourceUI()
-        if state.currentSource == .discover && remoteResults.isEmpty { performSearch(page: 1, appending: false) }
+        if state.currentSource == .discover && remoteResults.isEmpty && creatorLevel == nil { performSearch(page: 1, appending: false) }
         else { reloadCurrentSource() }
+        if let scroll = pendingCreatorScroll { pendingCreatorScroll = nil; restoreScroll(scroll) }
     }
 
     private var currentSidebarItem: SidebarItem? {
         switch state.currentSource {
-        case .discover: return state.discoverProvider == .openverse ? .openverse : .discover
+        case .discover:
+            switch state.discoverProvider {
+            case .wallhaven: return .discover
+            case .openverse: return .openverse
+            case .cma: return .cma
+            }
         case .local: return .local
         case .favorites: return .favorites
         case .collections: return selectedCollection.map { .collection($0.id) }
@@ -845,14 +943,17 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     @objc func search(_ sender: Any?) {
         isViewerVisible = false
         if state.currentSource != .discover {
-            state.currentSource = .discover; updateSourceUI()
+            state.currentSource = .discover; reconcileCreatorLevel()
         }
+        // A new search replaces the results a creator view was opened from.
+        dropCreatorLevel()
+        updateSourceUI()
         persistSearchOptions(); performSearch(page: 1, appending: false)
     }
 
     @objc private func searchOptionChanged(_ sender: Any?) {
         persistSearchOptions()
-        if state.currentSource == .discover { isViewerVisible = false; performSearch(page: 1, appending: false) } else { invalidateSearch() }
+        if state.currentSource == .discover { isViewerVisible = false; dropCreatorLevel(); updateSourceUI(); performSearch(page: 1, appending: false) } else { invalidateSearch() }
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -874,8 +975,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func persistSearchOptions() {
-        if state.discoverProvider == .openverse { state.openverseSearch.query = searchField.stringValue }
-        else { state.wallhavenSearch.query = searchField.stringValue }
+        switch state.discoverProvider {
+        case .wallhaven: state.wallhavenSearch.query = searchField.stringValue
+        case .openverse: state.openverseSearch.query = searchField.stringValue
+        case .cma: state.cmaSearch.query = searchField.stringValue
+        }
         if OpenverseLicenseFilter.allCases.indices.contains(openverseLicensePopUp.indexOfSelectedItem) { state.openverseSearch.license = OpenverseLicenseFilter.allCases[openverseLicensePopUp.indexOfSelectedItem] }
         if WallhavenCategory.allCases.indices.contains(categoryPopUp.indexOfSelectedItem) { state.wallhavenSearch.category = WallhavenCategory.allCases[categoryPopUp.indexOfSelectedItem] }
         if WallhavenAspectRatio.allCases.indices.contains(aspectPopUp.indexOfSelectedItem) { state.wallhavenSearch.aspectRatio = WallhavenAspectRatio.allCases[aspectPopUp.indexOfSelectedItem] }
@@ -935,6 +1039,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 switch query {
                 case .wallhaven(let options): result = try await provider.search(options: options, page: page)
                 case .openverse(let options): result = try await openverseProvider.search(options: options, page: page)
+                case .cma(let options): result = try await cmaProvider.search(options: options, page: page)
                 }
                 try Task.checkCancellation()
                 guard searchGeneration == generation, state.currentSource == .discover, state.discoverProvider == query.provider else { return }
@@ -995,7 +1100,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     /// Loads the next Discover page when the user nears the end of the grid. A failed page waits
     /// a few seconds before scrolling can retry it, so an outage never turns into a request loop.
     /// Discover has result pages that aren't loaded yet: the loaded results aren't the whole set.
-    private var hasUnloadedResults: Bool { state.currentSource == .discover && currentPage < lastPage }
+    private var hasUnloadedResults: Bool { state.currentSource == .discover && creatorLevel == nil && currentPage < lastPage }
     private var canLoadMoreResults: Bool {
         hasUnloadedResults && !isSearching && Date().timeIntervalSince(lastAppendFailure ?? .distantPast) > appendRetryCooldown
     }
@@ -1012,6 +1117,246 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         guard canLoadMoreResults else { NSSound.beep(); return }
         performSearch(page: currentPage + 1, appending: true)
     }
+
+    // MARK: - Creator view (Cleveland Museum of Art)
+
+    private var pendingCreatorScroll: CGFloat?
+
+    private func configureCreatorControls() {
+        let small = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        cmaNoticeLabel.font = small
+        cmaNoticeLabel.textColor = .secondaryText
+        cmaNoticeLabel.lineBreakMode = .byTruncatingTail
+        cmaNoticeLabel.toolTip = "Works the Cleveland Museum of Art has released as CC0 open access. Each work credits its maker and links to the museum’s own page."
+
+        for button in [moreByButton, viewOnMuseumButton, creatorLinkButton] {
+            button.controlSize = .small
+            button.font = small
+            button.lineBreakMode = .byTruncatingTail
+            button.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
+            button.widthAnchor.constraint(lessThanOrEqualToConstant: 230).isActive = true
+        }
+        moreByButton.target = self; moreByButton.action = #selector(showCreator(_:))
+        moreByButton.isHidden = true
+        viewOnMuseumButton.target = self; viewOnMuseumButton.action = #selector(openSourcePage(_:))
+        viewOnMuseumButton.setAccessibilityLabel("View on Cleveland Museum of Art")
+        viewOnMuseumButton.setAccessibilityRole(.link)
+        viewOnMuseumButton.isHidden = true
+        creatorLinkButton.target = self; creatorLinkButton.action = #selector(openCreatorLink(_:))
+        creatorLinkButton.setAccessibilityLabel("View the starting work on the Cleveland Museum of Art website")
+        creatorLinkButton.setAccessibilityRole(.link)
+        creatorLinkButton.isHidden = true
+
+        statusUndoButton.isBordered = false
+        statusUndoButton.font = small
+        statusUndoButton.contentTintColor = .controlAccentColor
+        statusUndoButton.target = self; statusUndoButton.action = #selector(undoWallpaperChange(_:))
+        statusUndoButton.setAccessibilityLabel("Undo Wallpaper Change")
+        statusUndoButton.isHidden = true
+
+        creatorBackButton.controlSize = .small
+        creatorBackButton.font = small
+        creatorBackButton.bezelStyle = .rounded
+        creatorBackButton.target = self; creatorBackButton.action = #selector(closeCreator(_:))
+        creatorBackButton.toolTip = "Back to Gallery (Esc)"
+        creatorBackButton.setAccessibilityLabel("Back to Gallery")
+        creatorTitleLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        creatorTitleLabel.lineBreakMode = .byTruncatingTail
+        creatorTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        creatorSubtitleLabel.font = small
+        creatorSubtitleLabel.textColor = .secondaryText
+        creatorSubtitleLabel.lineBreakMode = .byTruncatingTail
+        creatorSubtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        creatorStatusLabel.font = small
+        creatorStatusLabel.textColor = .secondaryText
+        creatorStatusLabel.lineBreakMode = .byTruncatingTail
+        creatorStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        creatorStatusLabel.isHidden = true
+        creatorBar.setViews([creatorBackButton, creatorTitleLabel, creatorSubtitleLabel], in: .leading)
+        creatorBar.setViews([creatorStatusLabel, creatorLinkButton], in: .trailing)
+        creatorBar.spacing = 8
+        creatorBar.setAccessibilityLabel("Creator")
+        creatorBar.isHidden = true
+    }
+
+    /// What the page's "More by" opens: the creator the selected work credits plainly, from the work's own record.
+    private var pivotCreator: (id: Int, name: String)? {
+        // Works that can only be linked to have no “More by”: that action is for works the app can show and keep.
+        guard creatorLevel == nil, let reference = selectedReference, !reference.isCMABrowseOnly else { return nil }
+        return reference.cmaPivot
+    }
+
+    private var originKey: String {
+        switch state.currentSource {
+        case .discover: return "discover:\(state.discoverProvider.rawValue)"
+        case .local: return "local"
+        case .favorites: return "favorites"
+        case .collections: return "collection:\(state.selectedCollectionID?.uuidString ?? "")"
+        }
+    }
+
+    @objc func showCreator(_ sender: Any?) {
+        guard let reference = selectedReference, let creator = pivotCreator else { NSSound.beep(); return }
+        openCreator(id: creator.id, name: creator.name, from: reference)
+    }
+
+    /// One level only: the view replaces the gallery's items, leaving the results beneath it untouched.
+    /// A creator already loaded this session opens from memory; otherwise it costs one detail and one search request.
+    func openCreator(id: Int, name: String, from anchor: WallpaperReference) {
+        guard creatorLevel == nil else { return }
+        isViewerVisible = false
+        // The results beneath must not change while the creator view covers them.
+        searchTask?.cancel(); searchGeneration = UUID(); searchTask = nil; isSearching = false; pendingAdvance = nil
+        var level = CreatorLevel(originKey: originKey, creatorID: id, name: name, anchorIdentity: anchor.identityKey,
+                                 anchorPageURL: anchor.cmaPageURL, parentScrollY: galleryScroll.contentView.bounds.origin.y)
+        if let cached = creatorCache[level.cacheKey] { apply(cached, to: &level) }
+        creatorLevel = level
+        state.selectedRemoteIdentity = level.results.first?.identityKey
+        updateSourceUI()
+        reloadCurrentSource()
+        restoreScroll(0)
+        if level.phase == .loading { loadCreator(id) }
+        window?.makeFirstResponder(collectionView)
+        showStatus("", isError: false)
+    }
+
+    private func apply(_ page: CMACreatorPage, to level: inout CreatorLevel) {
+        level.name = page.name
+        level.results = page.works.filter { $0.identityKey != level.anchorIdentity }
+        level.matchTotal = page.matchTotal
+        level.returnedCount = page.returnedCount
+        level.phase = .loaded
+    }
+
+    private func loadCreator(_ id: Int) {
+        creatorTask?.cancel()
+        let generation = UUID()
+        creatorGeneration = generation
+        creatorTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let page = try await cmaProvider.creatorWorks(id: id)
+                try Task.checkCancellation()
+                guard creatorGeneration == generation, var level = creatorLevel, level.creatorID == id else { return }
+                creatorCache["cma:\(id)"] = page
+                apply(page, to: &level)
+                creatorLevel = level
+                state.selectedRemoteIdentity = level.results.first?.identityKey
+                updateSourceUI(); reloadCurrentSource()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, creatorGeneration == generation, var level = creatorLevel, level.creatorID == id else { return }
+                level.phase = .failed(friendlyMessage(for: error, source: RemoteProviderID.cma.displayName))
+                creatorLevel = level
+                updateSourceUI(); updateEmptyAndPagination(); updateControlAvailability()
+            }
+        }
+    }
+
+    /// Retry clears the cached entry and asks again.
+    @objc func retryCreator(_ sender: Any?) {
+        guard var level = creatorLevel else { return }
+        creatorCache.removeValue(forKey: level.cacheKey)
+        level.phase = .loading
+        level.results = []
+        creatorLevel = level
+        updateSourceUI(); reloadCurrentSource()
+        loadCreator(level.creatorID)
+    }
+
+    /// Back to the gallery that opened the creator view: its scroll position, its selection (the work the user
+    /// started from) and keyboard focus on the gallery.
+    @objc func closeCreator(_ sender: Any?) {
+        guard let level = creatorLevel else { return }
+        creatorTask?.cancel(); creatorGeneration = UUID()
+        isViewerVisible = false
+        creatorLevel = nil
+        state.selectedRemoteIdentity = level.anchorIdentity
+        updateSourceUI()
+        reloadCurrentSource()
+        restoreScroll(level.parentScrollY)
+        window?.makeFirstResponder(collectionView)
+    }
+
+    /// Esc, when nothing else owns it: leaves the creator view. The preview's own Esc is unchanged.
+    private func handleEscape() -> Bool {
+        guard creatorLevel != nil else { return false }
+        closeCreator(nil)
+        return true
+    }
+
+    private func dropCreatorLevel() {
+        creatorTask?.cancel(); creatorGeneration = UUID()
+        creatorLevel = nil
+        parkedCreators.removeValue(forKey: originKey)
+    }
+
+    /// A source change parks the visible creator view with its source; coming back restores it, with its results,
+    /// selection and scroll. A creator still loading when parked loads again on return.
+    private func reconcileCreatorLevel() {
+        let key = originKey
+        if var level = creatorLevel, level.originKey != key {
+            level.scrollY = galleryScroll.contentView.bounds.origin.y
+            creatorTask?.cancel(); creatorGeneration = UUID()
+            parkedCreators[level.originKey] = level
+            creatorLevel = nil
+        }
+        guard creatorLevel == nil, var restored = parkedCreators.removeValue(forKey: key) else { return }
+        if restored.phase == .loading, let cached = creatorCache[restored.cacheKey] { apply(cached, to: &restored) }
+        creatorLevel = restored
+        if let identity = restored.selectedIdentity { state.selectedRemoteIdentity = identity }
+        pendingCreatorScroll = restored.scrollY
+        if restored.phase == .loading { loadCreator(restored.creatorID) }
+    }
+
+    private func restoreScroll(_ y: CGFloat) {
+        collectionView.layoutSubtreeIfNeeded()
+        let maximum = max(0, collectionView.frame.height - galleryScroll.contentView.bounds.height)
+        galleryScroll.contentView.scroll(to: NSPoint(x: 0, y: min(max(0, y), maximum)))
+        galleryScroll.reflectScrolledClipView(galleryScroll.contentView)
+    }
+
+    @objc func openCreatorLink(_ sender: Any?) {
+        guard let url = creatorLevel?.anchorPageURL, CMAURLPolicy.isAllowedPageURL(url) else { NSSound.beep(); return }
+        urlOpener(url)
+    }
+
+    /// Opens a link in the user's browser; tests replace it so activating a link never launches one.
+    private var urlOpener: (URL) -> Void = { _ = NSWorkspace.shared.open($0) }
+
+    private func updateCreatorBar() {
+        guard let level = creatorLevel else { creatorBar.isHidden = true; return }
+        creatorTitleLabel.stringValue = level.name
+        creatorTitleLabel.toolTip = level.name
+        switch level.phase {
+        case .loaded: creatorSubtitleLabel.stringValue = level.allOpenAccess ? "Cleveland Museum of Art · Open-access works" : "Works at Cleveland Museum of Art"
+        case .loading, .failed: creatorSubtitleLabel.stringValue = "Cleveland Museum of Art"
+        }
+        // The count is of this one bounded search page, not of every work the museum holds; say so.
+        let status: String
+        if level.phase == .loaded, level.isTruncated, let total = level.matchTotal {
+            status = "Showing \(level.results.count.formatted()) works from the first \(level.returnedCount.formatted()) of \(total.formatted()) matches"
+        } else {
+            status = ""
+        }
+        creatorStatusLabel.stringValue = status
+        creatorStatusLabel.toolTip = status.isEmpty ? nil : status
+        creatorStatusLabel.isHidden = status.isEmpty
+        creatorLinkButton.isHidden = status.isEmpty || level.anchorPageURL == nil
+    }
+
+#if DEBUG
+    var isShowingCreatorViewForTesting: Bool { creatorLevel != nil }
+    var visibleItemIdentitiesForTesting: [String] { currentItems.map(\.identifier) }
+    var parkedCreatorCountForTesting: Int { parkedCreators.count }
+    var selectedIdentityForTesting: String? { selectedItem?.identifier }
+    var creatorTaskForTesting: Task<Void, Never>? { creatorTask }
+    var creatorCacheKeysForTesting: Set<String> { Set(creatorCache.keys) }
+    var selectedReferenceForTesting: WallpaperReference? { selectedReference }
+    var urlOpenerForTesting: (URL) -> Void { get { urlOpener } set { urlOpener = newValue } }
+    func creatorWorkForTesting(_ identity: String) -> WallpaperReference? { creatorLevel?.results.first { $0.identityKey == identity } }
+#endif
 
     // MARK: - Local folder
 
@@ -1077,7 +1422,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 await applyWallpaper(url, to: screen, scaling: scaling, source: .user)
             }
             updateControlAvailability()
-        case .remote(let ref): downloadAndSet(ref, screen: screen, source: .user)
+        case .remote(let ref):
+            // A museum work that can only be browsed is refused before anything is requested or cached.
+            if ref.provider == .cma, let restriction = ref.useRestriction {
+                showStatus(restriction.errorDescription ?? "This work can’t be set.", isError: true); NSSound.beep(); return
+            }
+            downloadAndSet(ref, screen: screen, source: .user)
         }
     }
 
@@ -1085,14 +1435,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         guard downloadTask == nil else { return }
         let scaling = selectedScalingMode
         setWallpaperButton.isEnabled = false
-        showStatus("Preparing the full-resolution original…", isError: false)
+        showStatus(reference.provider == .cma ? "Downloading high-resolution museum JPEG…" : "Preparing the full-resolution original…", isError: false)
+        let confirmation = reference.provider == .cma ? "Set on \(screen.localizedName) · High-resolution museum JPEG (CC0)" : nil
         downloadTask = Task { [weak self] in
             guard let self else { return }
             defer { downloadTask = nil; updateControlAvailability() }
             do {
                 let url = try await historyStore.retain(try await localOriginal(for: reference))
                 try Task.checkCancellation()
-                await applyWallpaper(url, to: screen, scaling: scaling, source: source)
+                await applyWallpaper(url, to: screen, scaling: scaling, source: source, confirmation: confirmation)
             } catch is CancellationError {
                 return
             } catch {
@@ -1110,25 +1461,38 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         if let cached = try await originalCache.cachedURL(for: reference, accepting: Self.originalCheck(for: reference)) {
             updateReference(reference, cachedPath: cached.path); showOriginalIfSelected(reference, at: cached); return cached
         }
-        showStatus("Downloading the \(reference.resolution) original from \(reference.sourceDisplayName)…", isError: false)
+        showStatus(reference.provider == .cma ? "Downloading high-resolution museum JPEG…"
+                   : "Downloading the \(reference.resolution) original from \(reference.sourceDisplayName)…", isError: false)
         let temporary: URL
+        // The museum's record is refreshed first; the refreshed record is what the download is checked against.
+        var current = reference
         switch reference.provider {
         case .openverse?: temporary = try await openverseProvider.downloadOriginal(for: reference)
         case .wallhaven?: temporary = try await provider.downloadOriginal(for: reference)
+        case .cma?:
+            let result = try await cmaProvider.downloadPrint(for: reference)
+            temporary = result.file
+            current = result.reference
+            current.cachedLocalPath = reference.cachedLocalPath
         case nil: throw RemoteProviderError.unsupportedProvider
         }
         defer { try? FileManager.default.removeItem(at: temporary) }
         try Task.checkCancellation()
-        let installed = try await originalCache.installDownloadedFile(temporary, for: reference, protectedPaths: currentProtectedPaths(),
-                                                                      accepting: Self.originalCheck(for: reference))
-        updateReference(reference, cachedPath: installed.path)
-        showOriginalIfSelected(reference, at: installed)
+        let installed = try await originalCache.installDownloadedFile(temporary, for: current, protectedPaths: currentProtectedPaths(),
+                                                                      accepting: Self.originalCheck(for: current))
+        updateReference(current, cachedPath: installed.path)
+        showOriginalIfSelected(current, at: installed)
         return installed
     }
 
-    /// Openverse cache files must still be the exact reported original; Wallhaven keeps the cache's own check.
+    /// Openverse cache files must still be the exact reported original, and CMA files the validated print JPEG;
+    /// Wallhaven keeps the cache's own check.
     private static func originalCheck(for reference: WallpaperReference) -> ((URL) -> Bool)? {
-        reference.provider == .openverse ? { OpenverseProvider.isFaithfulOriginal(at: $0, for: reference) } : nil
+        switch reference.provider {
+        case .openverse?: return { OpenverseProvider.isFaithfulOriginal(at: $0, for: reference) }
+        case .cma?: return { CMAProvider.isFaithfulPrint(at: $0, for: reference) }
+        case .wallhaven?, nil: return nil
+        }
     }
 
     private func updateReference(_ reference: WallpaperReference, cachedPath: String? = nil) {
@@ -1139,6 +1503,18 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         updated.cachedLocalPath = cachedPath ?? existing?.cachedLocalPath ?? reference.cachedLocalPath
         if let cachedPath { updated.cachedLocalPath = cachedPath }
         if let index = remoteResults.firstIndex(where: { $0.identityKey == updated.identityKey }) { remoteResults[index] = updated }
+        if let index = creatorLevel?.results.firstIndex(where: { $0.identityKey == updated.identityKey }) { creatorLevel?.results[index] = updated }
+        for (key, level) in parkedCreators {
+            guard let index = level.results.firstIndex(where: { $0.identityKey == updated.identityKey }) else { continue }
+            parkedCreators[key]?.results[index] = updated
+        }
+        for (key, page) in creatorCache where page.works.contains(where: { $0.identityKey == updated.identityKey }) {
+            creatorCache[key] = CMACreatorPage(
+                creatorID: page.creatorID, name: page.name,
+                works: page.works.map { $0.identityKey == updated.identityKey ? updated : $0 },
+                matchTotal: page.matchTotal, returnedCount: page.returnedCount, hiddenCount: page.hiddenCount,
+                excluded: page.excluded, stubIDs: page.stubIDs)
+        }
         state.favorites = state.favorites.map { $0.identityKey == updated.identityKey ? updated : $0 }
         state.collections = state.collections.map { collection in
             let mapped = collection.wallpapers.map { $0.identityKey == updated.identityKey ? updated : $0 }
@@ -1147,7 +1523,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         stateStore.save(state)
     }
 
-    private func applyWallpaper(_ imageURL: URL, to screen: NSScreen, scaling: ScalingMode, source: SetSource) async {
+    private func applyWallpaper(_ imageURL: URL, to screen: NSScreen, scaling: ScalingMode, source: SetSource, confirmation: String? = nil) async {
         let displayID = identifier(for: screen); let displayName = description(for: screen)
         // Prefer the current public OS assignment over possibly stale persisted state.
         let prior = systemAssignment(for: screen, displayID: displayID, displayName: displayName) ?? state.assignment(for: displayID)
@@ -1166,7 +1542,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             state.setAssignment(replacement)
             let saved = stateStore.save(state)
             let undoNote = prior == nil || entry?.undoUnavailableReason != nil ? " Undo unavailable for this change." : ""
-            showStatus(String(format: "Set %@ on %@ in %.1f ms.", imageURL.lastPathComponent, screen.localizedName, result.elapsedTime * 1_000) + undoNote, isError: false)
+            if let confirmation {
+                // A museum work says what was set, with Undo beside it while the change can be undone.
+                showStatus(confirmation + undoNote, isError: false, offersUndo: undoNote.isEmpty)
+            } else {
+                showStatus(String(format: "Set %@ on %@ in %.1f ms.", imageURL.lastPathComponent, screen.localizedName, result.elapsedTime * 1_000) + undoNote, isError: false)
+            }
             logger.info("Set \(imageURL.lastPathComponent, privacy: .public) on \(displayName, privacy: .public)")
             refreshUndoAvailability()
             if saved { await cleanupRollbackFiles() }
@@ -1202,8 +1583,18 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     /// Where Previous (−1) or Next (+1) leads. Complete sources wrap around; Discover doesn't while more results
     /// remain on Wallhaven, since wrapping would present the loaded pages as the whole result set.
     private func navigationIndex(_ direction: Int) -> Int? {
-        guard let next = WallpaperNavigation.index(after: selectedIndex, direction: direction, count: currentItems.count),
+        guard var next = WallpaperNavigation.index(after: selectedIndex, direction: direction, count: currentItems.count),
               next != selectedIndex else { return nil }
+        // The preview skips works that can only be browsed: they have nothing to draw.
+        if isViewerVisible {
+            let items = currentItems
+            var steps = 0
+            while items[next].isBrowseOnly {
+                guard steps < items.count, let following = WallpaperNavigation.index(after: next, direction: direction, count: items.count) else { return nil }
+                next = following; steps += 1
+            }
+            if next == selectedIndex { return nil }
+        }
         if hasUnloadedResults, let current = selectedIndex, direction > 0 ? next < current : next > current { return nil }
         return next
     }
@@ -1276,7 +1667,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         selectionRevision += 1
         switch item {
         case .local(let url): state.selectedImagePath = url.path
-        case .remote(let ref): state.selectedRemoteIdentity = ref.identityKey
+        case .remote(let ref):
+            state.selectedRemoteIdentity = ref.identityKey
+            if creatorLevel != nil { creatorLevel?.selectedIdentity = ref.identityKey }
         }
         stateStore.save(state)
     }
@@ -1339,6 +1732,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     /// Draws the selected wallpaper on the stage and fetches the details the preview shows. Only while
     /// the preview is visible: the gallery shows neither, so browsing it costs no requests.
     private func loadPreviewContent(for item: BrowserItem) {
+        // A museum work without a verified print has no preview: no thumbnail, cached copy or detail request.
+        if case .remote(let ref) = item, ref.provider == .cma, ref.useRestriction != nil { stageView.placeholder = .unavailable; return }
         if stageView.image == nil { stageView.placeholder = .loading }
         switch item {
         case .local(let url): loadLocalPreview(url, identity: item.identifier, cancelsPrevious: true)
@@ -1429,22 +1824,26 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func configureRemoteMetadata(_ reference: WallpaperReference) {
-        let parts = [WallpaperShape.summary(width: reference.width, height: reference.height), reference.uploader.map { "by \($0)" },
+        // A museum work's credit is in the attribution line; its caption gives the date instead.
+        let credit = reference.provider == .cma ? reference.cmaDateText : reference.displayCredit
+        let parts = [WallpaperShape.summary(width: reference.width, height: reference.height), credit,
                      reference.cachedLocalPath == nil ? nil : "Original downloaded"]
         previewMetadataLabel.stringValue = parts.compactMap { $0 }.joined(separator: " · ")
         let openverse = reference.provider == .openverse
-        previewTagsLabel.stringValue = reference.tags.isEmpty ? (openverse ? "" : "Wallhaven · SFW") : reference.tags.joined(separator: " · ")
+        let museum = reference.provider == .cma
+        previewTagsLabel.stringValue = reference.tags.isEmpty ? (openverse || museum ? "" : "Wallhaven · SFW") : reference.tags.joined(separator: " · ")
         previewTagsLabel.isHidden = previewTagsLabel.stringValue.isEmpty
-        previewAttributionLabel.attributedStringValue = Self.attribution(for: reference) ?? NSAttributedString()
-        previewAttributionLabel.isHidden = !openverse
+        let attribution = Self.attribution(for: reference, creatorID: creatorLevel?.creatorID)
+        previewAttributionLabel.attributedStringValue = attribution ?? NSAttributedString()
+        previewAttributionLabel.isHidden = attribution == nil
         previewAcknowledgementLabel.isHidden = !openverse
         updateSelectionSummary()
     }
 
     /// Reported license (linked when a license URL was reported), the source page, and Openverse's acknowledgement.
     /// Never fills in a license the source didn't report.
-    static func attribution(for reference: WallpaperReference) -> NSAttributedString? {
-        guard reference.provider == .openverse else { return nil }
+    static func attribution(for reference: WallpaperReference, creatorID: Int? = nil) -> NSAttributedString? {
+        guard reference.provider == .openverse || reference.provider == .cma else { return nil }
         let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center; paragraph.lineBreakMode = .byTruncatingTail
         let text = NSMutableAttributedString()
         func add(_ string: String, link: URL? = nil) {
@@ -1452,6 +1851,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                                                              .foregroundColor: NSColor.secondaryText, .paragraphStyle: paragraph]
             if let link { attributes[.link] = link }
             text.append(NSAttributedString(string: string, attributes: attributes))
+        }
+        if reference.provider == .cma {
+            // "Katsushika Hokusai · Cleveland Museum of Art · CC0": the museum is the link, to the record's own page.
+            add("\(reference.cmaCredit(preferring: creatorID)) · ")
+            add("Cleveland Museum of Art", link: reference.cmaPageURL)
+            if reference.cma?.isCC0 == true { add(" · CC0") }
+            return text
         }
         if reference.licenseIsConsistent {
             add("\(reference.licenseDescription ?? "") as reported", link: reference.licenseURL)
@@ -1467,7 +1873,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     /// Uploader and tags, and the uncropped thumbnail older references lack, come from the API. Requested
     /// once per selected wallpaper, after a short dwell, and a throttled API only leaves them missing.
     private func fetchDetailsIfNeeded(for reference: WallpaperReference) {
-        guard reference.provider != nil,
+        // A museum work's record is complete as listed; its detail is only refreshed when a new download needs it.
+        guard reference.provider != nil, reference.provider != .cma,
               reference.uploader == nil || reference.tags.isEmpty || reference.remotePreview?.fidelity == .croppedThumbnail,
               detailIdentity != reference.identityKey else { return }
         detailTask?.cancel()
@@ -1480,7 +1887,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 switch reference.provider {
                 case .openverse?: detailed = try await openverseProvider.fetchDetails(for: reference)
                 case .wallhaven?: detailed = try await provider.fetchDetails(for: reference)
-                case nil: return
+                case .cma?, nil: return
                 }
                 try Task.checkCancellation(); updateReference(detailed)
                 guard let current = selectedReference, current.identityKey == detailed.identityKey else { return }
@@ -1504,8 +1911,17 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         case .local(let url)?: title = url.deletingPathExtension().lastPathComponent; detail = url.pathExtension.uppercased()
         case .remote(let ref)?:
             title = ref.displayTitle
-            detail = ([WallpaperShape.summary(width: ref.width, height: ref.height)] + (ref.provider == .openverse ? [ref.licenseIsConsistent ? ref.licenseDescription ?? "" : "License unconfirmed"] : []))
-                .joined(separator: " · ")
+            if ref.provider == .cma {
+                let provenance = ref.cmaProvenance(preferring: creatorLevel?.creatorID)
+                switch ref.cmaKind {
+                case .thumbnailOnly?: detail = [provenance, "No high-resolution JPEG"].joined(separator: " · ")
+                case .metadataOnly?, nil: detail = [provenance, "View on Cleveland Museum of Art"].joined(separator: " · ")
+                case .settable?: detail = provenance
+                }
+            } else {
+                detail = ([WallpaperShape.summary(width: ref.width, height: ref.height)] + (ref.provider == .openverse ? [ref.licenseIsConsistent ? ref.licenseDescription ?? "" : "License unconfirmed"] : []))
+                    .joined(separator: " · ")
+            }
         }
         let text = NSMutableAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium),
@@ -1532,6 +1948,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     private func setViewerVisible(_ visible: Bool) {
         guard !visible || selectedItem != nil else { viewModeControl.selectedSegment = 0; NSSound.beep(); return }
+        // A work that can only be browsed has no desktop preview; say why rather than showing an empty stage.
+        if visible, let reference = selectedReference, reference.isCMABrowseOnly {
+            viewModeControl.selectedSegment = 0; NSSound.beep()
+            showStatus(reference.cmaKind == .thumbnailOnly ? "No high-resolution JPEG, so there’s no desktop preview. View it on the Cleveland Museum of Art instead."
+                       : "No image to preview. View it on the Cleveland Museum of Art instead.", isError: false)
+            return
+        }
         guard visible != isViewerVisible else { return }
         isViewerVisible = visible
         updateContentVisibility(animated: true)
@@ -1575,7 +1998,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let index = thumbnailSizeIndex + step
         guard GalleryLayout.thumbnailWidths.indices.contains(index) else { NSSound.beep(); return }
         galleryLayout.targetWidth = GalleryLayout.thumbnailWidths[index]
-        UserDefaults.standard.set(index, forKey: "GalleryThumbnailSize")
+        defaults.set(index, forKey: "GalleryThumbnailSize")
         collectionView.reloadData()
         if let index = selectedIndex {
             collectionView.selectionIndexPaths = [IndexPath(item: index, section: 0)]
@@ -1586,7 +2009,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     // MARK: - Favorites and collections
 
     @objc func toggleFavorite(_ sender: Any?) {
-        guard let ref = selectedReference else { return }
+        guard let ref = selectedReference, !ref.isCMABrowseOnly else { return }
         if let index = state.favorites.firstIndex(where: { $0.identityKey == ref.identityKey }) {
             return setMembership(ref, in: .favorites, at: index, member: false)
         }
@@ -1594,7 +2017,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     @objc func addToCollection(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? UUID, let ref = selectedReference,
+        guard let id = sender.representedObject as? UUID, let ref = selectedReference, !ref.isCMABrowseOnly,
               let collection = state.collections.first(where: { $0.id == id }) else { return }
         setMembership(ref, in: .collection(id), at: collection.wallpapers.count, member: true, addition: true)
     }
@@ -1661,8 +2084,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     /// Adds dropped wallpapers (by identity) to Favorites or a collection.
     private func collect(_ identities: [String], into target: SidebarItem) -> Bool {
-        let known = remoteResults + state.favorites + state.collections.flatMap(\.wallpapers)
-        let references = identities.compactMap { identity in known.first { $0.identityKey == identity } }
+        let known = remoteResults + (creatorLevel?.results ?? []) + state.favorites + state.collections.flatMap(\.wallpapers)
+        let references = identities.compactMap { identity in known.first { $0.identityKey == identity } }.filter { !$0.isCMABrowseOnly }
         guard !references.isEmpty else { return false }
         let list: MemberList, name: String, members: [WallpaperReference]
         switch target {
@@ -1689,7 +2112,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch selectedItem {
         case .remote(let ref)?:
             guard let url = browsableSourceURL(ref) else { NSSound.beep(); showStatus("This wallpaper’s source page isn’t on a known host for its source.", isError: true); return }
-            NSWorkspace.shared.open(url)
+            urlOpener(url)
         case .local(let url)?: NSWorkspace.shared.activateFileViewerSelecting([url])
         case nil: NSSound.beep()
         }
@@ -1700,6 +2123,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch ref.provider {
         case .wallhaven?: return ref.sourcePageURL
         case .openverse?: return OpenverseURLPolicy.isAllowedLandingURL(ref.sourcePageURL, source: ref.sourceName) ? ref.sourcePageURL : nil
+        case .cma?: return ref.cmaPageURL
         case nil: return nil
         }
     }
@@ -1722,7 +2146,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     @objc func createCollection(_ sender: Any?) {
         // From an item's menu, the new collection starts with that wallpaper.
-        let adding = (sender as? NSMenuItem)?.representedObject as? String == "withSelection" ? selectedReference : nil
+        let adding = (sender as? NSMenuItem)?.representedObject as? String == "withSelection" ? selectedReference.flatMap { ref -> WallpaperReference? in ref.isCMABrowseOnly ? nil : ref } : nil
         promptForCollectionName(title: "New Collection", initialValue: "") { [weak self] name in
             guard let self, !name.isEmpty else { return }
             let collection = WallpaperCollection(name: name)
@@ -1791,7 +2215,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let folderName = state.folderPath.map { URL(fileURLWithPath: $0).lastPathComponent }
         let discover = [
             SidebarNode(.discover, title: RemoteProviderID.wallhaven.displayName, symbolName: "globe"),
-            SidebarNode(.openverse, title: RemoteProviderID.openverse.displayName, symbolName: "camera")
+            SidebarNode(.openverse, title: RemoteProviderID.openverse.displayName, symbolName: "camera"),
+            SidebarNode(.cma, title: RemoteProviderID.cma.displayName, symbolName: "building.columns")
         ]
         let library = [
             SidebarNode(.local, title: folderName ?? "Folder", symbolName: "folder",
@@ -2096,12 +2521,21 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     /// Filters and the folder bar act on the gallery's results; the preview inspects one wallpaper, so they step aside.
     private func updateScopeBar() {
-        let openverse = state.discoverProvider == .openverse
-        [categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp].forEach { $0.isHidden = openverse }
-        [openverseLicensePopUp, openverseNoticeLabel].forEach { $0.isHidden = !openverse }
-        discoverBar.isHidden = state.currentSource != .discover
-        localBar.isHidden = state.currentSource != .local || state.folderPath == nil
-        scopeBar.isHidden = (discoverBar.isHidden && localBar.isHidden) || !viewerView.isHidden
+        let source = state.discoverProvider
+        [categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp].forEach { $0.isHidden = source != .wallhaven }
+        [openverseLicensePopUp, openverseNoticeLabel].forEach { $0.isHidden = source != .openverse }
+        cmaNoticeLabel.isHidden = source != .cma
+        // Blank browsing lists open-access works with images; typed text searches all public records.
+        cmaNoticeLabel.stringValue = state.cmaSearch.trimmedQuery.isEmpty
+            ? "Open-access (CC0) works with images from the Cleveland Museum of Art."
+            : "Public records from the Cleveland Museum of Art. Only open-access works with images can be previewed or set."
+        // The creator view's header stands in for the bar of whatever it covers.
+        updateCreatorBar()
+        let creatorShown = creatorLevel != nil
+        discoverBar.isHidden = state.currentSource != .discover || creatorShown
+        localBar.isHidden = state.currentSource != .local || state.folderPath == nil || creatorShown
+        creatorBar.isHidden = !creatorShown
+        scopeBar.isHidden = (discoverBar.isHidden && localBar.isHidden && creatorBar.isHidden) || !viewerView.isHidden
         scopeBarCollapsed.isActive = scopeBar.isHidden
     }
 
@@ -2122,6 +2556,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func updateWindowTitle() {
         updatePendingSearch()
         guard let window else { return }
+        if let level = creatorLevel {
+            window.title = level.name
+            window.subtitle = level.phase == .loaded && !level.allOpenAccess ? "Works at Cleveland Museum of Art" : "Cleveland Museum of Art · Open-access works"
+            return
+        }
         let count = currentItems.count
         let wallpapers = count == 1 ? "1 wallpaper" : "\(count.formatted()) wallpapers"
         switch state.currentSource {
@@ -2155,15 +2594,32 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         pendingSearchLabel.toolTip = note.map { "\($0). Press Return in the search field or click Update Results to search with the current settings." }
         pendingSearchLabel.isHidden = note == nil
         updateResultsButton.isHidden = note == nil
-        updateResultsButton.toolTip = draft.trimmedQuery.isEmpty
-            ? (draft.provider == .openverse ? "Show Wikimedia Commons images on Openverse" : "Show \(wallhaven.effectiveSorting.displayName) on Wallhaven")
-            : "Search \(discoverName) for “\(draft.trimmedQuery)”"
+        let emptyQueryTip: String
+        switch draft.provider {
+        case .wallhaven: emptyQueryTip = "Show \(wallhaven.effectiveSorting.displayName) on Wallhaven"
+        case .openverse: emptyQueryTip = "Show Wikimedia Commons images on Openverse"
+        case .cma: emptyQueryTip = "Show open-access works at the Cleveland Museum of Art"
+        }
+        updateResultsButton.toolTip = draft.trimmedQuery.isEmpty ? emptyQueryTip : "Search \(discoverName) for “\(draft.trimmedQuery)”"
     }
 
     private func updateEmptyAndPagination() {
         updateWindowTitle()
         defer { updateContentVisibility() }
         guard currentItems.isEmpty else { emptyStateView.isHidden = true; return }
+        if let level = creatorLevel {
+            let museum = RemoteProviderID.cma.displayName
+            switch level.phase {
+            case .loading:
+                emptyStateView.show(symbolName: nil, title: "Loading open-access works from \(museum)…", message: "")
+            case .failed(let message):
+                emptyStateView.show(symbolName: "exclamationmark.triangle", title: "Couldn’t load works from \(museum).", message: message,
+                                    action: ("Retry", #selector(retryCreator(_:)), self))
+            case .loaded:
+                emptyStateView.show(symbolName: "photo.on.rectangle", title: "No other open-access works available in \(museum).", message: "")
+            }
+            return
+        }
         switch state.currentSource {
         case .discover:
             if isSearching {
@@ -2174,9 +2630,18 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                                     title: "Couldn’t Load Wallpapers", message: searchErrorText,
                                     action: ("Try Again", #selector(search(_:)), self))
             } else if resultOptions == nil || resultOptions != draftQuery {
-                emptyStateView.show(symbolName: "magnifyingglass", title: "Search \(discoverName)",
-                                    message: state.discoverProvider == .openverse ? "Press Return in the search field to find openly licensed Wikimedia Commons images."
-                                        : "Press Return in the search field to see safe-for-work wallpapers.")
+                let prompt: String
+                switch state.discoverProvider {
+                case .wallhaven: prompt = "Press Return in the search field to see safe-for-work wallpapers."
+                case .openverse: prompt = "Press Return in the search field to find openly licensed Wikimedia Commons images."
+                case .cma: prompt = "Press Return in the search field to search the Cleveland Museum of Art’s public records."
+                }
+                emptyStateView.show(symbolName: "magnifyingglass", title: "Search \(discoverName)", message: prompt)
+            } else if state.discoverProvider == .cma {
+                let hidden = hiddenResults == 0 ? "" : " \(hiddenResults) result\(hiddenResults == 1 ? " was" : "s were") hidden because the image host or links couldn’t be verified."
+                emptyStateView.show(symbolName: "magnifyingglass", title: "No Results",
+                                    message: (state.cmaSearch.trimmedQuery.isEmpty ? "No open-access works with images were listed by the Cleveland Museum of Art."
+                                              : "No public records at the Cleveland Museum of Art matched.") + hidden)
             } else if state.discoverProvider == .openverse {
                 // Truthful: Wallpier never broadens the license or content filters to fill the page.
                 let hidden = hiddenResults == 0 ? "" : " \(hiddenResults) result\(hiddenResults == 1 ? " was" : "s were") hidden because the image host, license or links couldn’t be verified."
@@ -2228,11 +2693,23 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         setWallpaperButton.toolTip = selectedReference?.useRestriction?.errorDescription
         reviewSourceButton.isHidden = !(selectedReference.map { $0.provider == .openverse && $0.blocksUse } ?? false)
         reviewSourceButton.toolTip = selectedReference?.useRestriction?.errorDescription
-        loadMoreButton.isHidden = !(state.discoverProvider == .openverse && hasUnloadedResults && !currentItems.isEmpty)
+        // Wallhaven pages load as the grid scrolls; Openverse and the museum load a page on request.
+        loadMoreButton.isHidden = !(state.discoverProvider != .wallhaven && hasUnloadedResults && !currentItems.isEmpty)
         loadMoreButton.isEnabled = canLoadMoreResults
+        loadMoreButton.toolTip = "Load the next page of \(discoverName) results"
         undoButton.isEnabled = canUndoWallpaper && canMutate
         undoButton.toolTip = canUndoWallpaper ? "Undo Wallpaper Change" : "No restorable wallpaper change"
-        favoriteButton.isHidden = selectedReference == nil
+        statusUndoButton.isEnabled = canUndoWallpaper && canMutate
+        if let creator = pivotCreator {
+            moreByButton.title = "More by \(creator.name)"
+            moreByButton.setAccessibilityLabel("More by \(creator.name)")
+            moreByButton.toolTip = "Show open-access works at the Cleveland Museum of Art credited to \(creator.name)"
+            moreByButton.isHidden = false
+        } else {
+            moreByButton.isHidden = true
+        }
+        viewOnMuseumButton.isHidden = selectedReference?.isCMABrowseOnly != true
+        favoriteButton.isHidden = selectedReference == nil || selectedReference?.isCMABrowseOnly == true
         moreButton.isHidden = !hasSelection
         updatePreviewNavigation()
         // An empty gallery shows its own spinner; the bar's is for work behind visible content.
@@ -2267,7 +2744,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     /// Informational messages fade after a few seconds; errors and in-progress work stay.
-    private func showStatus(_ text: String, isError: Bool) {
+    private func showStatus(_ text: String, isError: Bool, offersUndo: Bool = false) {
         statusClearTask?.cancel()
         if !isError, !text.isEmpty {
             statusClearTask = Task { [weak self] in
@@ -2276,6 +2753,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 showStatus("", isError: false)
             }
         }
+        statusUndoButton.isHidden = !offersUndo || text.isEmpty
         statusLabel.stringValue = text
         statusLabel.textColor = isError ? .systemRed : .secondaryText
         statusLabel.toolTip = text
@@ -2296,6 +2774,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
         Openverse results are wide, large, non-mature Wikimedia Commons JPEGs reported as CC0 or public domain. Wallpier shows each \
         one's creator, source and reported license; Openverse doesn't verify licenses, so review the source page before reuse.
+
+        Cleveland Museum of Art works are open access (CC0). “More by” a creator shows more of that creator’s works in place; \
+        Esc or ← Gallery goes back. A work without a high-resolution JPEG can be viewed on the museum’s site, but not previewed, set or kept.
 
         Select a wallpaper and press Space to preview it on your display’s shape; ← and → browse, Esc returns. \
         Set Wallpaper (Return) downloads only that original and applies it with the display and scaling shown beside it. \
@@ -2329,6 +2810,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         add(isViewerVisible ? "Back to Gallery" : "Preview on Desktop", #selector(toggleViewer(_:)))
         menu.addItem(.separator())
         if let ref = selectedReference {
+            if let creator = pivotCreator { add("More by \(creator.name)", #selector(showCreator(_:))); menu.addItem(.separator()) }
+            if creatorLevel != nil { add("Back to Gallery", #selector(closeCreator(_:))); menu.addItem(.separator()) }
             add(state.isFavorite(ref) ? "Remove from Favorites" : "Add to Favorites", #selector(toggleFavorite(_:)))
             let collections = NSMenuItem(title: "Add to Collection", action: nil, keyEquivalent: "")
             collections.submenu = NSMenu(title: "Add to Collection")
@@ -2381,7 +2864,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         }
         let rotating = state.rotationInterval != .off
         switch item {
-        case .discover, .openverse: return nil
+        case .discover, .openverse, .cma: return nil
         case .favorites: return nil
         case .local:
             add(state.folderPath == nil ? "Choose Folder…" : "Change Folder…", #selector(chooseFolder(_:)))
@@ -2413,7 +2896,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             return splitViewController != nil
         case #selector(toggleViewer(_:)):
             menuItem.title = isViewerVisible ? "Back to Gallery" : "Preview on Desktop"
-            return isViewerVisible || selectedItem != nil
+            return isViewerVisible || (selectedItem != nil && selectedItem?.isBrowseOnly != true)
+        case #selector(showCreator(_:)):
+            menuItem.title = pivotCreator.map { "More by \($0.name)" } ?? "More by Creator"
+            return pivotCreator != nil
+        case #selector(closeCreator(_:)): return creatorLevel != nil
         case #selector(makeThumbnailsLarger(_:)): return thumbnailSizeIndex < GalleryLayout.thumbnailWidths.count - 1
         case #selector(makeThumbnailsSmaller(_:)): return thumbnailSizeIndex > 0
         case #selector(setWallpaper(_:)): return selectedItem != nil && selectedScreen != nil && canMutate && selectedReference?.blocksUse != true
@@ -2422,7 +2909,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         case #selector(undoWallpaperChange(_:)): return canUndoWallpaper && canMutate
         case #selector(toggleFavorite(_:)):
             menuItem.title = selectedReference.map(state.isFavorite) == true ? "Remove from Favorites" : "Add to Favorites"
-            return selectedReference != nil
+            return selectedReference != nil && selectedReference?.isCMABrowseOnly != true
         case #selector(openSourcePage(_:)):
             if menuItem.keyEquivalent == "o" {
                 menuItem.title = selectedReference.map { "Open on \($0.sourceDisplayName)" } ?? (selectedItem != nil ? "Show in Finder" : "Open on \(discoverName)")
@@ -2431,9 +2918,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         case #selector(openLicense(_:)): return selectedReference?.licenseIsConsistent == true
         case #selector(focusSearch(_:)): menuItem.title = "Search \(discoverName)"; return true
         case #selector(copy(_:)): return selectedItem != nil
-        case #selector(addToCollection(_:)): return selectedReference != nil
+        case #selector(addToCollection(_:)): return selectedReference != nil && selectedReference?.isCMABrowseOnly != true
         case #selector(createCollection(_:)):
-            return menuItem.representedObject as? String != "withSelection" || selectedReference != nil
+            return menuItem.representedObject as? String != "withSelection" || (selectedReference != nil && selectedReference?.isCMABrowseOnly != true)
         case #selector(removeSelected(_:)):
             switch state.currentSource {
             case .favorites: menuItem.title = "Remove from Favorites"
@@ -2450,8 +2937,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             return shuffleButton.isEnabled
         case #selector(showRotationSettings(_:)): return window != nil
         case #selector(showDiscover(_:)): menuItem.state = state.currentSource == .discover ? .on : .off; return true
-        case #selector(showWallhaven(_:)), #selector(showOpenverse(_:)):
-            let provider: RemoteProviderID = menuItem.action == #selector(showOpenverse(_:)) ? .openverse : .wallhaven
+        case #selector(showWallhaven(_:)), #selector(showOpenverse(_:)), #selector(showCMA(_:)):
+            let provider: RemoteProviderID = menuItem.action == #selector(showOpenverse(_:)) ? .openverse
+                : menuItem.action == #selector(showCMA(_:)) ? .cma : .wallhaven
             menuItem.state = state.currentSource == .discover && state.discoverProvider == provider ? .on : .off; return true
         case #selector(showLocal(_:)): menuItem.state = state.currentSource == .local ? .on : .off; return true
         case #selector(showFavorites(_:)): menuItem.state = state.currentSource == .favorites ? .on : .off; return true
@@ -2480,6 +2968,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 guard (item?.representedObject as? String) == represented.identifier else { return }; item?.setThumbnail(image)
             }
         case .remote(let ref):
+            // Browse-only museum works say so on their cell; a text-only record never asks for an image at all.
+            switch ref.cmaKind {
+            case .thumbnailOnly?: item.setCaption("No high-resolution JPEG", style: .badge)
+            case .metadataOnly?:
+                item.setCaption([ref.displayTitle, ref.cmaDateText, ref.cmaCredit(preferring: creatorLevel?.creatorID), "View on Cleveland Museum of Art ↗"]
+                                    .compactMap { $0 }.joined(separator: "\n"), style: .text)
+                return item
+            case .settable?, nil: break
+            }
             guard let url = ref.galleryThumbnailURL(large: pixels > 340) else { item.setThumbnail(nil); return item }
             remoteThumbnailProvider.requestThumbnail(for: url, maximumPixelSize: maximumPixelSize) { [weak item] image in
                 guard (item?.representedObject as? String) == represented.identifier else { return }; item?.setThumbnail(image)
@@ -2504,6 +3001,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         switch currentItems[indexPath.item] {
         case .local(let url): return url as NSURL
         case .remote(let ref):
+            // A work that can only be browsed can't be dragged into Favorites or a collection.
+            if ref.isCMABrowseOnly { return nil }
             let item = NSPasteboardItem()
             item.setString(ref.identityKey, forType: .wallpierReference)
             item.setString(ref.sourcePageURL.absoluteString, forType: .URL)

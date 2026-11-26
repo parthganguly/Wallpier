@@ -21,6 +21,8 @@
 		B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */; };
 		B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */; };
 		C3AE91A03041EC41004BF2F2 /* OpenverseProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3AE91A13041EC41004BF2F2 /* OpenverseProvider.swift */; };
+		C4AE91B03041EC41004BF2F2 /* DisplayText.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4AE91B13041EC41004BF2F2 /* DisplayText.swift */; };
+		C4AE91B23041EC41004BF2F2 /* CMAProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4AE91B33041EC41004BF2F2 /* CMAProvider.swift */; };
 		B2AE91943041EC41004BF2F2 /* RemoteWallpaperCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */; };
 		B2AE91963041EC41004BF2F2 /* RemoteThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */; };
 		B2AE91983041EC41004BF2F2 /* wallhaven-search.json in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91993041EC41004BF2F2 /* wallhaven-search.json */; };
@@ -66,6 +68,8 @@
 		B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWallpaperProvider.swift; sourceTree = "<group>"; };
 		B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallhavenProvider.swift; sourceTree = "<group>"; };
 		C3AE91A13041EC41004BF2F2 /* OpenverseProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenverseProvider.swift; sourceTree = "<group>"; };
+		C4AE91B13041EC41004BF2F2 /* DisplayText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayText.swift; sourceTree = "<group>"; };
+		C4AE91B33041EC41004BF2F2 /* CMAProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CMAProvider.swift; sourceTree = "<group>"; };
 		B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWallpaperCache.swift; sourceTree = "<group>"; };
 		B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteThumbnailProvider.swift; sourceTree = "<group>"; };
 		B2AE91993041EC41004BF2F2 /* wallhaven-search.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "wallhaven-search.json"; sourceTree = "<group>"; };
@@ -143,6 +147,8 @@
 				B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */,
 				B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */,
 				C3AE91A13041EC41004BF2F2 /* OpenverseProvider.swift */,
+				C4AE91B33041EC41004BF2F2 /* CMAProvider.swift */,
+				C4AE91B13041EC41004BF2F2 /* DisplayText.swift */,
 				B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */,
 				B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */,
 				B2AE91543041EC40004BF2F2 /* Assets.xcassets */,
@@ -327,6 +333,8 @@
 				B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */,
 				B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */,
 				C3AE91A03041EC41004BF2F2 /* OpenverseProvider.swift in Sources */,
+				C4AE91B23041EC41004BF2F2 /* CMAProvider.swift in Sources */,
+				C4AE91B03041EC41004BF2F2 /* DisplayText.swift in Sources */,
 				B2AE91943041EC41004BF2F2 /* RemoteWallpaperCache.swift in Sources */,
 				B2AE91963041EC41004BF2F2 /* RemoteThumbnailProvider.swift in Sources */,
 			);

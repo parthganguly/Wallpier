@@ -31,12 +31,20 @@ final class WallpaperCollectionViewItem: NSCollectionViewItem {
     func configure(identifier: String, title: String, toolTip: String) {
         representedObject = identifier
         setThumbnail(nil, failed: false)
+        setCaption(nil, style: .none)
         view.toolTip = toolTip
         view.setAccessibilityLabel(title)
         view.setAccessibilityHelp(toolTip)
         cell.isSelected = isSelected
         cell.isEmphasized = isEmphasized
     }
+
+    /// Browse-only works say so on the cell: a badge over a thumbnail, or the whole record as text.
+    func setCaption(_ text: String?, style: ThumbnailCellView.CaptionStyle) {
+        cell.setCaption(text, style: style)
+    }
+
+    var captionText: String { cell.captionLabel.isHidden ? "" : cell.captionLabel.stringValue }
 
     func setThumbnail(_ image: NSImage?, failed: Bool = true) {
         let scale = view.window?.backingScaleFactor ?? 2
@@ -53,9 +61,40 @@ final class ThumbnailCellView: NSView {
     var isEmphasized = true { didSet { if isEmphasized != oldValue { needsDisplay = true } } }
     static let imageRadius: CGFloat = 6
 
+    enum CaptionStyle { case none, badge, text }
+    let captionLabel = NSTextField(wrappingLabelWithString: "")
+    private var captionStyle = CaptionStyle.none
+
+    func setCaption(_ text: String?, style: CaptionStyle) {
+        captionStyle = text == nil ? .none : style
+        captionLabel.stringValue = text ?? ""
+        captionLabel.isHidden = captionStyle == .none
+        switch captionStyle {
+        case .none: break
+        case .badge:
+            captionLabel.font = .systemFont(ofSize: 11, weight: .medium)
+            captionLabel.alignment = .center
+            captionLabel.maximumNumberOfLines = 1
+            captionLabel.lineBreakMode = .byTruncatingTail
+        case .text:
+            captionLabel.font = .systemFont(ofSize: 12)
+            captionLabel.alignment = .center
+            captionLabel.maximumNumberOfLines = 0
+            captionLabel.lineBreakMode = .byWordWrapping
+        }
+        needsLayout = true
+        needsDisplay = true
+    }
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+        captionLabel.isHidden = true
+        captionLabel.isSelectable = false
+        captionLabel.drawsBackground = false
+        captionLabel.setAccessibilityElement(false)
+        captionLabel.wantsLayer = true
+        captionLabel.layer?.cornerRadius = 4
         layer?.addSublayer(ring)
         // Concentric with the image: the ring's radius is the image's plus the gap between them.
         ring.cornerRadius = Self.imageRadius + WallpaperCollectionViewItem.ringInset
@@ -68,6 +107,7 @@ final class ThumbnailCellView: NSView {
         placeholder.isHidden = true
         addSubview(imageHost)
         addSubview(placeholder)
+        addSubview(captionLabel)
     }
 
     required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
@@ -79,6 +119,17 @@ final class ThumbnailCellView: NSView {
         let inset = WallpaperCollectionViewItem.ringInset
         imageHost.frame = bounds.insetBy(dx: inset, dy: inset)
         placeholder.frame = imageHost.frame
+        switch captionStyle {
+        case .none: break
+        case .badge:
+            captionLabel.frame = NSRect(x: imageHost.frame.minX + 6, y: imageHost.frame.minY + 6, width: max(0, imageHost.frame.width - 12), height: 20)
+        case .text:
+            let area = imageHost.frame.insetBy(dx: 10, dy: 8)
+            captionLabel.preferredMaxLayoutWidth = area.width
+            let fitted = captionLabel.sizeThatFits(NSSize(width: area.width, height: .greatestFiniteMagnitude))
+            let height = min(area.height, fitted.height)
+            captionLabel.frame = NSRect(x: area.minX, y: area.midY - height / 2, width: area.width, height: height)
+        }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         ring.frame = bounds
         CATransaction.commit()
@@ -95,6 +146,10 @@ final class ThumbnailCellView: NSView {
         imageHost.layer?.borderWidth = 1 / (window?.backingScaleFactor ?? 2)
         ring.borderColor = (isEmphasized ? NSColor.controlAccentColor : NSColor.secondaryLabelColor).cgColor
         ring.borderWidth = isSelected ? 3 : 0
+        // The badge sits on the picture, which can be any color: a fixed dark fill keeps it legible in both appearances.
+        let badge = captionStyle == .badge
+        captionLabel.layer?.backgroundColor = badge ? NSColor(white: 0, alpha: 0.7).cgColor : nil
+        captionLabel.textColor = badge ? .white : .labelColor
         CATransaction.commit()
     }
 

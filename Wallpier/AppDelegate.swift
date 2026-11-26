@@ -93,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(viewMenu, "Discover", #selector(MainWindowController.showDiscover(_:)), "1")
         add(viewMenu, "Wallhaven", #selector(MainWindowController.showWallhaven(_:)))
         add(viewMenu, "Openverse", #selector(MainWindowController.showOpenverse(_:)))
+        add(viewMenu, "Cleveland Museum of Art", #selector(MainWindowController.showCMA(_:)))
         add(viewMenu, "Folder", #selector(MainWindowController.showLocal(_:)), "2")
         add(viewMenu, "Favorites", #selector(MainWindowController.showFavorites(_:)), "3")
         add(viewMenu, "Collections", #selector(MainWindowController.showCollections(_:)), "4")
@@ -115,6 +116,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         collections.submenu = NSMenu(title: "Add to Collection")
         collections.submenu?.delegate = controller
         add(wallpaperMenu, "Remove from Collection", #selector(MainWindowController.removeSelected(_:)), "\u{8}")
+        // No key equivalents: Return, Space, Esc and the bracket keys keep their meanings.
+        add(wallpaperMenu, "More by Creator", #selector(MainWindowController.showCreator(_:)))
         add(wallpaperMenu, "Open on Wallhaven", #selector(MainWindowController.openSourcePage(_:)), "o", [.command, .shift])
         add(wallpaperMenu, "View License", #selector(MainWindowController.openLicense(_:)))
         wallpaperMenu.addItem(.separator())
