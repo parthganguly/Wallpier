@@ -1140,7 +1140,7 @@ extension WallpierTests {
         defer { window.close() }
         let sidebar = controller.sidebarForTesting
         func row(_ title: String) -> SidebarNode? { sidebar.rows.first { $0.title == title } }
-        XCTAssertEqual(sidebar.rows.map(\.title), ["Discover", "Wallhaven", "Openverse", "Library", "Folder", "Favorites", "Collections", "Evening Light", "Quiet Mornings"])
+        XCTAssertEqual(sidebar.rows.map(\.title), ["Discover", "Wallhaven", "Openverse", "Cleveland Museum of Art", "Library", "Folder", "Favorites", "Collections", "Evening Light", "Quiet Mornings"])
         XCTAssertEqual(row("Favorites")?.count, 6)
         XCTAssertEqual(row("Evening Light")?.count, 5)
         XCTAssertEqual(sidebar.selectedItem, .favorites)
@@ -1628,10 +1628,10 @@ extension WallpierTests {
 
     @MainActor
     func makeCaptureController(root: URL, size: NSSize, appearance: NSAppearance.Name, network: NetworkClient = OfflineNetwork(),
-                               openverse: NetworkClient = OfflineNetwork(),
+                               openverse: NetworkClient = OfflineNetwork(), cma: NetworkClient = OfflineNetwork(),
                                windowClass: NSWindow.Type = NSWindow.self, desktop: WallpaperService? = nil,
                                thumbnails: RemoteThumbnailProvider? = nil, page: RemoteSearchPage? = nil, screens: [NSScreen]? = nil,
-                               configure: (inout WallpaperState) -> Void) -> (MainWindowController, NSWindow) {
+                               defaults: UserDefaults = .standard, configure: (inout WallpaperState) -> Void) -> (MainWindowController, NSWindow) {
         let references = CaptureFixtures.references()
         let store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
         var state = WallpaperState()
@@ -1653,9 +1653,10 @@ extension WallpierTests {
         window.appearance = NSAppearance(named: appearance)
         let originals = root.appendingPathComponent("Originals")
         let controller = MainWindowController(window: window, wallpaperService: desktop ?? SetAuditWallpaperService(), stateStore: store,
-            provider: WallhavenProvider(client: network), openverseProvider: OpenverseProvider(client: openverse), originalCache: RemoteWallpaperCache(rootURL: originals),
+            provider: WallhavenProvider(client: network), openverseProvider: OpenverseProvider(client: openverse),
+            cmaProvider: CMAProvider(client: cma), originalCache: RemoteWallpaperCache(rootURL: originals),
             historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")),
-            remoteThumbnailProvider: thumbnails ?? CaptureThumbnails(), availableScreens: { screens ?? [CaptureScreen()] })
+            remoteThumbnailProvider: thumbnails ?? CaptureThumbnails(), availableScreens: { screens ?? [CaptureScreen()] }, defaults: defaults)
         let page = page ?? RemoteSearchPage(wallpapers: references, currentPage: 1, lastPage: 54, total: 1_284,
             rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil))
         controller.prepareForVisualCapture(discoverPage: page)
@@ -6783,5 +6784,1165 @@ extension WallpierTests {
         XCTAssertNotEqual(saved, stale.path)
         XCTAssertTrue(OpenverseProvider.isFaithfulOriginal(at: URL(fileURLWithPath: saved), for: reference))
         XCTAssertTrue(FileManager.default.fileExists(atPath: stale.path), "The stale file is left, never overwritten")
+    }
+}
+
+// MARK: - Issue #10: Cleveland Museum of Art creator discovery
+//
+// Deterministic and offline: fixture JSON, fake networks, the recording wallpaper service and temporary stores.
+// Nothing reaches the museum, the user's preferences or the real desktop. The live walk at the end is opt-in.
+
+/// Answers CMA API and media requests from fixtures and records every request, in order.
+final class CMAFakeNetwork: NetworkClient, @unchecked Sendable {
+    struct Route {
+        var status = 200
+        var body = Data()
+        var headers: [String: String] = [:]
+        var finalURL: URL?
+    }
+
+    private let lock = NSLock()
+    private var routes: [String: Route] = [:]
+    private var recorded: [String] = []
+    private var recordedURLs: [URL] = []
+    private var recordedTemporaries: [URL] = []
+    var media = Route(headers: ["Content-Type": "image/jpeg"])
+    /// A stream that reports this many bytes before finishing, to exercise the cap without allocating them.
+    var streamedBytes: Int64?
+
+    var events: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
+    var urls: [URL] { lock.lock(); defer { lock.unlock() }; return recordedURLs }
+    var temporaries: [URL] { lock.lock(); defer { lock.unlock() }; return recordedTemporaries }
+    var apiEvents: [String] { events.filter { $0.hasPrefix("api:") } }
+    var mediaEvents: [String] { events.filter { $0.hasPrefix("media:") } }
+
+    func setRoute(_ key: String, _ route: Route) { lock.lock(); routes[key] = route; lock.unlock() }
+
+    /// `search:artists` and `search:q` for the two searches; the path for everything else.
+    static func key(for url: URL) -> String {
+        // URL.path drops the trailing slash on some SDKs; the encoded path keeps what was requested.
+        let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? url.path
+        guard path == "/api/artworks/" || path == "/api/artworks" else { return path }
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return items.contains { $0.name == "artists" } ? "search:artists" : "search:q"
+    }
+
+    private func record(_ event: String, _ url: URL) { lock.lock(); recorded.append(event); recordedURLs.append(url); lock.unlock() }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let url = request.url!
+        let key = Self.key(for: url)
+        record("api:\(key)", url)
+        lock.lock(); let found = routes[key]; lock.unlock()
+        let route = found ?? Route(status: 404, body: Data(#"{"error":"Not found"}"#.utf8))
+        return (route.body, HTTPURLResponse(url: route.finalURL ?? url, statusCode: route.status, httpVersion: "HTTP/1.1", headerFields: route.headers)!)
+    }
+
+    func download(for request: URLRequest) async throws -> (URL, HTTPURLResponse) {
+        let url = request.url!
+        record("media:\(url.absoluteString)", url)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("wallpier-cma-\(UUID().uuidString).jpg")
+        try media.body.write(to: file)
+        lock.lock(); recordedTemporaries.append(file); lock.unlock()
+        return (file, HTTPURLResponse(url: media.finalURL ?? url, statusCode: media.status, httpVersion: "HTTP/1.1", headerFields: media.headers)!)
+    }
+
+    func boundedDownload(for request: URLRequest, maximumBytes: Int64, maximumRedirects: Int) async throws -> (URL, HTTPURLResponse) {
+        if let streamedBytes, streamedBytes > maximumBytes {
+            record("media:\(request.url!.absoluteString)", request.url!)
+            throw RemoteProviderError.originalTooLarge
+        }
+        return try await download(for: request)
+    }
+}
+
+/// A URLProtocol that scripts a streamed response, to drive the real bounded downloader without a network.
+final class CMAStreamProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var _script: ((CMAStreamProtocol) -> Void)?
+    private static var _requested: [URL] = []
+    private static var _chunks = 0
+    private var _stopped = false
+
+    static var script: ((CMAStreamProtocol) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _script }
+        set { lock.lock(); _script = newValue; lock.unlock() }
+    }
+    static var requested: [URL] { lock.lock(); defer { lock.unlock() }; return _requested }
+    static var chunksSent: Int { lock.lock(); defer { lock.unlock() }; return _chunks }
+    static func reset() { lock.lock(); _requested = []; _chunks = 0; _script = nil; lock.unlock() }
+
+    var stopped: Bool { Self.lock.lock(); defer { Self.lock.unlock() }; return _stopped }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.lock(); Self._requested.append(request.url!); let script = Self._script; Self.lock.unlock()
+        script?(self)
+    }
+    override func stopLoading() { Self.lock.lock(); _stopped = true; Self.lock.unlock() }
+
+    func respond(status: Int, headers: [String: String] = [:]) {
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!,
+                            cacheStoragePolicy: .notAllowed)
+    }
+    func send(_ data: Data) { Self.lock.lock(); Self._chunks += 1; Self.lock.unlock(); client?.urlProtocol(self, didLoad: data) }
+    func finish() { client?.urlProtocolDidFinishLoading(self) }
+    func redirect(to url: URL) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": url.absoluteString])!
+        client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: url), redirectResponse: response)
+        // If the loading system doesn't deliver the refused redirect itself, deliver it as the final response.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { [self] in
+            guard !stopped else { return }
+            respond(status: 302, headers: ["Location": url.absoluteString]); finish()
+        }
+    }
+}
+
+extension WallpierTests {
+    // MARK: Fixtures
+
+    static func cmaJSON(_ object: Any) -> Data { try! JSONSerialization.data(withJSONObject: object) }
+
+    static func cmaCreator(_ id: Int = 23328, _ description: String = "Katsushika Hokusai (Japanese, 1760–1849)",
+                           role: String = "artist", qualifier: String = "") -> [String: Any] {
+        ["id": id, "description": description, "role": role, "qualifier": qualifier]
+    }
+
+    /// A record as the API sends it: string dimensions, `url`, `creators`, `share_license_status` and `images`.
+    static func cmaRow(_ id: Int, title: String? = "Fixture Work", creators: [[String: Any]]? = nil, license: String = "CC0",
+                       web: (String, String)? = ("800", "500"), printSize: (String, String)? = ("2000", "1250"),
+                       printFilesize: String = "9000000") -> [String: Any] {
+        let accession = "1930.\(id)"
+        func rendition(_ kind: String, _ size: (String, String), _ filesize: String) -> [String: Any] {
+            ["url": "https://openaccess-cdn.clevelandart.org/\(accession)/\(accession)_\(kind).jpg", "width": size.0, "height": size.1,
+             "filesize": filesize, "filename": "\(accession)_\(kind).jpg"]
+        }
+        var images: [String: Any] = [:]
+        if let web { images["web"] = rendition("web", web, "100000") }
+        if let printSize { images["print"] = rendition("print", printSize, printFilesize) }
+        var row: [String: Any] = ["id": id, "creation_date": "about 1831", "accession_number": accession,
+                                  "url": "https://clevelandart.org/art/\(accession)", "creators": creators ?? [cmaCreator()],
+                                  "share_license_status": license, "images": images]
+        if let title { row["title"] = title }
+        return row
+    }
+
+    static func cmaReference(_ id: Int, title: String? = "Fixture Work", creators: [[String: Any]]? = nil, license: String = "CC0",
+                             web: (String, String)? = ("800", "500"), printSize: (String, String)? = ("2000", "1250")) -> WallpaperReference {
+        CMAParsing.reference(from: cmaRow(id, title: title, creators: creators, license: license, web: web, printSize: printSize))!
+    }
+
+    static func cmaEnvelope(_ rows: [[String: Any]], total: Int? = nil) -> CMAFakeNetwork.Route {
+        let info: [String: Any] = ["total": total ?? rows.count, "parameters": [String: Any]()]
+        let body: [String: Any] = ["info": info, "data": rows]
+        return CMAFakeNetwork.Route(body: cmaJSON(body))
+    }
+
+    static func cmaDetailRoute(_ row: [String: Any]) -> CMAFakeNetwork.Route {
+        let body: [String: Any] = ["data": row]
+        return CMAFakeNetwork.Route(body: cmaJSON(body))
+    }
+
+    static func cmaCreatorDetailRoute(id: Int = 23328, name: String = "Katsushika Hokusai", stubs: [Int] = [111654, 152506, 900001, 900009]) -> CMAFakeNetwork.Route {
+        let detail: [String: Any] = ["id": id, "name": name, "description": "\(name) (Japanese, 1760–1849)", "artworks": stubs.map { ["id": $0] }]
+        let body: [String: Any] = ["data": detail]
+        return CMAFakeNetwork.Route(body: cmaJSON(body))
+    }
+
+    /// Hokusai (23328): the anchor, plain works (one with a co-creator), a thumbnail-only work, a metadata-only work,
+    /// and the rows that must be excluded: "attributed to", someone else's "after" derivative, a non-plain role, a
+    /// different creator, and one record with no canonical link.
+    static func cmaCreatorNetwork(allOpen: Bool = false) -> CMAFakeNetwork {
+        let network = CMAFakeNetwork()
+        let hokusai = [cmaCreator()]
+        let plainOpen = cmaRow(900004, title: "Plain Open", creators: hokusai)
+        let plainRestricted = cmaRow(900004, title: "Plain Copyrighted", creators: hokusai, license: "Copyrighted", web: nil, printSize: nil)
+        let invalid: [String: Any] = ["id": 900005, "title": "No link"]
+        let rows: [[String: Any]] = [
+            cmaRow(111654, title: "The Great Wave", creators: hokusai),
+            cmaRow(152506, title: "Fuji &amp; Waves", creators: [cmaCreator(), cmaCreator(999, "Nishimuraya Yohachi (Japanese)", role: "publisher")]),
+            cmaRow(152507, title: "Red Fuji", creators: hokusai),
+            cmaRow(152508, title: "Thumbnail Only", creators: hokusai, printSize: nil),
+            allOpen ? plainOpen : plainRestricted,
+            cmaRow(900001, title: "Attributed", creators: [cmaCreator(qualifier: "attributed to")]),
+            cmaRow(900002, title: "After Hokusai", creators: [cmaCreator(1313, "Unknown Follower (Japanese)", qualifier: "after")]),
+            cmaRow(900003, title: "Publisher Only", creators: [cmaCreator(role: "publisher")]),
+            cmaRow(287051, title: "Kara Walker", creators: [cmaCreator(5000, "Kara Walker (American, born 1969)")],
+                   license: "Copyrighted", web: nil, printSize: nil),
+            invalid
+        ]
+        network.setRoute("/api/creators/23328", cmaCreatorDetailRoute())
+        network.setRoute("search:artists", cmaEnvelope(rows, total: 250))
+        for id in [111654, 152506, 152507] { network.setRoute("/api/artworks/\(id)", cmaDetailRoute(rows.first { ($0["id"] as? Int) == id }!)) }
+        network.media = CMAFakeNetwork.Route(body: imageData(width: 2000, height: 1250, type: "public.jpeg"), headers: ["Content-Type": "image/jpeg"])
+        return network
+    }
+
+    /// One settable work whose detail and print JPEG both verify.
+    static func cmaDownloadNetwork(id: Int = 152506) -> CMAFakeNetwork {
+        let network = CMAFakeNetwork()
+        network.setRoute("/api/artworks/\(id)", cmaDetailRoute(cmaRow(id)))
+        network.media = CMAFakeNetwork.Route(body: imageData(width: 2000, height: 1250, type: "public.jpeg"), headers: ["Content-Type": "image/jpeg"])
+        return network
+    }
+
+    @MainActor
+    private func cmaController(_ network: CMAFakeNetwork, desktop: WallpaperService? = nil, thumbnails: RemoteThumbnailProvider? = nil)
+        throws -> (MainWindowController, NSWindow, URL, WallpaperReference) {
+        let root = try historyTestFolder()
+        let anchor = Self.cmaReference(111654, title: "The Great Wave")
+        let (controller, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua, cma: network,
+                                                         desktop: desktop, thumbnails: thumbnails ?? RecordingThumbnails()) { state in
+            state.favorites = [anchor]; state.collections = []; state.selectedCollectionID = nil
+            state.currentSource = .favorites; state.selectedRemoteIdentity = anchor.identityKey
+        }
+        addTeardownBlock {
+            let tasks = await MainActor.run { () -> [Task<Void, Never>] in
+                let tasks = [controller.downloadTask, controller.searchTask, controller.detailTask, controller.undoValidationTask,
+                             controller.creatorTaskForTesting].compactMap { $0 }
+                tasks.forEach { $0.cancel() }
+                while let sheet = window.attachedSheet { window.endSheet(sheet) }
+                window.close()
+                return tasks
+            }
+            for task in tasks { await task.value }
+            try? FileManager.default.removeItem(at: root)
+        }
+        return (controller, window, root, anchor)
+    }
+
+    @MainActor
+    private func selectCMAItem(_ index: Int, in controller: MainWindowController) {
+        let path = IndexPath(item: index, section: 0)
+        controller.collectionView.selectionIndexPaths = [path]
+        controller.collectionView(controller.collectionView, didSelectItemsAt: [path])
+    }
+
+    // MARK: Display text
+
+    func testDisplayTextDecodesStripsAndBoundsInOrder() {
+        XCTAssertEqual(DisplayText.clean("Wave &amp; Fuji &#x2014; &quot;Great&quot; &#8212;"), "Wave & Fuji — \"Great\" —")
+        // Malformed entities stay literal; one decoding pass only.
+        XCTAssertEqual(DisplayText.clean("AT&T &bogus; &#xZZ; &#99999999999; &#xD800; &amp"), "AT&T &bogus; &#xZZ; &#99999999999; &#xD800; &amp")
+        XCTAssertEqual(DisplayText.clean("&amp;lt;b&amp;gt;"), "&lt;b&gt;")
+        // Tag-like spans are removed as text, including ones an entity decoded into; prose with < or > is kept.
+        XCTAssertEqual(DisplayText.clean("A <b>bold</b> <i>move</i>"), "A bold move")
+        XCTAssertEqual(DisplayText.clean("&lt;script&gt;alert(1)&lt;/script&gt;Wave"), "alert(1)Wave")
+        XCTAssertEqual(DisplayText.clean("<scr<b>ipt>x"), "x")
+        XCTAssertEqual(DisplayText.clean("x < y and y > z"), "x < y and y > z")
+        // Control and bidi-override characters go; whitespace collapses.
+        XCTAssertEqual(DisplayText.clean("A\u{202E}BC\u{0007}D\u{200B}E\u{2066}F"), "ABCDEF")
+        XCTAssertEqual(DisplayText.clean(" A\n\t  B\u{00A0}C "), "A B C")
+        XCTAssertEqual(DisplayText.clean("&#0;Z&#8238;"), "Z")
+        // NFC.
+        XCTAssertEqual(Array(DisplayText.clean("e\u{0301}").unicodeScalars), [Unicode.Scalar(0x00E9)!])
+        // Capped with an ellipsis.
+        let capped = DisplayText.clean(String(repeating: "x", count: 300))
+        XCTAssertEqual(capped.count, DisplayText.defaultLimit); XCTAssertTrue(capped.hasSuffix("…"))
+        // Nothing displayable falls back.
+        XCTAssertEqual(DisplayText.title("  <b></b> \u{202E}"), "Untitled"); XCTAssertEqual(DisplayText.title(nil), "Untitled")
+        XCTAssertEqual(DisplayText.creator("&#0;"), "Unattributed")
+        // Quote-aware: a “>” inside a quoted attribute doesn't end the tag. Prose comparisons stay.
+        XCTAssertEqual(DisplayText.clean("A <a title=\"x > y\" href='#'>link</a> B"), "A link B")
+        XCTAssertEqual(DisplayText.clean("1 < 2 and 3 > 2, <3"), "1 < 2 and 3 > 2, <3")
+        // A truncated closing tag, or a recognizable opening tag cut short, is removed to the end.
+        XCTAssertEqual(DisplayText.clean("Triumph </i"), "Triumph"); XCTAssertEqual(DisplayText.clean("Triumph </"), "Triumph")
+        XCTAssertEqual(DisplayText.clean("Triumph <div class='fn"), "Triumph")
+        // Structural line breaks separate text; inline tags don't add a gap.
+        XCTAssertEqual(DisplayText.clean("Wave<br>Fuji<p>Sea</p>Sky"), "Wave Fuji Sea Sky")
+        XCTAssertEqual(DisplayText.clean("Fu<b>ji</b>"), "Fuji")
+        XCTAssertEqual(DisplayText.clean("Wave\nFuji"), "Wave Fuji")
+        // The exact markup the live Openverse record 811e7030-bcad-4c4a-b497-30f892cc2d24 returned.
+        XCTAssertEqual(DisplayText.clean("<div class='fn'> <i>Entry of Alexander the Great into Babylon, or The Triumph of Alexander </i></div>"),
+                       "Entry of Alexander the Great into Babylon, or The Triumph of Alexander")
+        // Joiners, combining marks and casing survive; bidi overrides and unsafe controls don't.
+        let family = "👩\u{200D}👩\u{200D}👧", persian = "می\u{200C}خواهم", combined = "Ṩ̇ ÉCOLE İstanbul straße"
+        XCTAssertEqual(DisplayText.clean(family + "\u{202E}"), family); XCTAssertEqual(DisplayText.clean(persian), persian)
+        XCTAssertEqual(DisplayText.clean(combined), combined.precomposedStringWithCanonicalMapping)
+    }
+
+    func testOpenverseQualifiedCreditsReadAsReportedAndOrdinaryOnesStayBy() {
+        var reference = openverseReference(8)
+        XCTAssertEqual(reference.displayCredit, "by Fixture Photographer")
+        reference.uploader = "after Charles Le Brun"
+        XCTAssertEqual(reference.displayCredit, "after Charles Le Brun", "Never “by after …”")
+        reference.uploader = "Attributed to &amp; Friends"
+        XCTAssertEqual(reference.displayCredit, "Attributed to & Friends")
+        reference.uploader = "Afterglow Studio"
+        XCTAssertEqual(reference.displayCredit, "by Afterglow Studio", "Only a whole leading qualifier word is one")
+        reference.uploader = nil
+        XCTAssertNil(reference.displayCredit)
+        var wallhaven = remoteReference(id: "abc123"); wallhaven.uploader = "after_dark"
+        XCTAssertEqual(wallhaven.displayCredit, "by after_dark")
+    }
+
+    func testOpenverseOldSavedReferencesAreCleanedForDisplayOnlyAndRawMetadataIsKept() throws {
+        var saved = openverseReference(7)
+        saved.title = "Dawn &amp; <i>Dusk</i>\u{202E} &#x1F33F;"
+        saved.uploader = "Ann &lt;3 Bob\u{200B}"
+        XCTAssertEqual(saved.displayTitle, "Dawn & Dusk 🌿")
+        XCTAssertEqual(saved.displayCreator, "Ann <3 Bob")
+        // A reference saved by an older build decodes and reads the same way, and its raw text round-trips untouched.
+        let decoded = try JSONDecoder().decode(WallpaperReference.self, from: JSONEncoder().encode(saved))
+        XCTAssertEqual(decoded.title, "Dawn &amp; <i>Dusk</i>\u{202E} &#x1F33F;")
+        XCTAssertEqual(decoded.uploader, "Ann &lt;3 Bob\u{200B}")
+        XCTAssertEqual(decoded.displayTitle, saved.displayTitle)
+        saved.title = "<b></b>"; saved.uploader = "&#0;"
+        XCTAssertEqual(saved.displayTitle, "Untitled"); XCTAssertEqual(saved.displayCreator, "Unattributed")
+        saved.title = nil; saved.uploader = nil
+        XCTAssertEqual(saved.displayTitle, saved.wallpaperID, "An absent title is still absent, not invented")
+        XCTAssertNil(saved.displayCreator)
+        // Wallhaven is untouched.
+        var wallhaven = remoteReference(id: "abc123"); wallhaven.uploader = "x&amp;y"
+        XCTAssertEqual(wallhaven.displayTitle, "abc123"); XCTAssertEqual(wallhaven.displayCreator, "x&amp;y")
+    }
+
+    // MARK: URL policy and endpoints
+
+    func testCMAURLPolicyAllowsOnlyDocumentedHostsPathsAndRedirects() throws {
+        func url(_ string: String) -> URL { URL(string: string)! }
+        let web = url("https://openaccess-cdn.clevelandart.org/1930.189/1930.189_web.jpg")
+        let print = url("https://openaccess-cdn.clevelandart.org/1930.189/1930.189_print.jpg")
+        XCTAssertTrue(CMAURLPolicy.isAllowedMediaURL(web, rendition: .web)); XCTAssertTrue(CMAURLPolicy.isAllowedMediaURL(print, rendition: .print))
+        XCTAssertFalse(CMAURLPolicy.isAllowedMediaURL(print, rendition: .web), "The rendition must match its name")
+        for rejected in ["http://openaccess-cdn.clevelandart.org/1930.189/1930.189_web.jpg", "https://evil.example/1930.189/1930.189_web.jpg",
+                         "https://openaccess-cdn.clevelandart.org.evil.example/1930.189/1930.189_web.jpg",
+                         "https://user:pw@openaccess-cdn.clevelandart.org/1930.189/1930.189_web.jpg",
+                         "https://openaccess-cdn.clevelandart.org:8443/1930.189/1930.189_web.jpg",
+                         "https://openaccess-cdn.clevelandart.org/1930.189/1930.189_web.jpg?x=1",
+                         "https://openaccess-cdn.clevelandart.org/a/b/1930.189_web.jpg", "https://openaccess-cdn.clevelandart.org/1930.189_web.jpg",
+                         "https://openaccess-cdn.clevelandart.org/../1930.189_web.jpg", "https://openaccess-cdn.clevelandart.org/1930.189/other_web.jpg",
+                         "https://openaccess-cdn.clevelandart.org/1930.189/1930.189_web.tif", "https://clevelandart.org/1930.189/1930.189_web.jpg"] {
+            XCTAssertFalse(CMAURLPolicy.isAllowedMediaURL(url(rejected), rendition: .web), rejected)
+        }
+        XCTAssertTrue(CMAURLPolicy.isAllowedPageURL(url("https://clevelandart.org/art/1930.189")))
+        XCTAssertTrue(CMAURLPolicy.isAllowedPageURL(url("https://www.clevelandart.org/art/1930.189")))
+        for rejected in ["http://clevelandart.org/art/1", "https://clevelandart.org.evil.example/art/1", "https://evil.example/art/1",
+                         "https://openaccess-api.clevelandart.org/api/artworks/1"] {
+            XCTAssertFalse(CMAURLPolicy.isAllowedPageURL(url(rejected)), rejected)
+        }
+        XCTAssertTrue(CMAURLPolicy.allowsRedirect(from: web, to: url("https://openaccess-cdn.clevelandart.org/1930.189/1930.189_web.jpg")))
+        XCTAssertFalse(CMAURLPolicy.allowsRedirect(from: web, to: url("https://openaccess-cdn.clevelandart.org/other/x.jpg")), "Same item and rendition path only")
+        XCTAssertFalse(CMAURLPolicy.allowsRedirect(from: web, to: url("https://openaccess-cdn.clevelandart.org/1930.189/1930.189_web.jpg?x=1")))
+        XCTAssertFalse(CMAURLPolicy.allowsRedirect(from: web, to: print), "Not another rendition")
+        XCTAssertFalse(CMAURLPolicy.allowsRedirect(from: web, to: url("http://openaccess-cdn.clevelandart.org/x.jpg")), "No HTTP downgrade")
+        XCTAssertFalse(CMAURLPolicy.allowsRedirect(from: web, to: url("https://evil.example/x.jpg")))
+        XCTAssertFalse(CMAURLPolicy.allowsRedirect(from: web, to: url("https://openaccess-api.clevelandart.org/api/artworks/1")))
+        let api = url("https://openaccess-api.clevelandart.org/api/artworks/1")
+        XCTAssertTrue(CMAURLPolicy.allowsRedirect(from: api, to: url("https://openaccess-api.clevelandart.org/api/artworks/2")))
+        XCTAssertFalse(CMAURLPolicy.allowsRedirect(from: api, to: web)); XCTAssertFalse(CMAURLPolicy.allowsRedirect(from: url("https://evil.example/"), to: web))
+        XCTAssertTrue(CMAURLPolicy.isCMAHost(url("https://www.clevelandart.org/x"))); XCTAssertFalse(CMAURLPolicy.isCMAHost(url("https://notclevelandart.org/x")))
+
+        func items(_ url: URL) -> [String: String] {
+            Dictionary(uniqueKeysWithValues: (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        }
+        let search = CMAEndpoint.searchURL(options: CMASearchOptions(query: " c++ sky "), page: 3)
+        XCTAssertEqual(URLComponents(url: search, resolvingAgainstBaseURL: false)?.host, "openaccess-api.clevelandart.org")
+        XCTAssertEqual(URLComponents(url: search, resolvingAgainstBaseURL: false)?.percentEncodedPath, "/api/artworks/")
+        XCTAssertEqual(items(search)["q"], "c++ sky"); XCTAssertTrue(search.absoluteString.contains("q=c%2B%2B%20sky"), search.absoluteString)
+        XCTAssertNil(items(search)["cc0"], "Typed text searches all public records"); XCTAssertNil(items(search)["has_image"])
+        XCTAssertEqual(items(search)["limit"], "20"); XCTAssertEqual(items(search)["skip"], "40")
+        let blank = items(CMAEndpoint.searchURL(options: CMASearchOptions(), page: 0))
+        XCTAssertNil(blank["q"]); XCTAssertEqual(blank["cc0"], "1"); XCTAssertEqual(blank["has_image"], "1"); XCTAssertEqual(blank["skip"], "0")
+        let artist = CMAEndpoint.artistWorksURL(name: "Katsushika Hokusai")
+        XCTAssertEqual(items(artist)["artists"], "Katsushika Hokusai"); XCTAssertEqual(items(artist)["limit"], "100")
+        XCTAssertNil(items(artist)["skip"], "No pagination"); XCTAssertNil(items(artist)["cc0"])
+        XCTAssertEqual(CMAEndpoint.creatorURL(id: 23328).absoluteString, "https://openaccess-api.clevelandart.org/api/creators/23328")
+        XCTAssertEqual(CMAEndpoint.artworkURL(id: 111654).absoluteString, "https://openaccess-api.clevelandart.org/api/artworks/111654")
+    }
+
+    // MARK: Classification and credit
+
+    func testCMAClassifiesEachRowOnceIntoSettableThumbnailOnlyAndMetadataOnly() throws {
+        let settable = Self.cmaReference(111654, title: "The Great Wave")
+        XCTAssertEqual(settable.cmaKind, .settable); XCTAssertFalse(settable.blocksUse); XCTAssertFalse(settable.isCMABrowseOnly)
+        XCTAssertEqual(settable.identityKey, "cma:111654")
+        XCTAssertEqual(settable.sourcePageURL.absoluteString, "https://clevelandart.org/art/1930.111654")
+        XCTAssertEqual(settable.thumbnailURL.absoluteString, "https://openaccess-cdn.clevelandart.org/1930.111654/1930.111654_web.jpg")
+        XCTAssertEqual(settable.originalURL.absoluteString, "https://openaccess-cdn.clevelandart.org/1930.111654/1930.111654_print.jpg")
+        XCTAssertEqual(settable.galleryThumbnailURL(large: true), settable.thumbnailURL)
+        XCTAssertEqual(settable.remotePreview?.url, settable.thumbnailURL)
+        XCTAssertEqual(settable.width, 2000); XCTAssertEqual(settable.height, 1250)
+        XCTAssertEqual(settable.cmaProvenance, "Katsushika Hokusai · Cleveland Museum of Art · CC0")
+        XCTAssertEqual(settable.sourceDisplayName, "Cleveland Museum of Art")
+
+        // CC0 with a web rendition but no valid print: a thumbnail and a link, nothing more.
+        let thumbnailOnly = Self.cmaReference(2, printSize: nil)
+        XCTAssertEqual(thumbnailOnly.cmaKind, .thumbnailOnly); XCTAssertEqual(thumbnailOnly.useRestriction, .browseOnly)
+        XCTAssertNotNil(thumbnailOnly.galleryThumbnailURL(large: false)); XCTAssertNil(thumbnailOnly.remotePreview)
+        for bad in [("ABC", "1250"), ("2000", "0"), ("99999999999999999999", "1250"), ("-5", "100"), ("20.5", "100"), ("", "")] {
+            XCTAssertEqual(Self.cmaReference(3, printSize: bad).cmaKind, .thumbnailOnly, "Dimensions \(bad) reject the print")
+        }
+        // A print that metadata already shows can't be faithful is thumbnail-only, never an enabled Set.
+        for (name, size) in [("same size as web", ("800", "500")), ("small", ("1500", "900")), ("huge", ("12000", "9000"))] {
+            let row = Self.cmaReference(11, printSize: size)
+            XCTAssertEqual(row.cmaKind, .thumbnailOnly, name); XCTAssertEqual(row.useRestriction, .browseOnly, name)
+        }
+        var oversizedFile = Self.cmaRow(12, printFilesize: "999999999")
+        XCTAssertEqual(CMAParsing.reference(from: oversizedFile)?.cmaKind, .thumbnailOnly, "Reported size over the byte cap")
+        oversizedFile["images"] = ["print": ["url": "https://openaccess-cdn.clevelandart.org/1930.12/1930.12_web.jpg", "width": "2000", "height": "1250"],
+                                   "web": ["url": "https://openaccess-cdn.clevelandart.org/1930.12/1930.12_web.jpg", "width": "800", "height": "500"]]
+        XCTAssertEqual(CMAParsing.reference(from: oversizedFile)?.cmaKind, .thumbnailOnly, "A web rendition path offered as the print")
+        // A qualifier that is present but not text never reads as “no qualifier”.
+        let malformedCreators: [[String: Any]] = [["id": 23328, "description": "H (Japanese)", "role": "artist", "qualifier": 7]]
+        var malformed = Self.cmaRow(13); malformed["creators"] = malformedCreators
+        XCTAssertNil(CMAParsing.reference(from: malformed)?.cmaPivot)
+        // Not CC0, or no usable images (Kara Walker 287051): a text row. No image of any kind is ever derived from it.
+        let walker = Self.cmaReference(287051, creators: [Self.cmaCreator(5000, "Kara Walker (American, born 1969)")], license: "Copyrighted", web: nil, printSize: nil)
+        let copyrightedWithImages = Self.cmaReference(4, license: "Copyrighted")
+        let noWeb = Self.cmaReference(5, web: nil)
+        for reference in [walker, copyrightedWithImages, noWeb] {
+            XCTAssertEqual(reference.cmaKind, .metadataOnly, reference.identityKey)
+            XCTAssertNil(reference.galleryThumbnailURL(large: true)); XCTAssertNil(reference.remotePreview)
+            XCTAssertEqual(reference.useRestriction, .browseOnly); XCTAssertEqual(reference.cmaUseRestriction, .browseOnly)
+            XCTAssertTrue(reference.isCMABrowseOnly)
+            XCTAssertEqual(reference.originalURL, reference.sourcePageURL, "A text row's media URLs are the inert record page, never an image")
+        }
+        // Images that aren't an object (PHP's empty array), a record page off the museum's site, and a bad ID.
+        var odd = Self.cmaRow(6); odd["images"] = [Any]()
+        XCTAssertEqual(CMAParsing.reference(from: odd)?.cmaKind, .metadataOnly)
+        var offsite = Self.cmaRow(6); offsite["url"] = "https://evil.example/art/6"
+        XCTAssertNil(CMAParsing.reference(from: offsite)); offsite["url"] = "http://clevelandart.org/art/6"; XCTAssertNil(CMAParsing.reference(from: offsite))
+        var badID = Self.cmaRow(6); badID["id"] = "6; DROP"
+        XCTAssertNil(CMAParsing.reference(from: badID))
+        var foreignMedia = Self.cmaRow(6); foreignMedia["images"] = ["web": ["url": "https://evil.example/a/a_web.jpg", "width": "10", "height": "10"]]
+        XCTAssertEqual(CMAParsing.reference(from: foreignMedia)?.cmaKind, .metadataOnly, "A rendition off the CDN is not media")
+        // Only a plain creator role with no qualifier is credited as the maker.
+        XCTAssertEqual(Self.cmaReference(8, creators: [Self.cmaCreator(qualifier: "attributed to")]).cmaCreditName, "attributed to Katsushika Hokusai")
+        XCTAssertEqual(Self.cmaReference(8, creators: [Self.cmaCreator(role: "publisher")]).cmaCreditName, "Unattributed")
+        XCTAssertEqual(Self.cmaReference(8, creators: []).cmaCreditName, "Unattributed")
+        XCTAssertEqual(Self.cmaReference(9, creators: [Self.cmaCreator(), Self.cmaCreator(999, "Someone Else (French)", role: "publisher")]).cmaCreditName,
+                       "Katsushika Hokusai and others")
+        XCTAssertEqual(CMADisplay.name(fromDescription: " Foo &amp; Bar (French, 1900) "), "Foo & Bar")
+        XCTAssertEqual(CMADisplay.name(fromDescription: "(Japanese)"), "(Japanese)")
+        // The pivot is offered only when the record credits an ID plainly.
+        XCTAssertEqual(settable.cmaPivot?.id, 23328); XCTAssertEqual(settable.cmaPivot?.name, "Katsushika Hokusai")
+        XCTAssertNil(Self.cmaReference(8, creators: [Self.cmaCreator(qualifier: "after")]).cmaPivot)
+        XCTAssertNil(Self.cmaReference(8, creators: [Self.cmaCreator(role: "publisher")]).cmaPivot)
+        XCTAssertNil(Self.cmaReference(8, creators: [["description": "No ID (Japanese)", "role": "artist", "qualifier": ""]]).cmaPivot)
+        XCTAssertNil(openverseReference(1).cmaPivot)
+    }
+
+    func testCMASearchUsesDocumentedFiltersAndClassifiesRowsWithoutAnyImageRequest() async throws {
+        let network = CMAFakeNetwork()
+        let rows: [[String: Any]] = [Self.cmaRow(1), Self.cmaRow(2, printSize: nil), Self.cmaRow(3, license: "Copyrighted", web: nil, printSize: nil),
+                                     Self.cmaRow(1), ["id": 4]]
+        network.setRoute("search:q", Self.cmaEnvelope(rows, total: 45))
+        let page = try await CMAProvider(client: network).search(options: CMASearchOptions(query: "wave"), page: 2)
+        XCTAssertEqual(page.wallpapers.map(\.identityKey), ["cma:1", "cma:2", "cma:3"], "A repeated ID and a record with no link aren't rows")
+        XCTAssertEqual(page.hiddenCount, 2); XCTAssertEqual(page.currentPage, 2); XCTAssertEqual(page.lastPage, 3); XCTAssertEqual(page.total, 45)
+        XCTAssertEqual(page.wallpapers.map(\.cmaKind), [.settable, .thumbnailOnly, .metadataOnly])
+        XCTAssertEqual(network.apiEvents, ["api:search:q"]); XCTAssertEqual(network.mediaEvents, [])
+        XCTAssertEqual(URLComponents(url: network.urls[0], resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "skip" }?.value, "20")
+        // An empty page ends pagination whatever the total says; a non-object envelope or an HTTP error is a failure.
+        network.setRoute("search:q", Self.cmaEnvelope([], total: 900))
+        let empty = try await CMAProvider(client: network).search(options: CMASearchOptions(), page: 4)
+        XCTAssertFalse(empty.hasMorePages)
+        network.setRoute("search:q", CMAFakeNetwork.Route(body: Data("[]".utf8)))
+        do { _ = try await CMAProvider(client: network).search(options: CMASearchOptions(), page: 1); XCTFail("Expected invalid data") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .invalidData) }
+        network.setRoute("search:q", CMAFakeNetwork.Route(status: 500))
+        do { _ = try await CMAProvider(client: network).search(options: CMASearchOptions(), page: 1); XCTFail("Expected HTTP 500") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .httpStatus(500)) }
+        // Overflow-prone or malformed pagination metadata fails the page.
+        for total in [Any](arrayLiteral: 99_999_999_999_999, "99999999999999999999", -3, "many", 2.5) {
+            let envelope: [String: Any] = ["info": ["total": total], "data": [Self.cmaRow(1)]]
+            network.setRoute("search:q", CMAFakeNetwork.Route(body: Self.cmaJSON(envelope)))
+            do { _ = try await CMAProvider(client: network).search(options: CMASearchOptions(), page: 1); XCTFail("Total \(total) must be rejected") }
+            catch { XCTAssertEqual(error as? RemoteProviderError, .invalidData, "\(total)") }
+        }
+    }
+
+    // MARK: Creator identity and fanout
+
+    func testCMACreatorWorksIncludeOnlyExactIDPlainRoleAndEmptyQualifierInTwoRequests() async throws {
+        let network = Self.cmaCreatorNetwork()
+        let page = try await CMAProvider(client: network).creatorWorks(id: 23328)
+        XCTAssertEqual(page.name, "Katsushika Hokusai")
+        XCTAssertEqual(page.works.map(\.wallpaperID), ["111654", "152506", "152507", "152508", "900004"])
+        XCTAssertEqual(page.works.map(\.cmaKind), [.settable, .settable, .settable, .thumbnailOnly, .metadataOnly])
+        XCTAssertEqual(page.excluded, [900001: .qualifiedOrNonPlainRole, 900002: .otherCreator, 900003: .qualifiedOrNonPlainRole, 287051: .otherCreator])
+        XCTAssertEqual(page.hiddenCount, 1); XCTAssertEqual(page.matchTotal, 250); XCTAssertEqual(page.returnedCount, 10)
+        XCTAssertTrue(page.isTruncated); XCTAssertFalse(page.allOpenAccess, "A copyrighted row is in view, so it isn't all open access")
+        XCTAssertEqual(page.stubIDs, [111654, 152506, 900001, 900009], "The creator's stub list is diagnostics only")
+        XCTAssertEqual(network.apiEvents, ["api:/api/creators/23328", "api:search:artists"], "One creator detail and one search; no per-row details")
+        XCTAssertEqual(network.mediaEvents, [])
+        guard page.works.count == 5, network.urls.count == 2 else { return XCTFail("Unexpected creator page: \(page.works.count) works, \(network.urls.count) requests") }
+        let search = URLComponents(url: network.urls[1], resolvingAgainstBaseURL: false)
+        XCTAssertEqual(value(search, "artists"), "Katsushika Hokusai"); XCTAssertEqual(value(search, "limit"), "100")
+        XCTAssertEqual(page.works[0].cmaCreditName, "Katsushika Hokusai")
+        XCTAssertEqual(page.works[1].cmaCreditName, "Katsushika Hokusai and others", "Co-contributors are never named as authors")
+        XCTAssertEqual(page.works[1].title, "Fuji &amp; Waves"); XCTAssertEqual(page.works[1].displayTitle, "Fuji & Waves")
+        // All shown rows open access: the whole view can say so.
+        let open = try await CMAProvider(client: Self.cmaCreatorNetwork(allOpen: true)).creatorWorks(id: 23328)
+        XCTAssertTrue(open.allOpenAccess)
+
+        // Creator 1313 and derivatives credited "after": nothing is included, though the name matches.
+        let derivative = CMAFakeNetwork()
+        derivative.setRoute("/api/creators/1313", Self.cmaCreatorDetailRoute(id: 1313, name: "Pieter Bruegel", stubs: [800001, 800002]))
+        derivative.setRoute("search:artists", Self.cmaEnvelope([
+            Self.cmaRow(800001, creators: [Self.cmaCreator(1313, "Pieter Bruegel (Flemish)", qualifier: "after")]),
+            Self.cmaRow(800002, creators: [Self.cmaCreator(1313, "Pieter Bruegel (Flemish)", role: "after")]),
+            Self.cmaRow(800003, creators: [Self.cmaCreator(77, "Pieter Bruegel (Flemish)")])]))
+        let afterPage = try await CMAProvider(client: derivative).creatorWorks(id: 1313)
+        XCTAssertTrue(afterPage.works.isEmpty)
+        XCTAssertEqual(afterPage.excluded, [800001: .qualifiedOrNonPlainRole, 800002: .qualifiedOrNonPlainRole, 800003: .otherCreator], "Name text is never identity")
+        XCTAssertFalse(afterPage.isTruncated)
+    }
+
+    func testCMACreatorFailuresAreReportedAndNeverBroadenTheRequest() async throws {
+        // A different creator answering for this ID, an unknown creator, and a throttled or failing search.
+        let mismatch = CMAFakeNetwork()
+        mismatch.setRoute("/api/creators/23328", Self.cmaCreatorDetailRoute(id: 5))
+        do { _ = try await CMAProvider(client: mismatch).creatorWorks(id: 23328); XCTFail("Expected invalid data") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .invalidData) }
+        XCTAssertEqual(mismatch.apiEvents, ["api:/api/creators/23328"], "No search after an identity mismatch")
+
+        let missing = CMAFakeNetwork()
+        do { _ = try await CMAProvider(client: missing).creatorWorks(id: 23328); XCTFail("Expected 404") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .originalUnavailable) }
+        XCTAssertEqual(missing.apiEvents.count, 1)
+
+        let failing = Self.cmaCreatorNetwork()
+        failing.setRoute("search:artists", CMAFakeNetwork.Route(status: 500))
+        do { _ = try await CMAProvider(client: failing).creatorWorks(id: 23328); XCTFail("Expected HTTP 500") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .httpStatus(500)) }
+        XCTAssertEqual(failing.apiEvents.count, 2, "A failed search isn't retried")
+
+        let throttled = Self.cmaCreatorNetwork()
+        throttled.setRoute("/api/creators/23328", CMAFakeNetwork.Route(status: 429, headers: ["Retry-After": "120"]))
+        let provider = CMAProvider(client: throttled)
+        do { _ = try await provider.creatorWorks(id: 23328); XCTFail("Expected rate limit") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .rateLimited(retryAfter: 120)) }
+        do { _ = try await provider.creatorWorks(id: 23328); XCTFail("Expected backoff") } catch {}
+        XCTAssertEqual(throttled.apiEvents.count, 1, "A throttle holds further requests back")
+
+        // An API answer that ended off the API host is refused.
+        let offHost = Self.cmaCreatorNetwork()
+        offHost.setRoute("/api/creators/23328", CMAFakeNetwork.Route(body: Self.cmaCreatorDetailRoute().body, finalURL: URL(string: "https://evil.example/api/creators/23328")))
+        do { _ = try await CMAProvider(client: offHost).creatorWorks(id: 23328); XCTFail("Expected untrusted URL") }
+        catch { XCTAssertEqual(error as? RemoteProviderError, .untrustedURL) }
+    }
+
+    // MARK: Set-time media contract
+
+    func testCMAPrintDownloadChecksEligibilityFirstRefreshesDetailAndValidatesMedia() async throws {
+        let reference = Self.cmaReference(152506)
+        func attempt(_ configure: (CMAFakeNetwork) -> Void = { _ in }, reference: WallpaperReference? = nil) async -> (Result<URL, Error>, CMAFakeNetwork) {
+            let network = Self.cmaDownloadNetwork(); configure(network)
+            do { return (.success(try await CMAProvider(client: network).downloadPrint(for: reference ?? Self.cmaReference(152506)).file), network) }
+            catch { return (.failure(error), network) }
+        }
+        func failure(_ result: Result<URL, Error>) -> Error? { if case .failure(let error) = result { return error }; return nil }
+
+        // Success: detail is refreshed before the print is requested; the file is a faithful JPEG.
+        let (good, network) = await attempt()
+        let file = try good.get()
+        XCTAssertEqual(network.events, ["api:/api/artworks/152506", "media:\(reference.originalURL.absoluteString)"])
+        XCTAssertTrue(CMAProvider.isFaithfulPrint(at: file, for: reference)); XCTAssertTrue(CMAProvider.startsWithJPEGMarker(file))
+        try? FileManager.default.removeItem(at: file)
+
+        // Browse-only and untrusted references are refused before any request at all.
+        let metadataOnly = Self.cmaReference(287051, license: "Copyrighted", web: nil, printSize: nil)
+        let thumbnailOnly = Self.cmaReference(2, printSize: nil)
+        let tampered = WallpaperReference(providerIdentifier: "cma", wallpaperID: "152506", sourcePageURL: reference.sourcePageURL,
+                                          originalURL: URL(string: "https://evil.example/1930.152506/1930.152506_print.jpg")!,
+                                          previewURL: reference.previewURL, thumbnailURL: reference.thumbnailURL, width: 2000, height: 1250,
+                                          uploader: nil, tags: [], cachedLocalPath: nil, title: "Tampered", cma: reference.cma)
+        for (name, candidate, expected) in [("metadata-only", metadataOnly, RemoteProviderError.browseOnly), ("thumbnail-only", thumbnailOnly, .browseOnly),
+                                            ("tampered original", tampered, .untrustedURL), ("other provider", remoteReference(id: "abc123"), .untrustedURL)] {
+            let (result, untouched) = await attempt(reference: candidate)
+            XCTAssertEqual(failure(result) as? RemoteProviderError, expected, name)
+            XCTAssertEqual(untouched.events, [], "\(name): no API or media request")
+        }
+
+        // A refreshed record that no longer qualifies stops before the media request.
+        let refreshCases: [(String, (CMAFakeNetwork) -> Void, RemoteProviderError)] = [
+            ("no longer CC0", { $0.setRoute("/api/artworks/152506", Self.cmaDetailRoute(Self.cmaRow(152506, license: "Copyrighted"))) }, .notOpenAccess),
+            ("print removed", { $0.setRoute("/api/artworks/152506", Self.cmaDetailRoute(Self.cmaRow(152506, printSize: nil))) }, .notOpenAccess),
+            ("non-numeric dimensions", { $0.setRoute("/api/artworks/152506", Self.cmaDetailRoute(Self.cmaRow(152506, printSize: ("big", "1250")))) }, .notOpenAccess),
+            ("print now too small", { $0.setRoute("/api/artworks/152506", Self.cmaDetailRoute(Self.cmaRow(152506, printSize: ("1800", "1100")))) }, .notOpenAccess),
+            ("print now the web size", { $0.setRoute("/api/artworks/152506", Self.cmaDetailRoute(Self.cmaRow(152506, printSize: ("800", "500")))) }, .notOpenAccess),
+            ("overflowing dimensions", { $0.setRoute("/api/artworks/152506", Self.cmaDetailRoute(Self.cmaRow(152506, printSize: ("99999999999999999999", "1250")))) }, .notOpenAccess),
+            ("detail for another work", { $0.setRoute("/api/artworks/152506", Self.cmaDetailRoute(Self.cmaRow(152507))) }, .invalidData),
+            ("detail gone", { $0.setRoute("/api/artworks/152506", CMAFakeNetwork.Route(status: 404)) }, .originalUnavailable)
+        ]
+        for (name, configure, expected) in refreshCases {
+            let (result, refreshed) = await attempt(configure)
+            XCTAssertEqual(failure(result) as? RemoteProviderError, expected, name)
+            XCTAssertEqual(refreshed.mediaEvents, [], "\(name): the print is never requested")
+        }
+
+        // Bytes and pixels are checked before anything is kept.
+        let mediaCases: [(String, (CMAFakeNetwork) -> Void, RemoteProviderError)] = [
+            ("png content type", { $0.media.headers["Content-Type"] = "image/png" }, .mediaRejected),
+            ("html content type", { $0.media.headers["Content-Type"] = "text/html" }, .mediaRejected),
+            ("png bytes labelled jpeg", { $0.media.body = Self.imageData(width: 2000, height: 1250) }, .mediaRejected),
+            ("wrong pixel size", { $0.media.body = Self.imageData(width: 2100, height: 1250, type: "public.jpeg") }, .mediaRejected),
+            ("final path is another item", { $0.media.finalURL = URL(string: "https://openaccess-cdn.clevelandart.org/1930.1/1930.1_print.jpg") }, .untrustedURL),
+            ("final path has a query", { $0.media.finalURL = URL(string: "https://openaccess-cdn.clevelandart.org/1930.152506/1930.152506_print.jpg?x=1") }, .untrustedURL),
+            ("larger than the reported size allows", { $0.setRoute("/api/artworks/152506", Self.cmaDetailRoute(Self.cmaRow(152506, printFilesize: "100"))) }, .mediaRejected),
+            ("oversized stream", { $0.streamedBytes = CMAURLPolicy.maximumDownloadBytes + 1 }, .originalTooLarge),
+            ("off-host final URL", { $0.media.finalURL = URL(string: "https://evil.example/1930.152506/1930.152506_print.jpg") }, .untrustedURL),
+            ("http downgrade", { $0.media.finalURL = URL(string: "http://openaccess-cdn.clevelandart.org/1930.152506/1930.152506_print.jpg") }, .untrustedURL),
+            ("refused redirect", { $0.media.status = 302 }, .untrustedURL),
+            ("gone", { $0.media.status = 404 }, .originalUnavailable),
+            ("server error", { $0.media.status = 500 }, .httpStatus(500))
+        ]
+        for (name, configure, expected) in mediaCases {
+            let (result, failed) = await attempt(configure)
+            XCTAssertEqual(failure(result) as? RemoteProviderError, expected, name)
+            XCTAssertEqual(failed.apiEvents, ["api:/api/artworks/152506"], "\(name): detail refreshed once")
+            XCTAssertFalse(failed.temporaries.contains { FileManager.default.fileExists(atPath: $0.path) }, "\(name): temporary file removed")
+        }
+    }
+
+    func testCMAPixelRulesRejectSubstitutedThumbnailsAndExcessiveSizes() {
+        let tolerance = CMAURLPolicy.dimensionTolerance
+        XCTAssertEqual(tolerance, 2)
+        XCTAssertTrue(CMAProvider.acceptsDimensions(decoded: (3400, 2329), reported: (3400, 2329), web: (900, 617)))
+        XCTAssertTrue(CMAProvider.acceptsDimensions(decoded: (3402, 2327), reported: (3400, 2329), web: nil), "±2 px")
+        XCTAssertFalse(CMAProvider.acceptsDimensions(decoded: (3403, 2329), reported: (3400, 2329), web: nil))
+        XCTAssertFalse(CMAProvider.acceptsDimensions(decoded: (900, 617), reported: (900, 617), web: (900, 617)), "The web thumbnail is not a print")
+        XCTAssertFalse(CMAProvider.acceptsDimensions(decoded: (2000, 1250), reported: (2000, 1250), web: (2001, 1249)), "A print the size of its thumbnail")
+        XCTAssertFalse(CMAProvider.acceptsDimensions(decoded: (1919, 1000), reported: (1919, 1000), web: nil), "Long edge under 1920")
+        XCTAssertTrue(CMAProvider.acceptsDimensions(decoded: (1920, 1000), reported: (1920, 1000), web: nil))
+        XCTAssertTrue(CMAProvider.acceptsDimensions(decoded: (10_000, 8_000), reported: (10_000, 8_000), web: nil), "Exactly 80 MP")
+        XCTAssertFalse(CMAProvider.acceptsDimensions(decoded: (10_000, 8_001), reported: (10_000, 8_001), web: nil), "Over 80 MP")
+        XCTAssertFalse(CMAProvider.acceptsDimensions(decoded: (0, 0), reported: (0, 0), web: nil))
+        XCTAssertEqual(CMAURLPolicy.maximumDownloadBytes, 40 * 1_024 * 1_024)
+    }
+
+    /// Every scenario here ends: a finite body and EOF, or a stop by the downloader. A hung fake fails the test after ten seconds
+    /// instead of blocking the run. Redirect refusal is asserted deterministically through `CMAURLPolicy` above.
+    func testCMABoundedDownloaderStopsOversizedStreamsAtTheCapAndCleansUp() async throws {
+        func downloader(_ url: URL, cap: Int64 = 3 * 1_048_576) -> BoundedDownloader {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [CMAStreamProtocol.self]
+            return BoundedDownloader(request: URLRequest(url: url), maximumBytes: cap, maximumRedirects: CMAURLPolicy.maximumRedirects,
+                                     allowsRedirect: { from, to in to.host == from.host && to.scheme == "https" }, configuration: configuration)
+        }
+        func run(_ downloader: BoundedDownloader) async -> Result<(URL, HTTPURLResponse), Error> {
+            let task = Task<Result<(URL, HTTPURLResponse), Error>, Never> {
+                do { return .success(try await downloader.run()) } catch { return .failure(error) }
+            }
+            let watchdog = Task { try? await Task.sleep(nanoseconds: 10_000_000_000); task.cancel() }
+            let result = await task.value
+            watchdog.cancel()
+            return result
+        }
+        func partFiles() -> Int {
+            ((try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? [])
+                .filter { $0.hasPrefix("wallpier-download-") }.count
+        }
+        let print = URL(string: "https://openaccess-cdn.clevelandart.org/1930.189/1930.189_print.jpg")!
+        defer { CMAStreamProtocol.reset() }
+
+        // A body within the cap streams to a file.
+        CMAStreamProtocol.reset()
+        CMAStreamProtocol.script = { proto in
+            proto.respond(status: 200, headers: ["Content-Type": "image/jpeg"])
+            for _ in 0..<3 { proto.send(Data(repeating: 7, count: 1_000)) }
+            proto.finish()
+        }
+        guard case .success(let (file, response)) = await run(downloader(print)) else { return XCTFail("A body within the cap must complete") }
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue, 3_000)
+        try? FileManager.default.removeItem(at: file)
+
+        // A long stream is cut off at the cap and leaves nothing behind (it would otherwise end after 12 MB).
+        let before = partFiles()
+        CMAStreamProtocol.reset()
+        CMAStreamProtocol.script = { proto in
+            proto.respond(status: 200, headers: ["Content-Type": "image/jpeg"])
+            DispatchQueue.global().async {
+                for _ in 0..<12 where !proto.stopped { proto.send(Data(repeating: 1, count: 1_048_576)); Thread.sleep(forTimeInterval: 0.02) }
+                if !proto.stopped { proto.finish() }
+            }
+        }
+        if case .failure(let error) = await run(downloader(print)) { XCTAssertEqual(error as? RemoteProviderError, .originalTooLarge) }
+        else { XCTFail("The cap must stop the transfer") }
+        XCTAssertLessThan(CMAStreamProtocol.chunksSent, 12, "The stream was stopped, not drained")
+        XCTAssertEqual(partFiles(), before, "The partial file is removed")
+
+        // A declared length over the cap is refused, with a finite body and EOF behind it.
+        CMAStreamProtocol.reset()
+        CMAStreamProtocol.script = { proto in
+            proto.respond(status: 200, headers: ["Content-Type": "image/jpeg", "Content-Length": "999999999"])
+            proto.send(Data(repeating: 2, count: 100)); proto.finish()
+        }
+        if case .failure(let error) = await run(downloader(print)) { XCTAssertEqual(error as? RemoteProviderError, .originalTooLarge) }
+        else { XCTFail("A declared oversize must stop") }
+        XCTAssertEqual(partFiles(), before)
+    }
+
+    // MARK: Persistence and thumbnails
+
+    func testCMAReferencesPersistInMixedFavoritesAndCollectionsAndThumbnailsAreCheckedAfterPersistence() throws {
+        let root = try historyTestFolder(); defer { try? FileManager.default.removeItem(at: root) }
+        let museum = Self.cmaReference(111654, title: "The Great Wave &amp; More")
+        let openverse = openverseReference(3)
+        let wallhaven = remoteReference(id: "wh0001")
+        var state = WallpaperState()
+        state.favorites = [wallhaven, museum, openverse]
+        state.collections = [WallpaperCollection(name: "Mixed", wallpapers: [openverse, museum, wallhaven])]
+        state.cmaSearch.query = "wave"; state.discoverProvider = .cma
+        let store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
+        XCTAssertTrue(store.save(state))
+        let loaded = store.load()
+        XCTAssertEqual(loaded.favorites, state.favorites); XCTAssertEqual(loaded.collections.first?.wallpapers, [openverse, museum, wallhaven])
+        XCTAssertEqual(loaded.favorites.map(\.provider), [.wallhaven, .cma, .openverse])
+        XCTAssertEqual(loaded.discoverProvider, .cma); XCTAssertEqual(loaded.cmaSearch.query, "wave")
+        let reloaded = try XCTUnwrap(loaded.favorites.dropFirst().first)
+        XCTAssertEqual(reloaded.cma, museum.cma); XCTAssertEqual(reloaded.cmaKind, .settable)
+        XCTAssertEqual(reloaded.title, "The Great Wave &amp; More"); XCTAssertEqual(reloaded.displayTitle, "The Great Wave & More")
+        XCTAssertEqual(reloaded.cmaProvenance, "Katsushika Hokusai · Cleveland Museum of Art · CC0")
+        XCTAssertEqual(reloaded.cmaPageURL?.absoluteString, "https://clevelandart.org/art/1930.111654")
+        // State saved before the museum source existed still loads.
+        let legacy = try JSONDecoder().decode(WallpaperState.self, from: Data(#"{"discoverProvider":"museum-of-nothing"}"#.utf8))
+        XCTAssertEqual(legacy.discoverProvider, .wallhaven); XCTAssertEqual(legacy.cmaSearch, CMASearchOptions())
+
+        // A saved reference whose media addresses were edited fails closed: no thumbnail, no Set, no media request.
+        func tampered(thumbnail: String, original: String) -> WallpaperReference {
+            WallpaperReference(providerIdentifier: "cma", wallpaperID: "111654", sourcePageURL: museum.sourcePageURL,
+                               originalURL: URL(string: original)!, previewURL: URL(string: thumbnail)!, thumbnailURL: URL(string: thumbnail)!,
+                               width: 2000, height: 1250, uploader: nil, tags: [], cachedLocalPath: nil, title: "T", cma: museum.cma)
+        }
+        for bad in [tampered(thumbnail: "http://openaccess-cdn.clevelandart.org/1930.1/1930.1_web.jpg", original: museum.originalURL.absoluteString),
+                    tampered(thumbnail: "https://evil.example/1930.1/1930.1_web.jpg", original: museum.originalURL.absoluteString),
+                    tampered(thumbnail: museum.thumbnailURL.absoluteString, original: "https://evil.example/1930.1/1930.1_print.jpg")] {
+            XCTAssertEqual(bad.useRestriction, .untrustedURL)
+            if bad.thumbnailURL.host?.contains("evil") == true || bad.thumbnailURL.scheme == "http" { XCTAssertNil(bad.galleryThumbnailURL(large: true)) }
+        }
+        var edited = museum.cma!; edited.hasPrint = false
+        let downgraded = WallpaperReference(providerIdentifier: "cma", wallpaperID: "1", sourcePageURL: museum.sourcePageURL, originalURL: museum.originalURL,
+                                            previewURL: museum.thumbnailURL, thumbnailURL: museum.thumbnailURL, width: 1, height: 1,
+                                            uploader: nil, tags: [], cachedLocalPath: nil, cma: edited)
+        XCTAssertEqual(downgraded.useRestriction, .browseOnly)
+        // A saved reference with no museum record at all is metadata-only: it never reaches an image request.
+        let bare = WallpaperReference(providerIdentifier: "cma", wallpaperID: "1", sourcePageURL: museum.sourcePageURL, originalURL: museum.originalURL,
+                                      previewURL: museum.thumbnailURL, thumbnailURL: museum.thumbnailURL, width: 1, height: 1, uploader: nil, tags: [], cachedLocalPath: nil)
+        XCTAssertNil(bare.galleryThumbnailURL(large: true)); XCTAssertTrue(bare.blocksUse)
+
+        // The thumbnail provider re-checks the requested and final URL and the content type.
+        let requested = museum.thumbnailURL
+        func response(_ url: URL, status: Int = 200, type: String? = "image/jpeg") -> HTTPURLResponse {
+            HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: type.map { ["Content-Type": $0] })!
+        }
+        XCTAssertTrue(RemoteThumbnailProvider.accepts(response(requested), for: requested, byteCount: 1_000))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(response(requested, type: "text/html"), for: requested, byteCount: 1_000))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(response(requested, type: nil), for: requested, byteCount: 1_000))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(response(URL(string: "https://evil.example/a_web.jpg")!), for: requested, byteCount: 1_000))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(response(URL(string: "http://openaccess-cdn.clevelandart.org/1930.111654/1930.111654_web.jpg")!), for: requested, byteCount: 1_000))
+        XCTAssertFalse(RemoteThumbnailProvider.accepts(response(requested, status: 404), for: requested, byteCount: 1_000))
+        for invalid in ["https://clevelandart.org/art/1930.1", "http://openaccess-cdn.clevelandart.org/1930.1/1930.1_web.jpg", "https://www.clevelandart.org/x.jpg"] {
+            var called = false; var image: NSImage? = NSImage()
+            RemoteThumbnailProvider().requestThumbnail(for: URL(string: invalid)!) { image = $0; called = true }
+            XCTAssertTrue(called, invalid); XCTAssertNil(image, "\(invalid) is never requested")
+        }
+    }
+
+    // MARK: Native controller
+
+    @MainActor
+    func testCMAEncounterPivotBrowseOnlyRowsPreviewSetUndoFavoriteAndRelaunch() async throws {
+        let network = Self.cmaCreatorNetwork()
+        let desktop = SetAuditWallpaperService()
+        let thumbnails = RecordingThumbnails()
+        let (c, _, root, anchor) = try cmaController(network, desktop: desktop, thumbnails: thumbnails)
+        let prior = root.appendingPathComponent("prior.png")
+        try writeTestImage(to: prior); desktop.current = prior
+
+        // Encounter: the anchor credits one creator plainly, so the pivot is offered, and browsing cost no request.
+        XCTAssertEqual(c.selectedIdentityForTesting, anchor.identityKey)
+        XCTAssertFalse(c.moreByButton.isHidden); XCTAssertEqual(c.moreByButton.title, "More by Katsushika Hokusai")
+        XCTAssertEqual(network.events, [])
+        c.moreByButton.performClick(nil)
+        var reached = await eventually { c.visibleItemIdentitiesForTesting.count == 4 }
+        guard reached else { return XCTFail("The creator view showed \(c.visibleItemIdentitiesForTesting) (\(c.emptyStateView.title))") }
+        XCTAssertEqual(c.visibleItemIdentitiesForTesting, ["cma:152506", "cma:152507", "cma:152508", "cma:900004"], "Excluded rows are never shown; the anchor is the one left behind")
+        XCTAssertEqual(network.apiEvents, ["api:/api/creators/23328", "api:search:artists"])
+        XCTAssertEqual(c.creatorTitleLabel.stringValue, "Katsushika Hokusai"); XCTAssertEqual(c.window?.title, "Katsushika Hokusai")
+        XCTAssertEqual(c.creatorSubtitleLabel.stringValue, "Works at Cleveland Museum of Art", "A copyrighted record is in view, so it isn't called open access")
+        XCTAssertFalse(c.creatorBar.isHidden); XCTAssertTrue(c.moreByButton.isHidden, "One level only")
+        XCTAssertEqual(c.creatorStatusLabel.stringValue, "Showing 4 works from the first 10 of 250 matches")
+        XCTAssertFalse(c.creatorLinkButton.isHidden)
+
+        // Thumbnail-only and metadata-only rows: shown and linkable, never previewed, set, favorited or requested.
+        selectCMAItem(2, in: c)
+        XCTAssertFalse(c.setWallpaperButton.isEnabled); XCTAssertTrue(c.favoriteButton.isHidden); XCTAssertFalse(c.viewOnMuseumButton.isHidden)
+        c.toggleFavorite(nil); XCTAssertEqual(c.state.favorites.map(\.identityKey), [anchor.identityKey])
+        c.toggleViewer(nil); XCTAssertFalse(c.isViewerVisible)
+        c.setWallpaper(nil); XCTAssertNil(c.downloadTask)
+        let badge = c.collectionView(c.collectionView, itemForRepresentedObjectAt: IndexPath(item: 2, section: 0)) as? WallpaperCollectionViewItem
+        XCTAssertEqual(badge?.captionText, "No high-resolution JPEG")
+        selectCMAItem(3, in: c)
+        XCTAssertFalse(c.setWallpaperButton.isEnabled); XCTAssertFalse(c.viewOnMuseumButton.isHidden)
+        c.toggleViewer(nil); XCTAssertFalse(c.isViewerVisible)
+        let textRow = c.collectionView(c.collectionView, itemForRepresentedObjectAt: IndexPath(item: 3, section: 0)) as? WallpaperCollectionViewItem
+        XCTAssertEqual(textRow?.captionText, "Plain Copyrighted\nabout 1831\nKatsushika Hokusai\nView on Cleveland Museum of Art ↗")
+        XCTAssertFalse(thumbnails.requested.contains { $0.absoluteString.contains("900004") }, "A text row never asks for an image")
+        XCTAssertEqual(network.mediaEvents, [])
+        XCTAssertTrue(network.urls.allSatisfy { $0.host == "openaccess-api.clevelandart.org" })
+
+        // A settable work: preview downloads nothing; the credit and the museum link are shown.
+        selectCMAItem(0, in: c)
+        XCTAssertTrue(c.setWallpaperButton.isEnabled); XCTAssertFalse(c.favoriteButton.isHidden)
+        c.toggleViewer(nil); XCTAssertTrue(c.isViewerVisible)
+        reached = await eventually { c.stageView.image != nil }
+        XCTAssertTrue(reached)
+        XCTAssertEqual(c.previewTitleLabel.stringValue, "Fuji & Waves")
+        XCTAssertEqual(c.previewAttributionLabel.attributedStringValue.string, "Katsushika Hokusai and others · Cleveland Museum of Art · CC0")
+        XCTAssertEqual(network.mediaEvents, [])
+        c.toggleViewer(nil)
+
+        // Set on the selected display: detail refreshed, then the print; a retained JPEG, not a cache file.
+        c.setWallpaper(nil)
+        XCTAssertEqual(c.statusLabel.stringValue, "Downloading high-resolution museum JPEG…")
+        try await finishAuditTask(c.downloadTask)
+        let events = network.events
+        guard desktop.calls.count == 1 else { return XCTFail("Set did not reach the desktop: \(c.statusLabel.stringValue)") }
+        XCTAssertEqual(Array(events.suffix(2)), ["api:/api/artworks/152506", "media:https://openaccess-cdn.clevelandart.org/1930.152506/1930.152506_print.jpg"])
+        XCTAssertEqual(desktop.calls.count, 1)
+        let applied = try XCTUnwrap(desktop.calls.first?.image)
+        XCTAssertTrue(applied.path.hasPrefix(root.appendingPathComponent("Rollback").path), "The desktop references an owned copy")
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(applied as CFURL, nil))
+        XCTAssertEqual(CGImageSourceGetType(source) as String?, "public.jpeg")
+        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        XCTAssertEqual(properties[kCGImagePropertyPixelWidth] as? Int, 2000); XCTAssertEqual(properties[kCGImagePropertyPixelHeight] as? Int, 1250)
+        XCTAssertTrue(CMAProvider.startsWithJPEGMarker(applied))
+        XCTAssertEqual(c.statusLabel.stringValue, "Set on Studio Display · High-resolution museum JPEG (CC0)")
+        XCTAssertFalse(c.statusUndoButton.isHidden)
+
+        // Undo restores the prior wallpaper.
+        c.undoWallpaperChange(nil)
+        try await finishAuditTask(c.downloadTask)
+        let restored = try XCTUnwrap(desktop.calls.last?.image)
+        XCTAssertEqual(try Data(contentsOf: restored), try Data(contentsOf: prior))
+        XCTAssertTrue(c.state.history.isEmpty)
+
+        // Favorite it; Favorites now mix providers and survive a relaunch with credit and link intact.
+        selectCMAItem(0, in: c)
+        c.toggleFavorite(nil)
+        XCTAssertEqual(c.state.favorites.map(\.identityKey), [anchor.identityKey, "cma:152506"])
+        let store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
+        let saved = store.load()
+        XCTAssertEqual(saved.favorites.map(\.identityKey), [anchor.identityKey, "cma:152506"])
+        XCTAssertNotNil(saved.favorites.last?.cachedLocalPath)
+        c.closeCreator(nil)
+
+        let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 1120, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        addTeardownBlock { await MainActor.run { window.close() } }
+        let relaunched = MainWindowController(
+            window: window, wallpaperService: SetAuditWallpaperService(), stateStore: store,
+            provider: WallhavenProvider(client: OfflineNetwork()), openverseProvider: OpenverseProvider(client: OfflineNetwork()),
+            cmaProvider: CMAProvider(client: OfflineNetwork()), originalCache: RemoteWallpaperCache(rootURL: root.appendingPathComponent("Originals")),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")), remoteThumbnailProvider: RecordingThumbnails(),
+            availableScreens: { [CaptureScreen()] })
+        relaunched.prepareForVisualCapture(discoverPage: RemoteSearchPage(wallpapers: [], currentPage: 1, lastPage: 1, total: 0,
+                                                                          rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil)))
+        relaunched.showFavorites(nil)
+        XCTAssertEqual(relaunched.visibleItemIdentitiesForTesting, [anchor.identityKey, "cma:152506"])
+        selectCMAItem(1, in: relaunched)
+        let attribution = relaunched.previewAttributionLabel.attributedStringValue
+        XCTAssertEqual(attribution.string, "Katsushika Hokusai and others · Cleveland Museum of Art · CC0")
+        let linkAt = (attribution.string as NSString).range(of: "Cleveland").location
+        guard linkAt != NSNotFound else { return XCTFail("No museum credit in “\(attribution.string)”") }
+        XCTAssertEqual(attribution.attribute(.link, at: linkAt, effectiveRange: nil) as? URL, URL(string: "https://clevelandart.org/art/1930.152506"))
+        XCTAssertFalse(relaunched.moreByButton.isHidden, "The creator can be reopened from a saved favorite")
+        relaunched.window?.close()
+    }
+
+    @MainActor
+    func testCMACreatorViewBackEscSourceSwitchAndRepeatedReopenNeverRepeatRequests() async throws {
+        let network = Self.cmaCreatorNetwork(allOpen: true)
+        network.setRoute("search:q", Self.cmaEnvelope([Self.cmaRow(111654, title: "The Great Wave"), Self.cmaRow(152509, title: "Another")], total: 2))
+        let (c, window, _, anchor) = try cmaController(network)
+        func escape() throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                           context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        }
+        c.showCMA(nil)
+        var reached = await eventually { c.visibleItemIdentitiesForTesting == ["cma:111654", "cma:152509"] }
+        guard reached else { return XCTFail("Discover showed \(c.visibleItemIdentitiesForTesting) (\(c.emptyStateView.title))") }
+        XCTAssertEqual(c.state.discoverProvider, .cma); XCTAssertEqual(c.sidebarForTesting.selectedItem, .cma)
+        XCTAssertEqual(c.searchField.placeholderString, "Search Cleveland Museum of Art")
+        XCTAssertFalse(c.cmaNoticeLabel.isHidden); XCTAssertTrue(c.categoryPopUp.isHidden); XCTAssertTrue(c.openverseLicensePopUp.isHidden)
+        XCTAssertEqual(c.selectedIdentityForTesting, anchor.identityKey)
+        let parentScroll = c.galleryScrollForTesting.contentView.bounds.origin.y
+
+        // Open the creator; the header is the creator's, and every row is open access.
+        c.moreByButton.performClick(nil)
+        reached = await eventually { c.visibleItemIdentitiesForTesting.count == 4 }
+        XCTAssertTrue(reached)
+        XCTAssertEqual(c.creatorSubtitleLabel.stringValue, "Cleveland Museum of Art · Open-access works")
+        XCTAssertEqual(c.window?.subtitle, "Cleveland Museum of Art · Open-access works")
+        func creatorRequests() -> Int { network.apiEvents.filter { $0.contains("creators") || $0.contains("artists") }.count }
+        XCTAssertEqual(creatorRequests(), 2)
+
+        // Esc in the preview closes the preview first; Esc in the gallery then goes back, to the starting tile.
+        selectCMAItem(1, in: c)
+        c.toggleViewer(nil); XCTAssertTrue(c.isViewerVisible)
+        c.viewerView.keyDown(with: try escape())
+        XCTAssertFalse(c.isViewerVisible); XCTAssertTrue(c.isShowingCreatorViewForTesting)
+        window.makeFirstResponder(c.collectionView)
+        c.collectionView.keyDown(with: try escape())
+        XCTAssertFalse(c.isShowingCreatorViewForTesting)
+        XCTAssertEqual(c.visibleItemIdentitiesForTesting, ["cma:111654", "cma:152509"])
+        XCTAssertEqual(c.selectedIdentityForTesting, anchor.identityKey)
+        XCTAssertTrue(window.firstResponder === c.collectionView)
+        XCTAssertEqual(c.galleryScrollForTesting.contentView.bounds.origin.y, parentScroll)
+        XCTAssertEqual(c.window?.title, "Discover"); XCTAssertTrue(c.creatorBar.isHidden)
+        c.collectionView.keyDown(with: try escape())
+        XCTAssertFalse(c.isShowingCreatorViewForTesting, "Esc with nothing to leave does nothing")
+
+        // Reopening the same creator reuses what's in memory: no request, and rows at once.
+        c.moreByButton.performClick(nil)
+        XCTAssertEqual(c.visibleItemIdentitiesForTesting.count, 4)
+        XCTAssertEqual(creatorRequests(), 2); XCTAssertEqual(c.creatorCacheKeysForTesting, ["cma:23328"])
+        selectCMAItem(2, in: c)
+        // Source switching parks the creator view with its source, and returning restores it as it was.
+        c.showOpenverse(nil)
+        XCTAssertFalse(c.isShowingCreatorViewForTesting); XCTAssertEqual(c.parkedCreatorCountForTesting, 1)
+        XCTAssertEqual(c.state.discoverProvider, .openverse)
+        c.showCMA(nil)
+        XCTAssertTrue(c.isShowingCreatorViewForTesting); XCTAssertEqual(c.parkedCreatorCountForTesting, 0)
+        XCTAssertEqual(c.visibleItemIdentitiesForTesting.count, 4)
+        XCTAssertEqual(c.selectedIdentityForTesting, "cma:152508")
+        XCTAssertEqual(creatorRequests(), 2)
+        XCTAssertEqual(network.apiEvents.filter { $0 == "api:search:q" }.count, 1, "The CMA results were parked, not searched again")
+
+        // The ← Gallery button goes back like Esc; a new search drops the creator view.
+        c.creatorBackButton.performClick(nil)
+        XCTAssertFalse(c.isShowingCreatorViewForTesting)
+        XCTAssertEqual(c.visibleItemIdentitiesForTesting, ["cma:111654", "cma:152509"]); XCTAssertEqual(c.selectedIdentityForTesting, anchor.identityKey)
+        c.moreByButton.performClick(nil)
+        XCTAssertTrue(c.isShowingCreatorViewForTesting)
+        c.search(nil)
+        XCTAssertFalse(c.isShowingCreatorViewForTesting); XCTAssertEqual(c.parkedCreatorCountForTesting, 0)
+        reached = await eventually { network.apiEvents.filter { $0 == "api:search:q" }.count == 2 }
+        XCTAssertTrue(reached)
+    }
+
+    @MainActor
+    func testCMACreatorFailureOffersRetryThatClearsTheCachedEntry() async throws {
+        let network = Self.cmaCreatorNetwork(allOpen: true)
+        network.setRoute("/api/creators/23328", CMAFakeNetwork.Route(status: 500))
+        let (c, _, _, _) = try cmaController(network)
+        c.moreByButton.performClick(nil)
+        let failed = await eventually { c.emptyStateView.title == "Couldn’t load works from Cleveland Museum of Art." }
+        XCTAssertTrue(failed, c.emptyStateView.title)
+        XCTAssertEqual(c.emptyStateView.actionButton.title, "Retry")
+        XCTAssertEqual(c.creatorCacheKeysForTesting, [], "A failure is never cached")
+        XCTAssertTrue(c.isShowingCreatorViewForTesting)
+        network.setRoute("/api/creators/23328", Self.cmaCreatorDetailRoute())
+        c.emptyStateView.actionButton.performClick(nil)
+        let loaded = await eventually { c.visibleItemIdentitiesForTesting.count == 4 }
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(network.apiEvents, ["api:/api/creators/23328", "api:/api/creators/23328", "api:search:artists"])
+        XCTAssertEqual(c.creatorCacheKeysForTesting, ["cma:23328"])
+        // Retry clears the entry: after a second failure-free open there is exactly one more fetch only on Retry.
+        c.creatorBackButton.performClick(nil)
+        c.moreByButton.performClick(nil)
+        XCTAssertEqual(network.apiEvents.count, 3)
+
+        // A creator with nothing else to show says so.
+        let lonely = CMAFakeNetwork()
+        lonely.setRoute("/api/creators/23328", Self.cmaCreatorDetailRoute())
+        lonely.setRoute("search:artists", Self.cmaEnvelope([Self.cmaRow(111654)]))
+        let (alone, _, _, _) = try cmaController(lonely)
+        alone.moreByButton.performClick(nil)
+        let empty = await eventually { alone.emptyStateView.title == "No other open-access works available in Cleveland Museum of Art." }
+        XCTAssertTrue(empty, alone.emptyStateView.title)
+        XCTAssertEqual(alone.visibleItemIdentitiesForTesting, [])
+        alone.creatorBackButton.performClick(nil)
+        XCTAssertEqual(alone.selectedIdentityForTesting, "cma:111654")
+    }
+
+    @MainActor
+    func testBracketShortcutsStillBindPreviousAndNextWallpaperAndNewMuseumCommandsAddNoShortcuts() throws {
+        let network = CMAFakeNetwork()
+        let (c, _, _, _) = try cmaController(network)
+        let saved = NSApp.mainMenu
+        defer { NSApp.mainMenu = saved }
+        AppDelegate().configureMainMenu(for: c)
+        let wallpaper = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "Wallpaper")?.submenu)
+        let previous = try XCTUnwrap(wallpaper.item(withTitle: "Previous Wallpaper")), next = try XCTUnwrap(wallpaper.item(withTitle: "Next Wallpaper"))
+        XCTAssertEqual(previous.keyEquivalent, "["); XCTAssertEqual(previous.keyEquivalentModifierMask, .command)
+        XCTAssertEqual(previous.action, #selector(MainWindowController.previousWallpaper(_:)))
+        XCTAssertEqual(next.keyEquivalent, "]"); XCTAssertEqual(next.keyEquivalentModifierMask, .command)
+        XCTAssertEqual(next.action, #selector(MainWindowController.nextWallpaper(_:)))
+        let creator = try XCTUnwrap(wallpaper.item(withTitle: "More by Creator"))
+        XCTAssertEqual(creator.keyEquivalent, ""); XCTAssertEqual(creator.action, #selector(MainWindowController.showCreator(_:)))
+        let view = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "View")?.submenu)
+        let museum = try XCTUnwrap(view.item(withTitle: "Cleveland Museum of Art"))
+        XCTAssertEqual(museum.keyEquivalent, ""); XCTAssertEqual(museum.action, #selector(MainWindowController.showCMA(_:)))
+        // The pivot's title follows the selection; it is enabled only when there is something to open.
+        XCTAssertTrue(c.validateMenuItem(creator)); XCTAssertEqual(creator.title, "More by Katsushika Hokusai")
+        c.moreByButton.performClick(nil)
+        XCTAssertFalse(c.validateMenuItem(creator), "One level only")
+        XCTAssertTrue(c.validateMenuItem(museum)); XCTAssertEqual(museum.state, .off)
+    }
+
+    // MARK: Live walk (opt-in)
+
+    static var liveDirectory: URL? {
+        let environment = ProcessInfo.processInfo.environment
+        return (environment["WALLPIER_LIVE_TEST_DIR"] ?? environment["TEST_RUNNER_WALLPIER_LIVE_TEST_DIR"]).map { URL(fileURLWithPath: $0) }
+    }
+
+    /// Skipped unless `WALLPIER_LIVE_TEST_DIR` (or `TEST_RUNNER_WALLPIER_LIVE_TEST_DIR`) names an evidence folder. Binds the real
+    /// museum provider and real thumbnails to the actual controller, with other providers offline, temporary stores and the
+    /// recording wallpaper service; nothing touches the real desktop. Hokusai 111654 → creator 23328 → another real work:
+    /// preview, Set, inspect the retained JPEG, Undo, Favorite, relaunch and reopen. Screenshots go to WALLPIER_CAPTURE_DIR if set.
+    @MainActor
+    func testLiveClevelandArtistDiscoveryWalk() async throws {
+        try XCTSkipIf(Self.liveDirectory == nil, "Set WALLPIER_LIVE_TEST_DIR to run the live museum walk")
+        let evidenceDirectory = try XCTUnwrap(Self.liveDirectory)
+        try FileManager.default.createDirectory(at: evidenceDirectory, withIntermediateDirectories: true)
+        var evidence: [String] = ["Wallpier live Cleveland Museum of Art walk · \(Date())"]
+        func note(_ line: String) { evidence.append(line) }
+        defer { try? evidence.joined(separator: "\n").appending("\n").write(to: evidenceDirectory.appendingPathComponent("evidence.txt"), atomically: true, encoding: .utf8) }
+        func wait(_ task: Task<Void, Never>?, seconds: TimeInterval) async {
+            guard let task else { return }
+            let done = expectation(description: "task finished")
+            Task { await task.value; done.fulfill() }
+            await fulfillment(of: [done], timeout: seconds)
+        }
+
+        // Isolation: memory-only HTTP caches apart from the app's, memory-only thumbnails, a private defaults suite,
+        // temporary state/cache/history folders, and the recording wallpaper service. Other providers are offline.
+        let cmaClient = URLSessionNetworkClient.isolated(allowsRedirect: CMAURLPolicy.allowsRedirect)
+        let provider = CMAProvider(client: cmaClient)
+        let suite = "com.parth.Wallpier.live-test.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let desktop = SetAuditWallpaperService()
+        let prior = root.appendingPathComponent("prior.png")
+        try writeTestImage(to: prior); desktop.current = prior
+        let (controller, window) = makeCaptureController(
+            root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua, cma: cmaClient, desktop: desktop,
+            thumbnails: RemoteThumbnailProvider(memoryOnly: true), defaults: defaults) { state in
+            state.favorites = []; state.collections = []; state.selectedCollectionID = nil; state.currentSource = .favorites
+        }
+        defer { controller.creatorTaskForTesting?.cancel(); window.close() }
+
+        // A real Discover search for Hokusai, through the controller.
+        controller.showCMA(nil)
+        controller.searchField.stringValue = "Hokusai"
+        controller.search(nil)
+        var found = await eventually(60) { controller.visibleItemIdentitiesForTesting.contains("cma:111654") }
+        for _ in 0..<3 where !found { controller.loadMoreResults(nil); found = await eventually(60) { controller.visibleItemIdentitiesForTesting.contains("cma:111654") } }
+        note("typed search \"Hokusai\": \(controller.visibleItemIdentitiesForTesting.count) rows; notice: \(controller.cmaNoticeLabel.stringValue)")
+        guard found else { return XCTFail("Record 111654 was not in the Hokusai search results: \(controller.visibleItemIdentitiesForTesting)") }
+        let anchorIndex = try XCTUnwrap(controller.visibleItemIdentitiesForTesting.firstIndex(of: "cma:111654"))
+        selectCMAItem(anchorIndex, in: controller)
+        let anchor = try XCTUnwrap(controller.selectedReferenceForTesting)
+        note("anchor \(anchor.identityKey) title=\"\(anchor.displayTitle)\" credit=\"\(anchor.cmaCreditName)\" kind=\(String(describing: anchor.cmaKind)) pivot=\(String(describing: anchor.cmaPivot?.id)) page=\(anchor.sourcePageURL) provenance=\"\(anchor.cmaProvenance)\"")
+        XCTAssertEqual(anchor.cmaPivot?.id, 23328); XCTAssertEqual(anchor.cmaKind, .settable)
+        XCTAssertEqual(anchor.cmaCreditName, "Katsushika Hokusai")
+        let thumbnailsLoaded = await eventually(30) { (controller.collectionView.item(at: IndexPath(item: anchorIndex, section: 0)) as? WallpaperCollectionViewItem)?.hasThumbnail == true }
+        note("real thumbnail drawn in the grid: \(thumbnailsLoaded)")
+        captureWindow(window, named: "cma-01-discover-hokusai")
+
+        controller.moreByButton.performClick(nil)
+        let loaded = await eventually(60) { controller.visibleItemIdentitiesForTesting.count >= 3 }
+        XCTAssertTrue(loaded, "At least three plain-role works are shown")
+        let shown = controller.visibleItemIdentitiesForTesting
+        note("creator view: \(controller.creatorTitleLabel.stringValue) · \(controller.creatorSubtitleLabel.stringValue) · \(controller.creatorStatusLabel.stringValue)")
+        note("shown (\(shown.count)): \(shown.joined(separator: ", "))")
+        captureWindow(window, named: "cma-02-creator")
+
+        // The browse-only report, by artwork ID: what the creator's own list holds that the view doesn't show, and why.
+        let page = try await provider.creatorWorks(id: 23328)
+        let shownIDs = Set(page.works.compactMap { Int($0.wallpaperID) })
+        let browseOnlyShown = page.works.filter(\.isCMABrowseOnly).map { "\($0.wallpaperID):\(String(describing: $0.cmaKind))" }
+        note("browse-only rows shown: \(browseOnlyShown.isEmpty ? "none" : browseOnlyShown.joined(separator: ", "))")
+        note("thumbnail-only rows found: \(page.works.filter { $0.cmaKind == .thumbnailOnly }.map(\.wallpaperID))")
+        for stub in page.stubIDs where !shownIDs.contains(stub) {
+            let reason = page.excluded[stub].map { "excluded: \($0.rawValue)" } ?? (page.isTruncated ? "outside the one bounded search page, or not returned by the name search" : "not returned by the name search")
+            note("stub \(stub) not shown — \(reason)")
+        }
+        XCTAssertNotNil(page.excluded[126723], "126723 is credited to the creator only with a qualifier or another ID")
+        XCTAssertFalse(shown.contains("cma:126723"), "An excluded record is never shown")
+        XCTAssertEqual(page.name, "Katsushika Hokusai"); XCTAssertEqual(page.creatorID, 23328)
+        note("excluded in the search page: \(page.excluded.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value.rawValue)" }.joined(separator: ", "))")
+        note("search matches \(page.matchTotal.map { String($0) } ?? "unknown"), page rows \(page.returnedCount), shown \(page.works.count), hidden unverifiable \(page.hiddenCount)")
+
+        // Another real work: the first settable row in the creator view.
+        let ids = controller.visibleItemIdentitiesForTesting
+        let index = try XCTUnwrap(ids.firstIndex { id in controller.creatorWorkForTesting(id)?.cmaKind == .settable }, "A settable work by the creator")
+        selectCMAItem(index, in: controller)
+        let target = try XCTUnwrap(controller.selectedReferenceForTesting)
+        note("chosen \(target.identityKey) \"\(target.displayTitle)\" \(target.width)×\(target.height)")
+        controller.toggleViewer(nil)
+        let drawn = await eventually(30) { controller.stageView.image != nil }
+        XCTAssertTrue(drawn, "The real thumbnail reaches the preview")
+        captureWindow(window, named: "cma-03-preview")
+        controller.toggleViewer(nil)
+
+        controller.setWallpaper(nil)
+        await wait(controller.downloadTask, seconds: 180)
+        XCTAssertEqual(desktop.calls.count, 1, controller.statusLabel.stringValue)
+        let applied = try XCTUnwrap(desktop.calls.first?.image)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(applied as CFURL, nil))
+        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        let width = properties[kCGImagePropertyPixelWidth] as? Int ?? 0, height = properties[kCGImagePropertyPixelHeight] as? Int ?? 0
+        let size = (try? FileManager.default.attributesOfItem(atPath: applied.path)[.size] as? NSNumber)?.int64Value ?? 0
+        note("set on display \(desktop.calls[0].display): \(applied.lastPathComponent) \(CGImageSourceGetType(source) as String? ?? "?") \(width)×\(height) \(size) bytes SOI=\(CMAProvider.startsWithJPEGMarker(applied))")
+        note("status: \(controller.statusLabel.stringValue)")
+        XCTAssertEqual(CGImageSourceGetType(source) as String?, "public.jpeg"); XCTAssertGreaterThanOrEqual(max(width, height), 1920)
+        XCTAssertTrue(applied.path.hasPrefix(root.appendingPathComponent("Rollback").path))
+        captureWindow(window, named: "cma-04-set")
+
+        controller.undoWallpaperChange(nil)
+        await wait(controller.downloadTask, seconds: 30)
+        let restoredBytes = try? Data(contentsOf: try XCTUnwrap(desktop.calls.last?.image))
+        note("undo restored the prior wallpaper: \(restoredBytes == (try? Data(contentsOf: prior)))")
+        XCTAssertEqual(restoredBytes, try Data(contentsOf: prior))
+
+        // Source restoration: another source parks the creator view; coming back restores it, without new requests.
+        let selectedBefore = controller.selectedIdentityForTesting
+        controller.showOpenverse(nil)
+        XCTAssertFalse(controller.isShowingCreatorViewForTesting)
+        controller.showCMA(nil)
+        note("source restored: creator view \(controller.isShowingCreatorViewForTesting), selection \(String(describing: controller.selectedIdentityForTesting)), rows \(controller.visibleItemIdentitiesForTesting.count)")
+        XCTAssertTrue(controller.isShowingCreatorViewForTesting); XCTAssertEqual(controller.selectedIdentityForTesting, selectedBefore)
+
+        selectCMAItem(index, in: controller)
+        controller.toggleFavorite(nil)
+        let store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
+        let saved = store.load()
+        note("favorites saved: \(saved.favorites.map(\.identityKey))")
+        XCTAssertTrue(saved.favorites.contains { $0.identityKey == target.identityKey })
+        controller.closeCreator(nil)
+
+        let relaunchWindow = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 1120, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                      backing: .buffered, defer: false)
+        relaunchWindow.isReleasedWhenClosed = false
+        defer { relaunchWindow.close() }
+        let relaunched = MainWindowController(
+            window: relaunchWindow, wallpaperService: SetAuditWallpaperService(), stateStore: store,
+            provider: WallhavenProvider(client: OfflineNetwork()), openverseProvider: OpenverseProvider(client: OfflineNetwork()),
+            cmaProvider: provider, originalCache: RemoteWallpaperCache(rootURL: root.appendingPathComponent("Originals")),
+            historyStore: WallpaperHistoryStore(root: root.appendingPathComponent("Rollback")), remoteThumbnailProvider: RemoteThumbnailProvider(memoryOnly: true),
+            availableScreens: { [CaptureScreen()] }, defaults: defaults)
+        relaunched.prepareForVisualCapture(discoverPage: RemoteSearchPage(wallpapers: [], currentPage: 1, lastPage: 1, total: 0,
+                                                                          rateLimit: ProviderRateLimit(limit: nil, remaining: nil, resetDate: nil)))
+        relaunched.showFavorites(nil)
+        let favoriteIndex = try XCTUnwrap(relaunched.visibleItemIdentitiesForTesting.firstIndex(of: target.identityKey))
+        selectCMAItem(favoriteIndex, in: relaunched)
+        let attribution = relaunched.previewAttributionLabel.attributedStringValue
+        let linkAt = (attribution.string as NSString).range(of: "Cleveland").location
+        guard linkAt != NSNotFound else { return XCTFail("No museum credit after relaunch: “\(attribution.string)”") }
+        let link = attribution.attribute(.link, at: linkAt, effectiveRange: nil) as? URL
+        note("after relaunch: \"\(attribution.string)\" link=\(String(describing: link))")
+        XCTAssertEqual(link, target.sourcePageURL)
+        XCTAssertTrue(attribution.string.contains("Cleveland Museum of Art"))
+        captureWindow(relaunchWindow, named: "cma-05-relaunch")
     }
 }

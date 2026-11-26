@@ -166,8 +166,15 @@ struct WallhavenSearchOptions: Codable, Equatable {
 enum RemoteProviderID: String, Codable, CaseIterable {
     case wallhaven
     case openverse
+    case cma
 
-    var displayName: String { self == .openverse ? "Openverse" : "Wallhaven" }
+    var displayName: String {
+        switch self {
+        case .wallhaven: return "Wallhaven"
+        case .openverse: return "Openverse"
+        case .cma: return "Cleveland Museum of Art"
+        }
+    }
 }
 
 /// Openverse's own, deliberately narrow filters: wide, large, non-mature Commons JPEGs are fixed;
@@ -229,6 +236,8 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     var license: String? = nil
     var licenseVersion: String? = nil
     var licenseURL: URL? = nil
+    /// The Cleveland Museum of Art's record, as reported. Absent for every other provider and older saved references.
+    var cma: CMARecord? = nil
 
     var id: String { identityKey }
     var identityKey: String { "\(providerIdentifier):\(wallpaperID)" }
@@ -239,7 +248,34 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     /// nil for a provider this build doesn't support: such references are never routed to another provider.
     var provider: RemoteProviderID? { RemoteProviderID(rawValue: providerIdentifier) }
     var providerName: String { provider?.displayName ?? providerIdentifier }
-    var displayTitle: String { title ?? wallpaperID }
+    /// Display-only: Openverse and CMA text is decoded and cleaned each time it is shown, so references saved by
+    /// older builds read correctly. The stored `title` stays as the source reported it.
+    var displayTitle: String {
+        switch provider {
+        case .openverse?: return title.map(DisplayText.title) ?? wallpaperID
+        case .cma?: return DisplayText.title(title)
+        case .wallhaven?, nil: return title ?? wallpaperID
+        }
+    }
+    /// Who made the work, as shown: nil when none was reported. Wallhaven's uploader is shown as reported.
+    var displayCreator: String? {
+        switch provider {
+        case .openverse?: return uploader.map(DisplayText.creator)
+        case .cma?: return cmaCreditName
+        case .wallhaven?, nil: return uploader
+        }
+    }
+    /// Credit phrase for captions: “by Name”, except a credit that already carries its own qualifier
+    /// (“after Charles Le Brun”) is shown as reported, never as “by after …”.
+    var displayCredit: String? {
+        guard let creator = displayCreator else { return nil }
+        if provider == .cma { return creator }
+        let lowered = creator.lowercased()
+        let qualifiers = ["after ", "attributed to ", "circle of ", "follower of ", "workshop of ", "school of ", "manner of ",
+                          "studio of ", "style of ", "copy after ", "imitator of ", "probably "]
+        if provider == .openverse, qualifiers.contains(where: { lowered.hasPrefix($0) }) { return creator }
+        return "by \(creator)"
+    }
     /// Where the work comes from: Wallhaven itself, or the source Openverse indexed it from.
     var sourceDisplayName: String {
         guard provider == .openverse else { return providerName }
@@ -256,6 +292,7 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
             if OpenverseURLPolicy.isThumbnailOnly(originalURL, source: sourceName) { return .originalUnavailable }
             return licenseIsConsistent ? nil : .licenseNeedsReview
         case .wallhaven?: return nil
+        case .cma?: return cmaUseRestriction
         case nil: return .unsupportedProvider
         }
     }
@@ -263,6 +300,7 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     var blocksUse: Bool { useRestriction != nil }
 
     /// Reconstruct Openverse thumbnail addresses from validated data, including for previously saved references.
+    /// A CMA thumbnail is only the record's web rendition, and only while it still passes the CMA media policy.
     func galleryThumbnailURL(large: Bool) -> URL? {
         switch provider {
         case .wallhaven?: return large ? previewURL : thumbnailURL
@@ -271,6 +309,10 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
             if sourceName == OpenverseURLPolicy.discoverySource,
                let thumbnail = OpenverseURLPolicy.commonsThumbnail(for: originalURL) { return thumbnail }
             return OpenverseEndpoint.thumbnailURL(id: id)
+        case .cma?:
+            guard let kind = cmaKind, kind != .metadataOnly, cma?.isCC0 == true,
+                  CMAURLPolicy.isAllowedMediaURL(thumbnailURL, rendition: .web) else { return nil }
+            return thumbnailURL
         case nil: return nil
         }
     }
@@ -286,6 +328,8 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     /// only for 16:9 originals (within a pixel of rounding); other shapes need the uncropped thumbnail.
     var remotePreview: (url: URL, fidelity: PreviewFidelity)? {
         // Openverse thumbnails are resized, not cropped: the whole picture, at low resolution.
+        // A CMA work that can't be set has no live desktop preview at all.
+        if provider == .cma, cmaKind != .settable { return nil }
         if provider != .wallhaven { return galleryThumbnailURL(large: true).map { ($0, .lowResolution) } }
         guard width > 0, height > 0 else { return (previewURL, .croppedThumbnail) }
         if abs(Double(height) * 432 / Double(width) - 243) <= 1 { return (previewURL, .lowResolution) }
@@ -392,6 +436,7 @@ struct WallpaperState: Codable, Equatable {
     /// Which remote source Discover shows; each keeps its own search.
     var discoverProvider: RemoteProviderID = .wallhaven
     var openverseSearch = OpenverseSearchOptions()
+    var cmaSearch = CMASearchOptions()
     var favorites: [WallpaperReference] = []
     var collections: [WallpaperCollection] = []
     var selectedCollectionID: UUID?
@@ -462,7 +507,7 @@ struct WallpaperState: Codable, Equatable {
         case version, folderPath, selectedImagePath, selectedDisplayID
         case scalingMode, rotationInterval, shuffleEnabled, displayAssignments, history
         case currentSource, selectedRemoteIdentity, wallhavenSearch, favorites, collections
-        case discoverProvider, openverseSearch
+        case discoverProvider, openverseSearch, cmaSearch
         case selectedCollectionID, activeRotationCollectionID, rotationCursor
     }
 
@@ -487,6 +532,7 @@ struct WallpaperState: Codable, Equatable {
         // Absent in state saved before Openverse; an unknown value must never discard the rest of the state.
         discoverProvider = (try? container.decodeIfPresent(RemoteProviderID.self, forKey: .discoverProvider)) ?? .wallhaven
         openverseSearch = (try? container.decodeIfPresent(OpenverseSearchOptions.self, forKey: .openverseSearch)) ?? OpenverseSearchOptions()
+        cmaSearch = (try? container.decodeIfPresent(CMASearchOptions.self, forKey: .cmaSearch)) ?? CMASearchOptions()
         favorites = try container.decodeIfPresent([WallpaperReference].self, forKey: .favorites) ?? []
         collections = try container.decodeIfPresent([WallpaperCollection].self, forKey: .collections) ?? []
         selectedCollectionID = try container.decodeIfPresent(UUID.self, forKey: .selectedCollectionID)

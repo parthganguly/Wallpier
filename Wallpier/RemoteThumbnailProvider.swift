@@ -18,12 +18,13 @@ class RemoteThumbnailProvider {
     private var tasks: [String: URLSessionDataTask] = [:]
     private var completions: [String: [(NSImage?) -> Void]] = [:]
 
-    init() {
+    /// `memoryOnly` keeps every cached thumbnail in memory (no disk cache at all), for isolated runs.
+    init(memoryOnly: Bool = false) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.requestCachePolicy = .returnCacheDataElseLoad
         configuration.urlCache = URLCache(
             memoryCapacity: 12 * 1_024 * 1_024,
-            diskCapacity: 80 * 1_024 * 1_024
+            diskCapacity: memoryOnly ? 0 : 80 * 1_024 * 1_024
         )
         configuration.httpMaximumConnectionsPerHost = 4
         configuration.timeoutIntervalForRequest = 20
@@ -57,6 +58,8 @@ class RemoteThumbnailProvider {
         maximumPixelSize: Int = 420,
         completion: @escaping (NSImage?) -> Void
     ) {
+        // A CMA address that isn't a valid media URL (including a saved one) is never requested.
+        if CMAURLPolicy.isCMAHost(url), !CMAURLPolicy.isImageHostURL(url) { completion(nil); return }
         let key = "\(url.absoluteString)#\(maximumPixelSize)" as NSString
         if let cached = cache.object(forKey: key) {
             completion(cached)
@@ -140,6 +143,9 @@ class RemoteThumbnailProvider {
         case OpenverseURLPolicy.commonsThumbnailHost:
             return OpenverseURLPolicy.isSafeHTTPS(target) && target.host?.lowercased() == OpenverseURLPolicy.commonsThumbnailHost
                 && requested.path == target.path
+        case CMAURLPolicy.imageHost:
+            // CMA thumbnails stay on the same approved path on the museum's CDN over HTTPS.
+            return CMAURLPolicy.allowsRedirect(from: requested, to: target)
         default:
             return true
         }
@@ -147,6 +153,8 @@ class RemoteThumbnailProvider {
 
     static func accepts(_ response: HTTPURLResponse, for requested: URL, byteCount: Int) -> Bool {
         guard (200...299).contains(response.statusCode), (1...maximumThumbnailBytes).contains(byteCount) else { return false }
+        if requested.host?.lowercased() == CMAURLPolicy.imageHost,
+           !(response.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased().hasPrefix("image/") { return false }
         return response.url.map { allowsThumbnailResponse(from: requested, to: $0) } ?? false
     }
 
