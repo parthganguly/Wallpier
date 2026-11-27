@@ -94,6 +94,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(viewMenu, "Wallhaven", #selector(MainWindowController.showWallhaven(_:)))
         add(viewMenu, "Openverse", #selector(MainWindowController.showOpenverse(_:)))
         add(viewMenu, "Cleveland Museum of Art", #selector(MainWindowController.showCMA(_:)))
+        let moreSources = NSMenu(title: "More Discover Sources")
+        let sourceItem = NSMenuItem(title: moreSources.title, action: nil, keyEquivalent: "")
+        sourceItem.submenu = moreSources
+        viewMenu.addItem(sourceItem)
+        for source in RemoteProviderID.allCases where source.isCatalog {
+            add(moreSources, source.displayName, #selector(MainWindowController.showCatalog(_:))).representedObject = source.rawValue
+        }
         add(viewMenu, "Folder", #selector(MainWindowController.showLocal(_:)), "2")
         add(viewMenu, "Favorites", #selector(MainWindowController.showFavorites(_:)), "3")
         add(viewMenu, "Collections", #selector(MainWindowController.showCollections(_:)), "4")

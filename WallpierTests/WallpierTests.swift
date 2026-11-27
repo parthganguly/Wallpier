@@ -1140,7 +1140,12 @@ extension WallpierTests {
         defer { window.close() }
         let sidebar = controller.sidebarForTesting
         func row(_ title: String) -> SidebarNode? { sidebar.rows.first { $0.title == title } }
-        XCTAssertEqual(sidebar.rows.map(\.title), ["Discover", "Wallhaven", "Openverse", "Cleveland Museum of Art", "Library", "Folder", "Favorites", "Collections", "Evening Light", "Quiet Mornings"])
+        XCTAssertEqual(sidebar.rows.map(\.title), [
+            "Wallpapers & Digital Art", "Wallhaven", "KDE Plasma", "Pepper&Carrot",
+            "Fine Art & Illustration", "Cleveland Museum of Art", "The Met", "Wellcome Collection",
+            "Photography & Nature", "Openverse", "iNaturalist", "Space", "NASA Images",
+            "Library", "Folder", "Favorites", "Collections", "Evening Light", "Quiet Mornings"
+        ])
         XCTAssertEqual(row("Favorites")?.count, 6)
         XCTAssertEqual(row("Evening Light")?.count, 5)
         XCTAssertEqual(sidebar.selectedItem, .favorites)
@@ -8066,5 +8071,146 @@ extension WallpierTests {
         XCTAssertTrue(controller.selectionLabel.stringValue.contains("CC0 1.0"), controller.selectionLabel.stringValue)
         note("openverse attribution: \"\(triumphAttribution.string)\" · metadata \"\(controller.previewMetadataLabel.stringValue)\" · page \(triumph.sourcePageURL) · license \(triumph.licenseDescription ?? "none")")
         captureWindow(window, named: "cma-07-openverse")
+    }
+}
+
+// Opt-in independent combined-provider native walk. No production profile or desktop service.
+extension WallpierTests {
+    @MainActor
+    func testLiveCombinedCatalogNativeWalk() async throws {
+        try XCTSkipIf(Self.liveDirectory == nil, "Set WALLPIER_LIVE_TEST_DIR to run the live catalog walk")
+        let evidence = try XCTUnwrap(Self.liveDirectory)
+        try FileManager.default.createDirectory(at: evidence, withIntermediateDirectories: true)
+        let root = try historyTestFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "com.parth.Wallpier.catalog-live.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let desktop = SetAuditWallpaperService()
+        let prior = root.appendingPathComponent("prior.png")
+        try writeTestImage(to: prior); desktop.current = prior
+        let (c, window) = makeCaptureController(root: root, size: NSSize(width: 1120, height: 720), appearance: .aqua,
+                                                 desktop: desktop, thumbnails: RemoteThumbnailProvider(memoryOnly: true), defaults: defaults) { state in
+            state.favorites = []; state.collections = []; state.selectedCollectionID = nil; state.currentSource = .favorites
+        }
+        defer {
+            c.creatorTaskForTesting?.cancel(); c.searchTask?.cancel(); c.detailTask?.cancel()
+            c.downloadTask?.cancel(); c.undoValidationTask?.cancel(); window.close()
+        }
+        var notes = ["Combined native live walk · \(Date())"]
+        var failures: [String] = []
+        defer { try? notes.joined(separator: "\n").appending("\n").write(to: evidence.appendingPathComponent("combined-evidence.txt"), atomically: true, encoding: .utf8) }
+        enum WalkError: Error { case failed(String) }
+        func require(_ condition: Bool, _ message: String) throws {
+            if !condition { throw WalkError.failed(message) }
+        }
+        let sources: [(RemoteProviderID, String, String?)] = [
+            (.plasma, "Pastel Hills", nil), (.pepper, "Save Point", nil),
+            (.met, "Wheat Field with Cypresses", "met:436535"), (.wellcome, "mountain photograph", "wellcome:x6f4u54f"),
+            (.inaturalist, "butterfly", nil), (.nasa, "Earth horizon", nil)
+        ]
+        var savedIDs: [String] = []
+        for (provider, query, preferred) in sources {
+            do {
+                c.showDiscover(provider: provider)
+                c.searchField.stringValue = query
+                c.search(nil)
+                let search = c.searchTask
+                var searchFinished = false
+                Task { await search?.value; searchFinished = true }
+                let loaded = await eventually(90) { searchFinished }
+                try require(loaded && !c.visibleItemIdentitiesForTesting.isEmpty, "search unfinished or no results for \(query); status: \(c.statusLabel.stringValue)")
+                let ids = c.visibleItemIdentitiesForTesting
+                notes.append("\(provider.rawValue): query=\(query), results=\(ids.count), ids=\(ids.prefix(8))")
+                // Inspect live eligibility on selection, preferring the reviewed exact record when present.
+                let order = (preferred.flatMap { ids.firstIndex(of: $0) }.map { [$0] } ?? []) + ids.indices.filter { ids[$0] != preferred }
+                var chosen: WallpaperReference?
+                var chosenIndex = 0
+                for index in order {
+                    selectCMAItem(index, in: c)
+                    guard let candidate = c.selectedReferenceForTesting else { continue }
+                    notes.append("  candidate \(candidate.identityKey): title=\(candidate.displayTitle), restriction=\(String(describing: candidate.useRestriction)), page=\(candidate.sourcePageURL), creator=\(String(describing: candidate.catalog?.creator))")
+                    if candidate.useRestriction == nil && candidate.galleryThumbnailURL(large: true) != nil {
+                        chosen = candidate; chosenIndex = index; break
+                    }
+                }
+                let reference = try XCTUnwrap(chosen, "\(provider.rawValue) has no usable selected record")
+                c.collectionView.scrollToItems(at: [IndexPath(item: chosenIndex, section: 0)], scrollPosition: .nearestVerticalEdge)
+                window.contentView?.layoutSubtreeIfNeeded()
+                let thumb = await eventually(45) { (c.collectionView.item(at: IndexPath(item: chosenIndex, section: 0)) as? WallpaperCollectionViewItem)?.hasThumbnail == true }
+                try require(thumb, "\(reference.identityKey): thumbnail did not draw")
+                captureWindow(window, named: "combined-\(provider.rawValue)-grid")
+                c.toggleViewer(nil)
+                let staged = await eventually(45) { c.stageView.image != nil }
+                try require(staged, "\(reference.identityKey): preview did not draw")
+                let attribution = c.previewAttributionLabel.attributedStringValue
+                notes.append("  preview: \(c.previewTitleLabel.stringValue); attribution=\(attribution.string)")
+                try require(!attribution.string.isEmpty, "\(reference.identityKey): missing attribution")
+                captureWindow(window, named: "combined-\(provider.rawValue)-preview")
+                c.toggleViewer(nil)
+                c.toggleFavorite(nil)
+                try require(c.state.favorites.contains { $0.identityKey == reference.identityKey }, "favorite missing")
+                let before = desktop.calls.count
+                let previousBytes = desktop.current.flatMap { try? Data(contentsOf: $0) }
+                c.setWallpaper(nil)
+                let finished = await eventually(180) { c.downloadTask == nil }
+                if !finished { c.downloadTask?.cancel() }
+                try require(finished && desktop.calls.count == before + 1, "Set did not record: \(c.statusLabel.stringValue)")
+                let applied = try XCTUnwrap(desktop.calls.last?.image)
+                try require(applied.path.hasPrefix(root.appendingPathComponent("Rollback").path), "Set did not use owned file")
+                try require(FileManager.default.fileExists(atPath: applied.path), "owned file missing")
+                let size = CatalogLibrary.originalSize(applied)
+                try require(size != nil, "owned file has no validated dimensions")
+                notes.append("  recorded Set: \(applied.lastPathComponent), \(size!.width)×\(size!.height); \(c.statusLabel.stringValue)")
+                c.undoWallpaperChange(nil)
+                let undone = await eventually(45) { c.downloadTask == nil && desktop.calls.count == before + 2 }
+                try require(undone, "Undo did not record")
+                let restored = desktop.calls.last.flatMap { try? Data(contentsOf: $0.image) }
+                try require(previousBytes != nil && restored == previousBytes, "Undo did not restore previous bytes")
+                notes.append("  Undo recorded \(desktop.calls.last?.image.lastPathComponent ?? "missing")")
+                savedIDs.append(reference.identityKey)
+                if provider == .met || provider == .wellcome {
+                    notes.append("  More by visible=\(!c.moreByButton.isHidden), creator=\(String(describing: reference.catalog?.creator))")
+                    if reference.catalog?.creator != nil && !c.moreByButton.isHidden {
+                        c.moreByButton.performClick(nil)
+                        let pivot = await eventually(90) { c.isShowingCreatorViewForTesting && !c.visibleItemIdentitiesForTesting.isEmpty }
+                        try require(pivot, "creator results did not load")
+                        let subtitle = "\(provider.displayName) · Open-access works"
+                        try require(c.window?.subtitle == subtitle && c.creatorSubtitleLabel.stringValue == subtitle,
+                                    "creator title and gallery header must identify the active source")
+                        let creatorID = reference.catalog?.creator?.id
+                        try require(c.visibleItemIdentitiesForTesting.allSatisfy { c.creatorWorkForTesting($0)?.catalog?.creator?.id == creatorID }, "creator result ID mismatch")
+                        notes.append("  creator results: \(c.visibleItemIdentitiesForTesting.prefix(8))")
+                        captureWindow(window, named: "combined-\(provider.rawValue)-creator")
+                        c.closeCreator(nil)
+                    }
+                }
+            } catch {
+                failures.append("\(provider.rawValue): \(error)")
+                notes.append("FAIL \(provider.rawValue): \(error)")
+                c.downloadTask?.cancel(); c.searchTask?.cancel(); c.creatorTaskForTesting?.cancel()
+                while let sheet = window.attachedSheet { window.endSheet(sheet) }
+                if c.isViewerVisible { c.toggleViewer(nil) }
+                if c.isShowingCreatorViewForTesting { c.closeCreator(nil) }
+            }
+        }
+        let store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
+        let saved = store.load()
+        notes.append("saved mixed favorites: \(saved.favorites.map(\.identityKey))")
+        for id in savedIDs {
+            guard let persisted = saved.favorites.first(where: { $0.identityKey == id }),
+                  let current = c.state.favorites.first(where: { $0.identityKey == id }) else { failures.append("saved favorite missing: \(id)"); continue }
+            if persisted.catalog != current.catalog || persisted.license != current.license || persisted.licenseURL != current.licenseURL || persisted.sourcePageURL != current.sourcePageURL { failures.append("saved credit changed: \(id)") }
+        }
+        let cache = RemoteWallpaperCache(rootURL: root.appendingPathComponent("Originals"), maximumSizeBytes: 1)
+        do {
+            _ = try await cache.evictIfNeeded(protectedPaths: saved.protectedCachePaths)
+            for ref in saved.favorites where savedIDs.contains(ref.identityKey) {
+                guard let path = ref.cachedLocalPath else { failures.append("cached favorite path missing: \(ref.identityKey)"); continue }
+                if !FileManager.default.fileExists(atPath: path) { failures.append("protected cache evicted: \(ref.identityKey)") }
+            }
+            notes.append("eviction protected favorites: \(saved.protectedCachePaths.count) paths")
+        } catch { failures.append("eviction: \(error)") }
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
     }
 }
