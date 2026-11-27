@@ -886,6 +886,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         // with required sizes. Display, Scaling and Set are therefore always present and never overlap anything.
         let leadingStack = NSStackView(views: [busyIndicator, text, statusUndoButton])
         leadingStack.spacing = 8
+        leadingStack.distribution = .fill
         leadingStack.setClippingResistancePriority(NSLayoutConstraint.Priority(500), for: .horizontal)
         reviewSourceButton.target = self; reviewSourceButton.action = #selector(openSourcePage(_:))
         reviewSourceButton.controlSize = .small
@@ -944,7 +945,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             controls.centerYAnchor.constraint(equalTo: applyBar.centerYAnchor),
             optional.trailingAnchor.constraint(equalTo: controls.leadingAnchor, constant: -12),
             optional.centerYAnchor.constraint(equalTo: applyBar.centerYAnchor),
-            leadingStack.trailingAnchor.constraint(lessThanOrEqualTo: optional.leadingAnchor, constant: -10),
+            leadingStack.trailingAnchor.constraint(equalTo: optional.leadingAnchor, constant: -10),
             minimumMetadata
         ])
         applyBar.setAccessibilityLabel("Selected wallpaper")
