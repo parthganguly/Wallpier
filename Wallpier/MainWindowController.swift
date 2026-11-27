@@ -432,7 +432,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                   provider: WallhavenProvider(), originalCache: RemoteWallpaperCache(),
                   historyStore: WallpaperHistoryStore(), remoteThumbnailProvider: RemoteThumbnailProvider(),
                   availableScreens: { NSScreen.screens })
+        collectionView.dataSource = nil
         configureUI()
+        setInitialSidebarWidth()
+        collectionView.dataSource = self
         // Only the real window remembers its frame and sidebar width; test windows never write defaults.
         if !window.setFrameUsingName("WallpierMainWindow") { window.center() }
         window.setFrameAutosaveName("WallpierMainWindow")
@@ -487,19 +490,6 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let frame = window.frame
         window.contentViewController = split
         window.setFrame(frame, display: false)
-        // The fraction alone left the sidebar at its 196 pt minimum at 1320 pt, truncating "Cleveland Museum of Art".
-        // Set the divider explicitly once the split has laid out. This is only the starting position: it is not a
-        // minimum, the divider stays draggable, a saved position (autosave, set after this) wins, and a window too
-        // narrow to give the content its 620 pt keeps the sidebar flexible down to 196.
-        // Prime the divider before the gallery can realise cells from the previous source.
-        collectionView.dataSource = nil
-        split.view.layoutSubtreeIfNeeded()
-        let defaultSidebarWidth: CGFloat = 232
-        if split.view.bounds.width - defaultSidebarWidth >= contentItem.minimumThickness {
-            split.splitView.setPosition(defaultSidebarWidth, ofDividerAt: 0)
-        }
-        collectionView.dataSource = self
-
         let toolbar = NSToolbar(identifier: "WallpierMainToolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
@@ -509,6 +499,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         window.initialFirstResponder = collectionView
         galleryScroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(galleryDidScroll), name: NSView.boundsDidChangeNotification, object: galleryScroll.contentView)
+    }
+
+    /// Give the first window enough room for provider names. Restoring an autosaved divider still takes precedence.
+    @objc private func setInitialSidebarWidth() {
+        guard let split = splitViewController else { return }
+        let defaultWidth: CGFloat = 232
+        guard split.view.bounds.width - defaultWidth >= split.splitViewItems[1].minimumThickness else { return }
+        split.view.layoutSubtreeIfNeeded()
+        split.splitView.setPosition(defaultWidth, ofDividerAt: 0)
     }
 
     private func configureControls() {
@@ -928,9 +927,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         optional.wantsLayer = true
         optional.layer?.masksToBounds = true
         optional.setVisibilityPriority(NSStackView.VisibilityPriority(rawValue: 500), for: moreByButton)
-        optional.setVisibilityPriority(.detachOnlyIfNecessary, for: viewOnMuseumButton)
-        optional.setVisibilityPriority(.detachOnlyIfNecessary, for: reviewSourceButton)
-        optional.setClippingResistancePriority(NSLayoutConstraint.Priority(300), for: .horizontal)
+        optional.setVisibilityPriority(.mustHold, for: viewOnMuseumButton)
+        optional.setVisibilityPriority(.mustHold, for: reviewSourceButton)
+        optional.setClippingResistancePriority(.required, for: .horizontal)
         for view in [leadingStack, optional, controls] {
             view.translatesAutoresizingMaskIntoConstraints = false
             applyBar.addSubview(view)
