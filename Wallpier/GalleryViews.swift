@@ -152,10 +152,9 @@ final class SplitBar: NSView {
             group.translatesAutoresizingMaskIntoConstraints = false
             addSubview(group)
         }
-        // Leading labels compress (below 500) before anything else; the trailing group may detach its optional
-        // note (below 300 only matters when it truly cannot fit) but keeps its buttons.
+        // Leading labels compress first. The trailing group must retain room for its commands.
         leadingGroup.setClippingResistancePriority(NSLayoutConstraint.Priority(500), for: .horizontal)
-        trailingGroup.setClippingResistancePriority(NSLayoutConstraint.Priority(300), for: .horizontal)
+        trailingGroup.setClippingResistancePriority(.required, for: .horizontal)
         trailingGroup.setHuggingPriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
             leadingGroup.leadingAnchor.constraint(equalTo: leadingAnchor),

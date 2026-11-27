@@ -628,7 +628,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         pendingSearchLabel.textColor = .secondaryLabelColor
         pendingSearchLabel.lineBreakMode = .byTruncatingTail
         // Shown whole or not at all: a truncated “Showing “…” says nothing. The button and its tooltip remain.
-        pendingSearchLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        pendingSearchLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        pendingSearchLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 148).isActive = true
         updateResultsButton.controlSize = .small
         updateResultsButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         updateResultsButton.target = self; updateResultsButton.action = #selector(search(_:))
@@ -873,6 +874,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 1
+        for label in [selectionLabel, statusLabel] {
+            label.widthAnchor.constraint(equalTo: text.widthAnchor).isActive = true
+        }
         // Labels truncate before anything else gives: below the leading group's clipping resistance (500).
         for view in [text, selectionLabel, statusLabel] {
             view.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
@@ -921,6 +925,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         moreByButton.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
         let optional = NSStackView(views: [moreByButton, viewOnMuseumButton, reviewSourceButton])
         optional.spacing = 8
+        optional.wantsLayer = true
+        optional.layer?.masksToBounds = true
         optional.setVisibilityPriority(NSStackView.VisibilityPriority(rawValue: 500), for: moreByButton)
         optional.setVisibilityPriority(.detachOnlyIfNecessary, for: viewOnMuseumButton)
         optional.setVisibilityPriority(.detachOnlyIfNecessary, for: reviewSourceButton)
@@ -943,6 +949,21 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             minimumMetadata
         ])
         applyBar.setAccessibilityLabel("Selected wallpaper")
+        applyBar.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(updateDockShortcutsForWidth),
+                                               name: NSView.frameDidChangeNotification, object: applyBar)
+    }
+
+    @objc private func updateDockShortcutsForWidth() {
+        let width = applyBar.bounds.width
+        let compact = width > 0 && width < 720
+        moreByButton.isHidden = compact || pivotCreator == nil
+        if let reference = selectedReference, reference.isBrowseOnly {
+            let title = compact ? "View Source ↗" : "View on \(reference.providerName) ↗"
+            if viewOnMuseumButton.title != title { viewOnMuseumButton.title = title }
+        }
+        let reviewTitle = compact ? "Review Source" : "Review Original Source"
+        if reviewSourceButton.title != reviewTitle { reviewSourceButton.title = reviewTitle }
     }
 
     private func makeRotationPopover() -> NSPopover {
@@ -3080,16 +3101,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             moreByButton.title = "More by \(creator.name)"
             moreByButton.setAccessibilityLabel("More by \(creator.name)")
             moreByButton.toolTip = "Show works from \(selectedReference?.providerName ?? discoverName) credited to \(creator.name)"
-            moreByButton.isHidden = false
-        } else {
-            moreByButton.isHidden = true
         }
         viewOnMuseumButton.isHidden = selectedReference?.isBrowseOnly != true
         if let reference = selectedReference, reference.isBrowseOnly {
-            viewOnMuseumButton.title = "View on \(reference.providerName) ↗"
             viewOnMuseumButton.setAccessibilityLabel("View on \(reference.providerName)")
             viewOnMuseumButton.toolTip = "View on \(reference.providerName)"   // The label truncates in a narrow dock.
         }
+        updateDockShortcutsForWidth()
         favoriteButton.isHidden = selectedReference == nil || selectedReference?.isBrowseOnly == true
         collectionButton.isHidden = favoriteButton.isHidden   // Browse-only works can't be collected either.
         moreButton.isHidden = !hasSelection
