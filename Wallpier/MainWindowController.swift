@@ -1926,7 +1926,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             return text
         }
         if reference.provider?.isCatalog == true {
-            if let credit = reference.catalog?.credit.map(DisplayText.creator), !credit.isEmpty { add("\(credit) · ") }
+            let credit = DisplayText.clean(reference.catalog?.credit)
+            if !credit.isEmpty, credit != reference.providerName { add("\(credit) · ") }
             add(reference.providerName, link: CatalogLibrary.sourcePage(for: reference))
             if let license = reference.licenseDescription {
                 add(" · ")
