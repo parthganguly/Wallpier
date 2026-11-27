@@ -8106,7 +8106,7 @@ extension WallpierTests {
         }
         let sources: [(RemoteProviderID, String, String?)] = [
             (.plasma, "Pastel Hills", nil), (.pepper, "Save Point", nil),
-            (.met, "Van Gogh", "met:436535"), (.wellcome, "mountain photograph", "wellcome:x6f4u54f"),
+            (.met, "Wheat Field with Cypresses", "met:436535"), (.wellcome, "mountain photograph", "wellcome:x6f4u54f"),
             (.inaturalist, "butterfly", nil), (.nasa, "Earth horizon", nil)
         ]
         var savedIDs: [String] = []
@@ -8135,6 +8135,8 @@ extension WallpierTests {
                     }
                 }
                 let reference = try XCTUnwrap(chosen, "\(provider.rawValue) has no usable selected record")
+                c.collectionView.scrollToItems(at: [IndexPath(item: chosenIndex, section: 0)], scrollPosition: .nearestVerticalEdge)
+                window.contentView?.layoutSubtreeIfNeeded()
                 let thumb = await eventually(45) { (c.collectionView.item(at: IndexPath(item: chosenIndex, section: 0)) as? WallpaperCollectionViewItem)?.hasThumbnail == true }
                 try require(thumb, "\(reference.identityKey): thumbnail did not draw")
                 captureWindow(window, named: "combined-\(provider.rawValue)-grid")
@@ -8157,7 +8159,9 @@ extension WallpierTests {
                 let applied = try XCTUnwrap(desktop.calls.last?.image)
                 try require(applied.path.hasPrefix(root.appendingPathComponent("Rollback").path), "Set did not use owned file")
                 try require(FileManager.default.fileExists(atPath: applied.path), "owned file missing")
-                notes.append("  recorded Set: \(applied.lastPathComponent); \(c.statusLabel.stringValue)")
+                let size = CatalogLibrary.originalSize(applied)
+                try require(size != nil, "owned file has no validated dimensions")
+                notes.append("  recorded Set: \(applied.lastPathComponent), \(size!.width)×\(size!.height); \(c.statusLabel.stringValue)")
                 c.undoWallpaperChange(nil)
                 let undone = await eventually(45) { c.downloadTask == nil && desktop.calls.count == before + 2 }
                 try require(undone, "Undo did not record")
@@ -8190,7 +8194,11 @@ extension WallpierTests {
         let store = WallpaperStateStore(stateURL: root.appendingPathComponent("state.json"))
         let saved = store.load()
         notes.append("saved mixed favorites: \(saved.favorites.map(\.identityKey))")
-        for id in savedIDs where !saved.favorites.contains(where: { $0.identityKey == id }) { failures.append("saved favorite missing: \(id)") }
+        for id in savedIDs {
+            guard let persisted = saved.favorites.first(where: { $0.identityKey == id }),
+                  let current = c.state.favorites.first(where: { $0.identityKey == id }) else { failures.append("saved favorite missing: \(id)"); continue }
+            if persisted.catalog != current.catalog || persisted.license != current.license || persisted.licenseURL != current.licenseURL || persisted.sourcePageURL != current.sourcePageURL { failures.append("saved credit changed: \(id)") }
+        }
         let cache = RemoteWallpaperCache(rootURL: root.appendingPathComponent("Originals"), maximumSizeBytes: 1)
         do {
             _ = try await cache.evictIfNeeded(protectedPaths: saved.protectedCachePaths)
