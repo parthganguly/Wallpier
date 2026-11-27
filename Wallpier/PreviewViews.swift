@@ -6,7 +6,7 @@ import ImageIO
 /// geometry always comes from the original's pixel size, never the preview bitmap's; the
 /// preview must therefore hold the whole original (see `WallpaperReference.remotePreview`).
 final class DesktopPreviewView: NSView {
-    static let desktopColor = NSColor(calibratedWhite: 0.11, alpha: 1)
+    static let desktopColor = Theme.desktopMat
     /// The display's edge, which shows how much of the screen Fit and Center leave empty. In dark
     /// appearances the desktop fill is within 1.1:1 of the backdrop, so the rim alone carries the
     /// boundary: a neutral mid-gray hairline at ≥ 3:1 against both. In light the dark fill already does.
@@ -144,12 +144,26 @@ final class DesktopPreviewView: NSView {
     }
 }
 
-/// Container for the single-wallpaper preview. Owns its keyboard: ←/→ browse, Space or Esc return.
+/// Container for the single-wallpaper preview, on the studio mat. Owns its keyboard: ←/→ browse, Space or Esc
+/// return, F toggles focus mode (Esc leaves focus mode first).
 final class ViewerView: NSView {
     var onNavigate: ((Int) -> Void)?
     var onClose: (() -> Void)?
+    var onToggleFocus: (() -> Void)?
+    /// Esc while focus mode hides the caption and controls: returns whether it was consumed.
+    var onEscape: (() -> Bool)?
 
     override var acceptsFirstResponder: Bool { true }
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = Theme.stageBackdrop.cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
 
     override func keyDown(with event: NSEvent) {
         guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return super.keyDown(with: event) }
@@ -157,11 +171,26 @@ final class ViewerView: NSView {
         case .leftArrow?, .upArrow?: onNavigate?(-1)
         case .rightArrow?, .downArrow?: onNavigate?(1)
         default:
-            if event.charactersIgnoringModifiers == " " || event.keyCode == 53 { onClose?() } else { super.keyDown(with: event) }
+            if event.keyCode == 53 {
+                if onEscape?() != true { onClose?() }
+            } else if event.charactersIgnoringModifiers == " " {
+                onClose?()
+            } else if event.charactersIgnoringModifiers?.lowercased() == "f", event.modifierFlags.intersection([.shift]).isEmpty {
+                onToggleFocus?()
+            } else {
+                super.keyDown(with: event)
+            }
         }
     }
 
-    override func cancelOperation(_ sender: Any?) { onClose?() }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
+
+    override func cancelOperation(_ sender: Any?) { if onEscape?() != true { onClose?() } }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)

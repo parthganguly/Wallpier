@@ -1,48 +1,175 @@
 import AppKit
 
-extension NSColor {
-    /// Small secondary text (11–13 pt): captions, details, status and explanations. The system secondary
-    /// label is 3.8–4.0:1 on light backgrounds, short of 4.5:1, so light appearances use black at 62%
-    /// (6.2:1 on white, 5.9:1 on the window background); dark appearances keep the system color (5.1–5.9:1).
-    static let secondaryText = NSColor(name: "WallpierSecondaryText") { appearance in
-        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .secondaryLabelColor : NSColor(white: 0, alpha: 0.62)
+/// Wallpier's design tokens: archival warm paper in light, darkroom charcoal in dark, one vermilion accent.
+/// Colors resolve per appearance, including Increase Contrast, so they follow the system without observers.
+enum Theme {
+    private static func traits(_ appearance: NSAppearance) -> (dark: Bool, highContrast: Bool) {
+        let match = appearance.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua])
+        let dark = match == .darkAqua || match == .accessibilityHighContrastDarkAqua
+        let high = match == .accessibilityHighContrastAqua || match == .accessibilityHighContrastDarkAqua
+        return (dark, high)
+    }
+
+    private static func rgb(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
+        NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255, alpha: alpha)
+    }
+
+    private static func token(_ name: String, light: UInt32, dark: UInt32, lightHigh: UInt32? = nil, darkHigh: UInt32? = nil) -> NSColor {
+        NSColor(name: "Wallpier\(name)") { appearance in
+            let t = traits(appearance)
+            return rgb(t.dark ? (t.highContrast ? darkHigh ?? dark : dark) : (t.highContrast ? lightHigh ?? light : light))
+        }
+    }
+
+    /// Ink on paper in light and paper on ink in dark, with a stronger alpha under Increase Contrast.
+    private static func hairline(_ name: String, normal: CGFloat, high: CGFloat) -> NSColor {
+        NSColor(name: "Wallpier\(name)") { appearance in
+            let t = traits(appearance)
+            let alpha = t.highContrast ? high : normal
+            return t.dark ? rgb(0xFFFCF5, alpha) : rgb(0x1C1917, alpha)
+        }
+    }
+
+    static let canvas = token("Canvas", light: 0xF6F4EF, dark: 0x161615)
+    static let stageBackdrop = token("StageBackdrop", light: 0xECE9E2, dark: 0x111110)
+    static let surface = token("Surface", light: 0xFFFFFF, dark: 0x232321)
+    static let surfaceHover = token("SurfaceHover", light: 0xEAE6DE, dark: 0x2D2C29)
+    static let inkPrimary = token("InkPrimary", light: 0x1C1917, dark: 0xF2EFE9)
+    /// 6.8:1 on the light canvas and 7.1:1 on the dark one; Increase Contrast promotes it further.
+    static let inkSecondary = token("InkSecondary", light: 0x57534E, dark: 0xA8A29E, lightHigh: 0x3F3B37, darkHigh: 0xD6D3CD)
+    static let inkTertiary = token("InkTertiary", light: 0x6B645E, dark: 0x9A948C, lightHigh: 0x4A4540, darkHigh: 0xC9C5BE)
+    static let hairlineColor = hairline("Hairline", normal: 0.11, high: 0.45)
+    /// Fill of the primary command. White on #C24B2C is 4.84:1; the lighter #D45B3B measured 3.92:1 and fails,
+    /// so both appearances share this fill and only foreground accents lighten in dark.
+    static let accentFill = rgb(0xC24B2C)
+    static let accentFillHover = rgb(0xAE4124)
+    static let accentFillPressed = rgb(0x9A381D)
+    /// Accent for text, links and selection frames: 5.7:1 on paper, 6.6:1 on darkroom charcoal.
+    static let accentText = token("AccentText", light: 0xB03F22, dark: 0xEB7A5C, lightHigh: 0x962F16, darkHigh: 0xF59A80)
+    static let statusError = token("StatusError", light: 0xB91C1C, dark: 0xF87171)
+    /// The display's own screen in the desktop preview.
+    static let desktopMat = rgb(0x1A1A19)
+    static let cornerRadius: CGFloat = 6
+
+    /// New York where available (the system serif), else the regular system face; CJK falls back through CoreText.
+    static func serif(_ size: CGFloat, weight: NSFont.Weight = .semibold) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        guard let descriptor = base.fontDescriptor.withDesign(.serif), let font = NSFont(descriptor: descriptor, size: size) else { return base }
+        return font
     }
 }
 
-/// Flow layout whose display-shaped (16:10) cells always divide the available width exactly,
-/// so the grid never leaves a ragged gap on the right at any window size. The collection view's
-/// delegate returns `fittedItemSize`; setting `itemSize` during `prepare()` leaves cells stale.
-final class GalleryLayout: NSCollectionViewFlowLayout {
-    static let thumbnailWidths: [CGFloat] = [170, 240, 330]
-    static let aspect: CGFloat = 10.0 / 16.0
+extension NSColor {
+    /// Small secondary text (11–13 pt): captions, details, status and explanations.
+    static let secondaryText = Theme.inkSecondary
+}
 
-    var targetWidth: CGFloat = GalleryLayout.thumbnailWidths[1] { didSet { invalidateLayout() } }
-    private var preparedWidth: CGFloat = 0
-    private(set) var fittedItemSize = NSSize(width: 240, height: 150)
+/// A label that wraps to the width its container gives it, so titles grow downward instead of truncating.
+final class WrappingLabel: NSTextField {
+    override func layout() {
+        super.layout()
+        if abs(preferredMaxLayoutWidth - bounds.width) > 0.5, bounds.width > 0 {
+            preferredMaxLayoutWidth = bounds.width
+            invalidateIntrinsicContentSize()
+        }
+    }
+}
 
-    // With the cells' 4 pt ring inset, pictures sit 16 pt apart and 16 pt from the edges: one rhythm,
-    // enough air for each wallpaper to read as its own picture, and still three columns at the
-    // default size in a minimum-width (or tiled) window.
-    override init() {
-        super.init()
-        sectionInset = NSEdgeInsets(top: 12, left: 12, bottom: 16, right: 12)
-        minimumInteritemSpacing = 8
-        minimumLineSpacing = 8
+/// The one primary command (Set Wallpaper): vermilion fill with white text, a native keyboard focus ring,
+/// and distinct hover, pressed and disabled looks.
+final class PrimaryButton: NSButton {
+    private var isHovered = false { didSet { needsDisplay = true } }
+
+    convenience init(title: String, target: AnyObject?, action: Selector?) {
+        self.init(frame: .zero)
+        self.title = title; self.target = target; self.action = action
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        isBordered = false
+        setButtonType(.momentaryPushIn)
+        focusRingType = .exterior
+        font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
 
     required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
 
+    override var title: String {
+        didSet {
+            attributedTitle = NSAttributedString(string: title, attributes: [
+                .font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold), .foregroundColor: NSColor.white])
+        }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: super.intrinsicContentSize.width + 28, height: 30)
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let fill = isHighlighted ? Theme.accentFillPressed : isHovered ? Theme.accentFillHover : Theme.accentFill
+        (isEnabled ? fill : fill.withAlphaComponent(0.45)).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: Theme.cornerRadius, yRadius: Theme.cornerRadius).fill()
+        cell?.drawInterior(withFrame: bounds, in: self)
+    }
+
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds, xRadius: Theme.cornerRadius, yRadius: Theme.cornerRadius).fill()
+    }
+    override var focusRingMaskBounds: NSRect { bounds }
+}
+
+/// Fixed-cell contact sheet. Every cell has the same size whatever its picture's proportions: a picture well
+/// above a two-line caption. The column count is a whole number worked out from the width, and leftover pixels
+/// go into the outer margins, so nothing is cut off at any window width and nothing re-flows when thumbnails
+/// load. The collection view's delegate returns `fittedItemSize` and `fittedSectionInset`.
+final class GalleryLayout: NSCollectionViewFlowLayout {
+    static let thumbnailWidths: [CGFloat] = [170, 240, 330]
+    /// Well height over width: a little taller than a display so portraits and squares stay legible.
+    static let wellAspect: CGFloat = 0.75
+    /// The gap, title line and maker line under each well.
+    static let captionHeight: CGFloat = 40
+
+    var targetWidth: CGFloat = GalleryLayout.thumbnailWidths[1] { didSet { invalidateLayout() } }
+    private var preparedWidth: CGFloat = 0
+    private(set) var fittedItemSize = NSSize(width: 240, height: 190)
+    private(set) var fittedSectionInset = NSEdgeInsets(top: 12, left: 15, bottom: 20, right: 15)
+
+    // With the cells' 5 pt ring inset, pictures sit 18 pt apart and 20 pt from the edges.
+    override init() {
+        super.init()
+        sectionInset = NSEdgeInsets(top: 12, left: 15, bottom: 20, right: 15)
+        minimumInteritemSpacing = 8
+        minimumLineSpacing = 10
+    }
+
+    required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
+
+    static func cellHeight(forWidth width: CGFloat) -> CGFloat {
+        let ring = WallpaperCollectionViewItem.ringInset
+        return ring + floor((width - 2 * ring) * wellAspect) + captionHeight
+    }
+
     static func itemSize(availableWidth: CGFloat, targetWidth: CGFloat, spacing: CGFloat) -> NSSize {
         let columns = max(1, ((availableWidth + spacing) / (targetWidth + spacing)).rounded())
         let width = floor((availableWidth - (columns - 1) * spacing) / columns)
-        return NSSize(width: width, height: floor(width * aspect))
+        return NSSize(width: width, height: cellHeight(forWidth: width))
     }
 
     override func prepare() {
         if let width = collectionView?.enclosingScrollView?.contentView.bounds.width, width > 0 {
             preparedWidth = width
-            fittedItemSize = Self.itemSize(availableWidth: width - sectionInset.left - sectionInset.right,
-                                           targetWidth: targetWidth, spacing: minimumInteritemSpacing)
+            let available = width - sectionInset.left - sectionInset.right
+            fittedItemSize = Self.itemSize(availableWidth: available, targetWidth: targetWidth, spacing: minimumInteritemSpacing)
+            let columns = max(1, floor((available + minimumInteritemSpacing) / (fittedItemSize.width + minimumInteritemSpacing)))
+            let leftover = max(0, available - (columns * fittedItemSize.width + (columns - 1) * minimumInteritemSpacing))
+            fittedSectionInset = NSEdgeInsets(top: sectionInset.top, left: sectionInset.left + floor(leftover / 2),
+                                              bottom: sectionInset.bottom, right: sectionInset.right + ceil(leftover / 2))
         }
         super.prepare()
     }
@@ -143,13 +270,15 @@ final class EmptyStateView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         symbol.symbolConfiguration = .init(pointSize: 34, weight: .light)
-        symbol.contentTintColor = .tertiaryLabelColor
+        symbol.contentTintColor = Theme.inkTertiary
         spinner.style = .spinning
         spinner.controlSize = .regular
         spinner.isDisplayedWhenStopped = false
-        // The title leads at full contrast; the symbol and message stay quiet beneath it.
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        titleLabel.textColor = .labelColor
+        // The title leads in the editorial serif at full contrast; the symbol and message stay quiet beneath it.
+        titleLabel.font = Theme.serif(20)
+        titleLabel.textColor = Theme.inkPrimary
+        titleLabel.alignment = .center
+        titleLabel.lineBreakMode = .byTruncatingTail
         messageLabel.font = .systemFont(ofSize: 13)
         messageLabel.textColor = .secondaryText
         messageLabel.alignment = .center

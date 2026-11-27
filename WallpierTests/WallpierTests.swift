@@ -838,21 +838,32 @@ extension WallpierTests {
     @MainActor
     func testThumbnailCellFillsWithAnyAspectAndRingsSelection() {
         let item = WallpaperCollectionViewItem()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 150),
+        let cellSize = GalleryLayout.itemSize(availableWidth: 240, targetWidth: 240, spacing: 8)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: cellSize),
                               styleMask: .borderless, backing: .buffered, defer: false)
         window.contentView!.addSubview(item.view)
-        item.view.frame = NSRect(x: 0, y: 0, width: 240, height: 150)
-        item.configure(identifier: "a", title: "a", toolTip: "a")
+        item.view.frame = NSRect(origin: .zero, size: cellSize)
+        item.configure(identifier: "a", title: "A title", toolTip: "a", subtitle: "A maker · 1830")
         XCTAssertFalse(item.hasThumbnail)
-        let frames = [NSSize(width: 1080, height: 1920), NSSize(width: 3440, height: 1440)].map { size in
+        XCTAssertEqual(item.titleText, "A title")
+        XCTAssertEqual(item.subtitleText, "A maker · 1830")
+        let sources = [NSSize(width: 1080, height: 1920), NSSize(width: 3440, height: 1440)]
+        let frames = sources.map { size -> (well: NSRect, picture: NSRect) in
             item.setThumbnail(NSImage(size: size))
             item.view.layoutSubtreeIfNeeded()
             XCTAssertTrue(item.hasThumbnail)
-            return item.thumbnailFrame
+            return (item.wellFrame, item.thumbnailFrame)
         }
-        // Every aspect ratio fills the same display-shaped frame, inset for the selection ring.
-        XCTAssertEqual(frames[0], frames[1])
-        XCTAssertEqual(frames[0], item.view.bounds.insetBy(dx: WallpaperCollectionViewItem.ringInset, dy: WallpaperCollectionViewItem.ringInset))
+        // The well is identical whatever the artwork; the artwork keeps its own proportions inside it, uncropped,
+        // centered on the well's bottom edge (a shared baseline).
+        XCTAssertEqual(frames[0].well, frames[1].well)
+        XCTAssertEqual(frames[0].well.insetBy(dx: -WallpaperCollectionViewItem.ringInset, dy: -WallpaperCollectionViewItem.ringInset).width, cellSize.width)
+        for (index, frame) in frames.enumerated() {
+            XCTAssertTrue(frame.well.insetBy(dx: -0.5, dy: -0.5).contains(frame.picture), "picture \(index) stays inside the well")
+            XCTAssertEqual(frame.picture.maxY, frame.well.maxY, accuracy: 0.5, "shared baseline")
+            XCTAssertEqual(frame.picture.width / frame.picture.height, sources[index].width / sources[index].height, accuracy: 0.02, "uncropped")
+        }
+        XCTAssertLessThanOrEqual(item.wellFrame.maxY + GalleryLayout.captionHeight, cellSize.height + 0.5)
         item.isSelected = true
         XCTAssertTrue(item.showsSelectionRing)
         item.isSelected = false
@@ -870,7 +881,7 @@ extension WallpierTests {
                 let used = columns * size.width + (columns - 1) * 4
                 XCTAssertLessThanOrEqual(used, width)
                 XCTAssertGreaterThan(used, width - columns, "No ragged gap at width \(width)")
-                XCTAssertEqual(size.height, floor(size.width * 10 / 16))
+                XCTAssertEqual(size.height, GalleryLayout.cellHeight(forWidth: size.width))
             }
         }
     }
@@ -1141,10 +1152,10 @@ extension WallpierTests {
         let sidebar = controller.sidebarForTesting
         func row(_ title: String) -> SidebarNode? { sidebar.rows.first { $0.title == title } }
         XCTAssertEqual(sidebar.rows.map(\.title), [
-            "Wallpapers & Digital Art", "Wallhaven", "KDE Plasma", "Pepper&Carrot",
-            "Fine Art & Illustration", "Cleveland Museum of Art", "The Met", "Wellcome Collection",
-            "Photography & Nature", "Openverse", "iNaturalist", "Space", "NASA Images",
-            "Library", "Folder", "Favorites", "Collections", "Evening Light", "Quiet Mornings"
+            "Library", "Favorites", "Folder", "Collections", "Evening Light", "Quiet Mornings",
+            "Museums & Archives", "Cleveland Museum of Art", "The Met", "Wellcome Collection",
+            "Photography & Space", "Openverse", "iNaturalist", "NASA Images",
+            "Wallpapers & Digital", "Wallhaven", "KDE Plasma", "Pepper&Carrot"
         ])
         XCTAssertEqual(row("Favorites")?.count, 6)
         XCTAssertEqual(row("Evening Light")?.count, 5)
@@ -2143,7 +2154,7 @@ extension WallpierTests {
         let down = String(Character(UnicodeScalar(NSDownArrowFunctionKey)!))
         var columnCounts: [Int] = []
         let configurations = [(window.minSize.width, GalleryLayout.thumbnailWidths[2]),
-                              (window.minSize.width, GalleryLayout.thumbnailWidths[1]),
+                              (CGFloat(980), GalleryLayout.thumbnailWidths[1]),
                               (CGFloat(1120), GalleryLayout.thumbnailWidths[0])]
         for (width, thumbnail) in configurations {
             window.setFrame(NSRect(origin: window.frame.origin, size: NSSize(width: width, height: 720)), display: true)
@@ -7567,7 +7578,7 @@ extension WallpierTests {
         guard reached else { return XCTFail("The creator view showed \(c.visibleItemIdentitiesForTesting) (\(c.emptyStateView.title))") }
         XCTAssertEqual(c.visibleItemIdentitiesForTesting, ["cma:152506", "cma:152507", "cma:152508", "cma:900004"], "Excluded rows are never shown; the anchor is the one left behind")
         XCTAssertEqual(network.apiEvents, ["api:/api/creators/23328", "api:search:artists"])
-        XCTAssertEqual(c.creatorTitleLabel.stringValue, "Katsushika Hokusai"); XCTAssertEqual(c.window?.title, "Katsushika Hokusai")
+        XCTAssertEqual(c.creatorTitleLabel.stringValue, "Katsushika Hokusai"); XCTAssertEqual(c.window?.title, "Cleveland Museum of Art", "The toolbar names the source; the header names the creator")
         XCTAssertEqual(c.creatorSubtitleLabel.stringValue, "Works at Cleveland Museum of Art", "A copyrighted record is in view, so it isn't called open access")
         XCTAssertFalse(c.creatorBar.isHidden); XCTAssertTrue(c.moreByButton.isHidden, "One level only")
         XCTAssertEqual(c.creatorStatusLabel.stringValue, "Showing 4 works from the first 10 of 250 matches")
@@ -7683,7 +7694,7 @@ extension WallpierTests {
         reached = await eventually { c.visibleItemIdentitiesForTesting.count == 4 }
         XCTAssertTrue(reached)
         XCTAssertEqual(c.creatorSubtitleLabel.stringValue, "Cleveland Museum of Art · Open-access works")
-        XCTAssertEqual(c.window?.subtitle, "Cleveland Museum of Art · Open-access works")
+        XCTAssertEqual(c.window?.subtitle, "Open-access works")
         func creatorRequests() -> Int { network.apiEvents.filter { $0.contains("creators") || $0.contains("artists") }.count }
         XCTAssertEqual(creatorRequests(), 2)
 
@@ -7782,7 +7793,9 @@ extension WallpierTests {
         let creator = try XCTUnwrap(wallpaper.item(withTitle: "More by Creator"))
         XCTAssertEqual(creator.keyEquivalent, ""); XCTAssertEqual(creator.action, #selector(MainWindowController.showCreator(_:)))
         let view = try XCTUnwrap(NSApp.mainMenu?.item(withTitle: "View")?.submenu)
-        let museum = try XCTUnwrap(view.item(withTitle: "Cleveland Museum of Art"))
+        let sources = try XCTUnwrap(view.item(withTitle: "Discover Sources")?.submenu)
+        XCTAssertEqual(sources.items.filter { $0.action != nil }.count, 9, "All nine sources are listed")
+        let museum = try XCTUnwrap(sources.item(withTitle: "Cleveland Museum of Art"))
         XCTAssertEqual(museum.keyEquivalent, ""); XCTAssertEqual(museum.action, #selector(MainWindowController.showCMA(_:)))
         // The pivot's title follows the selection; it is enabled only when there is something to open.
         XCTAssertTrue(c.validateMenuItem(creator)); XCTAssertEqual(creator.title, "More by Katsushika Hokusai")
