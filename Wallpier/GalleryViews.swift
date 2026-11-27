@@ -135,6 +135,43 @@ final class PrimaryButton: NSButton {
     override var focusRingMaskBounds: NSRect { bounds }
 }
 
+/// A scope row with two explicitly bounded groups: a leading group whose labels truncate when room is short, and a
+/// trailing group pinned to the trailing edge that keeps its controls. A required constraint keeps the leading group
+/// from reaching the trailing one, so nothing overlaps or runs past the row at any width. Replaces a gravity
+/// `NSStackView`, whose trailing area could be pushed off the canvas by a long leading notice.
+final class SplitBar: NSView {
+    let leadingGroup = NSStackView()
+    let trailingGroup = NSStackView()
+
+    init(spacing: CGFloat) {
+        super.init(frame: .zero)
+        for group in [leadingGroup, trailingGroup] {
+            group.orientation = .horizontal
+            group.spacing = spacing
+            group.alignment = .centerY
+            group.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(group)
+        }
+        // Leading labels compress (below 500) before anything else; the trailing group may detach its optional
+        // note (below 300 only matters when it truly cannot fit) but keeps its buttons.
+        leadingGroup.setClippingResistancePriority(NSLayoutConstraint.Priority(500), for: .horizontal)
+        trailingGroup.setClippingResistancePriority(NSLayoutConstraint.Priority(300), for: .horizontal)
+        trailingGroup.setHuggingPriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            leadingGroup.leadingAnchor.constraint(equalTo: leadingAnchor),
+            leadingGroup.topAnchor.constraint(equalTo: topAnchor),
+            leadingGroup.bottomAnchor.constraint(equalTo: bottomAnchor),
+            trailingGroup.trailingAnchor.constraint(equalTo: trailingAnchor),
+            trailingGroup.centerYAnchor.constraint(equalTo: centerYAnchor),
+            trailingGroup.topAnchor.constraint(greaterThanOrEqualTo: topAnchor),
+            trailingGroup.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
+            leadingGroup.trailingAnchor.constraint(lessThanOrEqualTo: trailingGroup.leadingAnchor, constant: -10)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
+}
+
 /// Fixed-cell contact sheet. Every cell has the same size whatever its picture's proportions: a picture well
 /// above a two-line caption. The column count is a whole number worked out from the width, and leftover pixels
 /// go into the outer margins, so nothing is cut off at any window width and nothing re-flows when thumbnails
