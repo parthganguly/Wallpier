@@ -112,7 +112,7 @@ class RemoteThumbnailProvider {
             self.decodeQueue.addOperation { [weak self] in
                 guard let self else { return }
                 let result = autoreleasepool {
-                    Self.makeThumbnail(data: data, maximumPixelSize: maximumPixelSize)
+                    Self.makeThumbnail(data: data, maximumPixelSize: maximumPixelSize, catalog: CatalogLibrary.isMediaHost(url))
                 }
                 if result == nil {
                     self.logger.error("Could not decode remote thumbnail at \(url.absoluteString, privacy: .public)")
@@ -196,7 +196,7 @@ class RemoteThumbnailProvider {
             // CMA thumbnails stay on the same approved path on the museum's CDN over HTTPS.
             return CMAURLPolicy.allowsRedirect(from: requested, to: target)
         default:
-            return true
+            return !CatalogLibrary.isMediaHost(requested) || CatalogURL.sameResource(requested, target)
         }
     }
 
@@ -204,11 +204,21 @@ class RemoteThumbnailProvider {
         guard (200...299).contains(response.statusCode), (1...maximumThumbnailBytes).contains(byteCount) else { return false }
         if requested.host?.lowercased() == CMAURLPolicy.imageHost,
            !(response.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased().hasPrefix("image/") { return false }
+        if CatalogLibrary.isMediaHost(requested),
+           !["image/jpeg", "image/png", "application/octet-stream"].contains(response.mimeType?.lowercased() ?? "") { return false }
         return response.url.map { allowsThumbnailResponse(from: requested, to: $0) } ?? false
     }
 
-    private static func makeThumbnail(data: Data, maximumPixelSize: Int) -> (image: NSImage, cost: Int)? {
+    private static func makeThumbnail(data: Data, maximumPixelSize: Int, catalog: Bool) -> (image: NSImage, cost: Int)? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        if catalog {
+            guard CGImageSourceGetCount(source) == 1,
+                  let type = CGImageSourceGetType(source) as String?, ["public.jpeg", "public.png"].contains(type),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? Int,
+                  let height = properties[kCGImagePropertyPixelHeight] as? Int,
+                  (1...8192).contains(width), (1...8192).contains(height), width * height <= 20_000_000 else { return nil }
+        }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,

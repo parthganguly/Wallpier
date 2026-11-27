@@ -32,6 +32,8 @@ enum RemoteProviderError: Error, Equatable, LocalizedError {
     case unsupportedProvider
     /// A museum work shown for browsing only: no open-access high-resolution JPEG to preview, set or keep.
     case browseOnly
+    case catalogBrowseOnly
+    case catalogOriginalIneligible
     /// The museum's current record no longer lists this work as open access with a high-resolution JPEG.
     case notOpenAccess
     /// The downloaded image didn't match what the museum's record says it is.
@@ -72,6 +74,10 @@ enum RemoteProviderError: Error, Equatable, LocalizedError {
             return "This wallpaper comes from a source this version of Wallpier doesn’t support."
         case .browseOnly:
             return "This work has no open-access high-resolution JPEG, so it can only be viewed on the museum’s site."
+        case .catalogBrowseOnly:
+            return "This work can be viewed at its source. An eligible original is unavailable."
+        case .catalogOriginalIneligible:
+            return "This source no longer lists an eligible original for this work."
         case .notOpenAccess:
             return "The museum no longer lists this work as open access with a high-resolution JPEG, so it wasn’t downloaded."
         case .mediaRejected:

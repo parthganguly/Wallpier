@@ -1140,7 +1140,12 @@ extension WallpierTests {
         defer { window.close() }
         let sidebar = controller.sidebarForTesting
         func row(_ title: String) -> SidebarNode? { sidebar.rows.first { $0.title == title } }
-        XCTAssertEqual(sidebar.rows.map(\.title), ["Discover", "Wallhaven", "Openverse", "Cleveland Museum of Art", "Library", "Folder", "Favorites", "Collections", "Evening Light", "Quiet Mornings"])
+        XCTAssertEqual(sidebar.rows.map(\.title), [
+            "Wallpapers & Digital Art", "Wallhaven", "KDE Plasma", "Pepper&Carrot",
+            "Fine Art & Illustration", "Cleveland Museum of Art", "The Met", "Wellcome Collection",
+            "Photography & Nature", "Openverse", "iNaturalist", "Space", "NASA Images",
+            "Library", "Folder", "Favorites", "Collections", "Evening Light", "Quiet Mornings"
+        ])
         XCTAssertEqual(row("Favorites")?.count, 6)
         XCTAssertEqual(row("Evening Light")?.count, 5)
         XCTAssertEqual(sidebar.selectedItem, .favorites)

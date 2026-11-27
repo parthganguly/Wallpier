@@ -167,12 +167,28 @@ enum RemoteProviderID: String, Codable, CaseIterable {
     case wallhaven
     case openverse
     case cma
+    case plasma, pepper, met, wellcome, inaturalist, nasa
+
+    var isCatalog: Bool {
+        switch self {
+        case .wallhaven, .openverse, .cma: return false
+        default: return true
+        }
+    }
+
+    var filtersPublishedCatalog: Bool { self == .plasma || self == .pepper }
 
     var displayName: String {
         switch self {
         case .wallhaven: return "Wallhaven"
         case .openverse: return "Openverse"
         case .cma: return "Cleveland Museum of Art"
+        case .plasma: return "KDE Plasma"
+        case .pepper: return "Pepper&Carrot"
+        case .met: return "The Met"
+        case .wellcome: return "Wellcome Collection"
+        case .inaturalist: return "iNaturalist"
+        case .nasa: return "NASA Images"
         }
     }
 }
@@ -221,8 +237,8 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     let originalURL: URL
     let previewURL: URL
     let thumbnailURL: URL
-    let width: Int
-    let height: Int
+    var width: Int
+    var height: Int
     var uploader: String?
     var tags: [String]
     var cachedLocalPath: String?
@@ -238,6 +254,7 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
     var licenseURL: URL? = nil
     /// The Cleveland Museum of Art's record, as reported. Absent for every other provider and older saved references.
     var cma: CMARecord? = nil
+    var catalog: CatalogRecord? = nil
 
     var id: String { identityKey }
     var identityKey: String { "\(providerIdentifier):\(wallpaperID)" }
@@ -255,6 +272,7 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
         case .openverse?: return title.map(DisplayText.title) ?? wallpaperID
         case .cma?: return DisplayText.title(title)
         case .wallhaven?, nil: return title ?? wallpaperID
+        default: return DisplayText.title(title)
         }
     }
     /// Who made the work, as shown: nil when none was reported. Wallhaven's uploader is shown as reported.
@@ -263,6 +281,7 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
         case .openverse?: return uploader.map(DisplayText.creator)
         case .cma?: return cmaCreditName
         case .wallhaven?, nil: return uploader
+        default: return uploader.map(DisplayText.creator)
         }
     }
     /// Credit phrase for captions: “by Name”, except a credit that already carries its own qualifier
@@ -273,7 +292,7 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
         let lowered = creator.lowercased()
         let qualifiers = ["after ", "attributed to ", "circle of ", "follower of ", "workshop of ", "school of ", "manner of ",
                           "studio of ", "style of ", "copy after ", "imitator of ", "probably "]
-        if provider == .openverse, qualifiers.contains(where: { lowered.hasPrefix($0) }) { return creator }
+        if provider != .wallhaven, qualifiers.contains(where: { lowered.hasPrefix($0) }) { return creator }
         return "by \(creator)"
     }
     /// Where the work comes from: Wallhaven itself, or the source Openverse indexed it from.
@@ -294,8 +313,11 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
         case .wallhaven?: return nil
         case .cma?: return cmaUseRestriction
         case nil: return .unsupportedProvider
+        default: return CatalogLibrary.canUse(self) ? nil : .catalogBrowseOnly
         }
     }
+
+    var isBrowseOnly: Bool { isCMABrowseOnly || (provider?.isCatalog == true && blocksUse) }
 
     var blocksUse: Bool { useRestriction != nil }
 
@@ -314,12 +336,15 @@ struct WallpaperReference: Codable, Equatable, Hashable, Identifiable {
                   CMAURLPolicy.isAllowedMediaURL(thumbnailURL, rendition: .web) else { return nil }
             return thumbnailURL
         case nil: return nil
+        default: return CatalogLibrary.thumbnail(for: self, large: large)
         }
     }
     /// “CC0 1.0” or “Public Domain Mark 1.0”, as reported; nil when no license was reported.
     var licenseDescription: String? {
         guard let license else { return nil }
-        let name = ["cc0": "CC0", "pdm": "Public Domain Mark"][license.lowercased()] ?? license.uppercased()
+        let names = ["cc0": "CC0", "pdm": "Public Domain Mark", "cc-by": "CC BY",
+                     "cc-by-sa": "CC BY-SA", "nasa": "NASA media guidelines"]
+        let name = names[license.lowercased()] ?? license.uppercased()
         return [name, licenseVersion].compactMap { $0 }.joined(separator: " ")
     }
 
@@ -437,6 +462,7 @@ struct WallpaperState: Codable, Equatable {
     var discoverProvider: RemoteProviderID = .wallhaven
     var openverseSearch = OpenverseSearchOptions()
     var cmaSearch = CMASearchOptions()
+    var catalogQueries: [String: String] = [:]
     var favorites: [WallpaperReference] = []
     var collections: [WallpaperCollection] = []
     var selectedCollectionID: UUID?
@@ -507,7 +533,7 @@ struct WallpaperState: Codable, Equatable {
         case version, folderPath, selectedImagePath, selectedDisplayID
         case scalingMode, rotationInterval, shuffleEnabled, displayAssignments, history
         case currentSource, selectedRemoteIdentity, wallhavenSearch, favorites, collections
-        case discoverProvider, openverseSearch, cmaSearch
+        case discoverProvider, openverseSearch, cmaSearch, catalogQueries
         case selectedCollectionID, activeRotationCollectionID, rotationCursor
     }
 
@@ -533,6 +559,7 @@ struct WallpaperState: Codable, Equatable {
         discoverProvider = (try? container.decodeIfPresent(RemoteProviderID.self, forKey: .discoverProvider)) ?? .wallhaven
         openverseSearch = (try? container.decodeIfPresent(OpenverseSearchOptions.self, forKey: .openverseSearch)) ?? OpenverseSearchOptions()
         cmaSearch = (try? container.decodeIfPresent(CMASearchOptions.self, forKey: .cmaSearch)) ?? CMASearchOptions()
+        catalogQueries = (try? container.decodeIfPresent([String: String].self, forKey: .catalogQueries)) ?? [:]
         favorites = try container.decodeIfPresent([WallpaperReference].self, forKey: .favorites) ?? []
         collections = try container.decodeIfPresent([WallpaperCollection].self, forKey: .collections) ?? []
         selectedCollectionID = try container.decodeIfPresent(UUID.self, forKey: .selectedCollectionID)
