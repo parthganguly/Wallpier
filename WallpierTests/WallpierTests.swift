@@ -2154,7 +2154,8 @@ extension WallpierTests {
         let down = String(Character(UnicodeScalar(NSDownArrowFunctionKey)!))
         var columnCounts: [Int] = []
         let configurations = [(window.minSize.width, GalleryLayout.thumbnailWidths[2]),
-                              (CGFloat(980), GalleryLayout.thumbnailWidths[1]),
+                              (window.minSize.width, GalleryLayout.thumbnailWidths[1]),
+                              (CGFloat(1060), GalleryLayout.thumbnailWidths[1]),
                               (CGFloat(1120), GalleryLayout.thumbnailWidths[0])]
         for (width, thumbnail) in configurations {
             window.setFrame(NSRect(origin: window.frame.origin, size: NSSize(width: width, height: 720)), display: true)
@@ -2168,7 +2169,8 @@ extension WallpierTests {
                 let columns = (0..<count).filter { view.frameForItem(at: $0).minY == firstRow }.count
                 let context = "\(columns) columns in \(source.rawValue) (window \(Int(window.frame.width)) pt, thumbnails \(Int(thumbnail)) pt)"
                 columnCounts.append(columns)
-                XCTAssertGreaterThanOrEqual(columns, 2, context)
+                // Floor-based columns: the large size may be a single column at the minimum width.
+                XCTAssertGreaterThanOrEqual(columns, 1, context)
                 view.scrollToItems(at: [IndexPath(item: 0, section: 0)], scrollPosition: .top)
                 select(1)
                 func expectSelection(_ index: Int, _ step: String, file: StaticString = #filePath, line: UInt = #line) {
@@ -2179,7 +2181,9 @@ extension WallpierTests {
 
                 // The gutter between the first two pictures is empty space at every column count.
                 let first = view.frameForItem(at: 0), second = view.frameForItem(at: 1)
-                let blank = NSPoint(x: (first.maxX + second.minX) / 2, y: first.midY)
+                // With one column there is no gutter between neighbors; the outer margin beside the cell is blank instead.
+                let blank = columns > 1 ? NSPoint(x: (first.maxX + second.minX) / 2, y: first.midY)
+                                        : NSPoint(x: first.maxX + 6, y: first.midY)
                 XCTAssertNil(view.indexPathForItem(at: blank), "\(context): the click point must be empty gallery space")
                 click(at: view.convert(blank, to: nil), in: window)
                 XCTAssertTrue(c.window?.firstResponder === view, "\(context): the click reached the gallery")
@@ -2210,6 +2214,7 @@ extension WallpierTests {
                 XCTAssertEqual(ring()?.isEmphasized, true, "\(context): gallery refocused")
             }
         }
+        XCTAssertTrue(columnCounts.contains(1), "Exercised \(columnCounts)")
         XCTAssertTrue(columnCounts.contains(2), "Exercised \(columnCounts)")
         XCTAssertTrue(columnCounts.contains(3), "Exercised \(columnCounts)")
         XCTAssertTrue(columnCounts.contains { $0 >= 4 }, "Exercised \(columnCounts)")

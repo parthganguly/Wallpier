@@ -279,6 +279,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     let creatorTitleLabel = NSTextField(labelWithString: "")
     let creatorSubtitleLabel = NSTextField(labelWithString: "")
     let creatorStatusLabel = NSTextField(labelWithString: "")
+    /// The "·" between the provenance line and the count line, shown only with a count.
+    private let creatorSeparatorLabel = NSTextField(labelWithString: "·")
     /// Opens the artwork page the creator view started from; the museum's record, not a catalog of the creator.
     let creatorLinkButton = NSButton(title: "View starting work on Cleveland Museum of Art ↗", target: nil, action: nil)
     private let scopeBar = NSStackView()
@@ -473,7 +475,6 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         // truncated row shows its full name in a tooltip. A saved divider position still wins.
         sidebarItem.minimumThickness = 196
         sidebarItem.maximumThickness = 280
-        sidebarItem.preferredThicknessFraction = 224.0 / 1180.0
         sidebarItem.canCollapse = true
         let contentItem = NSSplitViewItem(viewController: contentController)
         contentItem.minimumThickness = 620
@@ -484,12 +485,22 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let frame = window.frame
         window.contentViewController = split
         window.setFrame(frame, display: false)
+        // The fraction alone left the sidebar at its 196 pt minimum at 1320 pt, truncating "Cleveland Museum of Art".
+        // Set the divider explicitly once the split has laid out. This is only the starting position: it is not a
+        // minimum, the divider stays draggable, a saved position (autosave, set after this) wins, and a window too
+        // narrow to give the content its 620 pt keeps the sidebar flexible down to 196.
+        split.view.layoutSubtreeIfNeeded()
+        let defaultSidebarWidth: CGFloat = 232
+        if split.view.bounds.width - defaultSidebarWidth >= contentItem.minimumThickness {
+            split.splitView.setPosition(defaultSidebarWidth, ofDividerAt: 0)
+        }
 
         let toolbar = NSToolbar(identifier: "WallpierMainToolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
+        window.defaultButtonCell = setWallpaperButton.cell as? NSButtonCell
         window.initialFirstResponder = collectionView
         galleryScroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(galleryDidScroll), name: NSView.boundsDidChangeNotification, object: galleryScroll.contentView)
@@ -679,15 +690,26 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             applyBar.heightAnchor.constraint(equalToConstant: 56),
             galleryMinimum
         ])
+        // The window's minimum width must come from the split (sidebar 196 + content 620), not from the widest row of
+        // controls. Stacks default to a required clipping resistance, so their arranged views' widths summed into the
+        // minimum content size (detachOnlyIfNecessary never got to act: the stack was never narrower than its contents).
+        // With a low clipping resistance each stack takes the width its container gives it: optional views detach
+        // (More by, View on…), labels truncate, and Display, Scaling, Set and the icon buttons keep their sizes.
+        relaxHorizontalMinimums(in: view)
         return view
+    }
+
+    private func relaxHorizontalMinimums(in view: NSView) {
+        if let stack = view as? NSStackView { stack.setClippingResistancePriority(.defaultLow, for: .horizontal) }
+        view.subviews.forEach(relaxHorizontalMinimums(in:))
     }
 
     private func configureViewer() {
         // The title is the editorial centerpiece: the serif, wrapping onto a second or third line rather than truncating.
-        previewTitleLabel.font = Theme.serif(21)
+        previewTitleLabel.font = Theme.serif(18, weight: .medium)
         previewTitleLabel.textColor = Theme.inkPrimary
-        previewTitleLabel.lineBreakMode = .byWordWrapping
-        previewTitleLabel.maximumNumberOfLines = 3
+        previewTitleLabel.lineBreakMode = .byTruncatingTail
+        previewTitleLabel.maximumNumberOfLines = 2
         previewMetadataLabel.textColor = .secondaryText
         previewTagsLabel.textColor = .secondaryText
         previewTagsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -729,7 +751,20 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         previewPositionLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
         previewPositionLabel.textColor = .secondaryText
         previewPositionLabel.alignment = .center
-        let pager = NSStackView(views: [previewPreviousButton, previewPositionLabel, previewNextButton])
+        // A visible way into focus mode (also F); Esc brings the caption and controls back.
+        let focusButton = NSButton()
+        focusButton.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Focus Mode")
+        focusButton.isBordered = false
+        focusButton.imagePosition = .imageOnly
+        focusButton.symbolConfiguration = .init(pointSize: 12, weight: .semibold)
+        focusButton.contentTintColor = Theme.accentText
+        focusButton.refusesFirstResponder = true
+        focusButton.target = self; focusButton.action = #selector(focusButtonClicked(_:))
+        focusButton.toolTip = "Focus Mode: hide the caption and controls (F). Esc brings them back."
+        focusButton.setAccessibilityLabel("Focus Mode")
+        focusButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        focusButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        let pager = NSStackView(views: [previewPreviousButton, previewPositionLabel, previewNextButton, focusButton])
         pager.spacing = 4
         // Links must be clickable: selectable, with attributes.
         previewAttributionLabel.isSelectable = true
@@ -743,12 +778,24 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         previewAcknowledgementLabel.lineBreakMode = .byTruncatingTail
         previewAcknowledgementLabel.isHidden = true
         // Caption band under the stage: title and pager, then credit and date, source and license, notices.
-        let titleRow = NSStackView(views: [previewTitleLabel, pager])
-        titleRow.alignment = .top
-        titleRow.spacing = 12
+        // Plain constraints, not a stack: the title takes the whole caption span up to the pager, which is pinned
+        // to the trailing edge, so the title reads in one or two lines instead of a narrow column.
+        let titleRow = NSView()
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+        for view in [previewTitleLabel, pager] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            titleRow.addSubview(view)
+        }
         pager.setContentHuggingPriority(.required, for: .horizontal)
         pager.setContentCompressionResistancePriority(.required, for: .horizontal)
-        previewTitleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        NSLayoutConstraint.activate([
+            previewTitleLabel.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
+            previewTitleLabel.topAnchor.constraint(equalTo: titleRow.topAnchor),
+            previewTitleLabel.bottomAnchor.constraint(equalTo: titleRow.bottomAnchor),
+            previewTitleLabel.trailingAnchor.constraint(equalTo: pager.leadingAnchor, constant: -12),
+            pager.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
+            pager.topAnchor.constraint(equalTo: titleRow.topAnchor, constant: 2)
+        ])
         let caption = previewCaptionBand
         for view in [titleRow, previewMetadataLabel, previewTagsLabel, previewAttributionLabel, previewAcknowledgementLabel, approximatePreviewNotice] {
             caption.addArrangedSubview(view)
@@ -794,8 +841,14 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         busyIndicator.style = .spinning
         busyIndicator.controlSize = .small
         busyIndicator.isDisplayedWhenStopped = false
+        // The dock is strictly two lines: this one (title and detail, never wrapping) and, under it, the status
+        // when there is one. Status takes the place of the dock's second line; it never adds a third.
         selectionLabel.lineBreakMode = .byTruncatingTail
+        selectionLabel.maximumNumberOfLines = 1
+        selectionLabel.usesSingleLineMode = true
         selectionLabel.allowsExpansionToolTips = true
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.usesSingleLineMode = true
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.allowsExpansionToolTips = true
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -1249,7 +1302,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             button.font = small
             button.lineBreakMode = .byTruncatingTail
             button.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
-            button.widthAnchor.constraint(lessThanOrEqualToConstant: 230).isActive = true
+            // The artist header's link may use the whole row; the dock's buttons stay bounded.
+            if button !== creatorLinkButton { button.widthAnchor.constraint(lessThanOrEqualToConstant: 230).isActive = true }
         }
         moreByButton.target = self; moreByButton.action = #selector(showCreator(_:))
         moreByButton.isHidden = true
@@ -1299,16 +1353,25 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         creatorStatusLabel.isHidden = true
         creatorLinkButton.isBordered = false
         creatorLinkButton.contentTintColor = Theme.accentText
-        let backRow = NSStackView(views: [creatorBackButton, creatorLinkButton])
+        // Back at the leading edge, the starting-work link at the trailing edge, with the row spanning the header.
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let backRow = NSStackView(views: [creatorBackButton, spacer, creatorLinkButton])
         backRow.spacing = 12
         backRow.distribution = .fill
-        creatorLinkButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let countRow = NSStackView(views: [creatorSubtitleLabel, creatorStatusLabel])
-        countRow.spacing = 8
+        creatorLinkButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        creatorSeparatorLabel.font = small
+        creatorSeparatorLabel.textColor = .secondaryText
+        creatorSeparatorLabel.isHidden = true
+        creatorSeparatorLabel.setAccessibilityElement(false)
+        let countRow = NSStackView(views: [creatorSubtitleLabel, creatorSeparatorLabel, creatorStatusLabel])
+        countRow.spacing = 6
         creatorBar.setViews([backRow, creatorTitleLabel, countRow], in: .top)
         creatorBar.orientation = .vertical
         creatorBar.alignment = .leading
         creatorBar.spacing = 2
+        backRow.widthAnchor.constraint(equalTo: creatorBar.widthAnchor).isActive = true
         creatorBar.setAccessibilityLabel("Creator")
         creatorBar.isHidden = true
     }
@@ -1508,8 +1571,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         creatorStatusLabel.stringValue = status
         creatorStatusLabel.toolTip = status.isEmpty ? nil : status
         creatorStatusLabel.isHidden = status.isEmpty
+        creatorSeparatorLabel.isHidden = status.isEmpty
         let starting = level.anchorTitle.isEmpty ? "the starting work" : "“\(level.anchorTitle)”"
-        creatorLinkButton.title = "Starting work: \(starting) ↗"
+        creatorLinkButton.title = "View \(starting) on \(level.provider.displayName) ↗"
         creatorLinkButton.toolTip = "Open \(starting) on \(level.provider.displayName)"
         creatorLinkButton.setAccessibilityLabel("View \(starting) on \(level.provider.displayName)")
         creatorLinkButton.isHidden = level.anchorPageURL == nil
@@ -2029,7 +2093,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         func add(_ string: String, link: URL? = nil) {
             var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
                                                              .foregroundColor: NSColor.secondaryText, .paragraphStyle: paragraph]
-            if let link { attributes[.link] = link }
+            // Links use the accent foreground (vermilion), underlined so they don't rely on color alone, not system blue.
+            if let link {
+                attributes[.link] = link
+                attributes[.foregroundColor] = Theme.accentText
+                attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            }
             text.append(NSAttributedString(string: string, attributes: attributes))
         }
         if reference.provider == .cma {
@@ -3061,16 +3130,31 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 520), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         panel.title = "Wallpier Help"
         let text = NSMutableAttributedString()
-        func add(_ string: String, font: NSFont, color: NSColor = Theme.inkPrimary, spacing: CGFloat = 10) {
-            let paragraph = NSMutableParagraphStyle(); paragraph.paragraphSpacing = spacing; paragraph.lineSpacing = 2
+        func add(_ string: String, font: NSFont, color: NSColor = Theme.inkPrimary, spacing: CGFloat = 8, before: CGFloat = 0,
+                 tab: CGFloat? = nil) {
+            let paragraph = NSMutableParagraphStyle(); paragraph.paragraphSpacing = spacing; paragraph.paragraphSpacingBefore = before
+            paragraph.lineSpacing = 2
+            if let tab {   // A hanging indent: keys in the first column, wrapped actions aligned under their own column.
+                paragraph.tabStops = [NSTextTab(textAlignment: .left, location: tab)]
+                paragraph.headIndent = tab
+            }
             text.append(NSAttributedString(string: string + "\n", attributes: [.font: font, .foregroundColor: color, .paragraphStyle: paragraph]))
         }
-        add("Wallpier Help", font: Theme.serif(24))
-        for paragraph in Self.helpText.components(separatedBy: "\n\n") {
-            add(paragraph.replacingOccurrences(of: "\n", with: " "), font: .systemFont(ofSize: 13), color: Theme.inkPrimary)
+        // The same guidance as helpText, under four clear headings, then a compact shortcut table.
+        let paragraphs = Self.helpText.components(separatedBy: "\n\n").map { $0.replacingOccurrences(of: "\n", with: " ") }
+        let sections: [(String, [Int])] = [("Discover & Sources", [0, 1]), ("Artist Exploration", [2]),
+                                           ("Desktop Preview & Fit", [3, 4]), ("Library & Rotation", [5])]
+        add("Wallpier Help", font: Theme.serif(24), spacing: 4)
+        for (heading, indices) in sections {
+            add(heading, font: Theme.serif(17), spacing: 4, before: 10)
+            for index in indices where paragraphs.indices.contains(index) { add(paragraphs[index], font: .systemFont(ofSize: 13)) }
         }
-        add("Keyboard shortcuts", font: Theme.serif(18), spacing: 6)
-        for line in Self.shortcutsText.components(separatedBy: "\n") { add(line, font: .systemFont(ofSize: 13), spacing: 3) }
+        add("Keyboard Shortcuts", font: Theme.serif(17), spacing: 4, before: 10)
+        for line in Self.shortcutsText.components(separatedBy: "\n") {
+            let parts = line.components(separatedBy: " — ")
+            guard parts.count == 2 else { continue }
+            add(parts[0] + "\t" + parts[1], font: .systemFont(ofSize: 13), spacing: 3, tab: 96)
+        }
         let scroll = NSTextView.scrollableTextView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         if let textView = scroll.documentView as? NSTextView {
@@ -3085,7 +3169,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         done.translatesAutoresizingMaskIntoConstraints = false
         let content = NSView()
         content.addSubview(scroll); content.addSubview(done)
+        // A fixed, fully visible sheet: the scroll area fills it above the Done button, so nothing is clipped.
         NSLayoutConstraint.activate([
+            content.widthAnchor.constraint(equalToConstant: 540), content.heightAnchor.constraint(equalToConstant: 580),
             scroll.topAnchor.constraint(equalTo: content.topAnchor), scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: done.topAnchor, constant: -12),
             done.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16), done.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14)
@@ -3152,6 +3238,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     @objc private func showMoreMenu(_ sender: NSButton) {
         itemMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    @objc private func focusButtonClicked(_ sender: Any?) {
+        window?.makeFirstResponder(viewerView)   // So Esc, which leaves focus mode, reaches the preview.
+        setFocusMode(true)
     }
 
     /// The same Add to Collection choices as the Wallpaper menu, from the control row.

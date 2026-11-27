@@ -67,6 +67,17 @@ extension NSColor {
 
 /// A label that wraps to the width its container gives it, so titles grow downward instead of truncating.
 final class WrappingLabel: NSTextField {
+    /// The full text is always one hover away, and to VoiceOver, even where the visible lines truncate.
+    override var stringValue: String {
+        didSet { toolTip = stringValue; setAccessibilityLabel(stringValue) }
+    }
+
+    /// Width comes from the container, never from the text: a label that reports its wrapped width as its
+    /// intrinsic width can't grow back once it has been laid out narrow.
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: super.intrinsicContentSize.height)
+    }
+
     override func layout() {
         super.layout()
         if abs(preferredMaxLayoutWidth - bounds.width) > 0.5, bounds.width > 0 {
@@ -156,7 +167,9 @@ final class GalleryLayout: NSCollectionViewFlowLayout {
     }
 
     static func itemSize(availableWidth: CGFloat, targetWidth: CGFloat, spacing: CGFloat) -> NSSize {
-        let columns = max(1, ((availableWidth + spacing) / (targetWidth + spacing)).rounded())
+        // Floor, per Design/PrintRoom.md: a column is only added once it fits at the target width, so cells are never
+        // narrower than the chosen size (the old rounding squeezed an extra column in).
+        let columns = max(1, ((availableWidth + spacing) / (targetWidth + spacing)).rounded(.down))
         let width = floor((availableWidth - (columns - 1) * spacing) / columns)
         return NSSize(width: width, height: cellHeight(forWidth: width))
     }

@@ -179,7 +179,9 @@ final class ThumbnailCellView: NSView {
         titleLabel.frame = NSRect(x: inset, y: well.maxY + 8, width: lineWidth, height: 16)
         subtitleLabel.frame = NSRect(x: inset, y: well.maxY + 24, width: lineWidth, height: 15)
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        ring.frame = NSRect(x: 0, y: 0, width: bounds.width, height: well.maxY + inset)
+        // The ring hugs the fitted picture, so every print's frame matches its true shape; placeholders (no picture
+        // yet, or none at all) keep the whole well.
+        ring.frame = (imageSize == nil ? well : imageHost.frame).insetBy(dx: -inset, dy: -inset)
         CATransaction.commit()
     }
 
