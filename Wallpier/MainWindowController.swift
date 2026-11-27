@@ -1884,6 +1884,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private func showOriginalIfSelected(_ reference: WallpaperReference, at url: URL) {
         guard let selected = selectedReference, selected.identityKey == reference.identityKey else { return }
         configureRemoteMetadata(selected)
+        if selected.width > 0 && selected.height > 0 {
+            stageView.imagePixelSize = CGSize(width: selected.width, height: selected.height)
+        }
         if isViewerVisible { loadLocalPreview(url, identity: selected.identityKey) }
     }
 
