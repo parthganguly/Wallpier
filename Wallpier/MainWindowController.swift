@@ -57,7 +57,7 @@ private enum DiscoverQuery: Equatable {
     }
 }
 
-/// One level of navigation over a source: a Cleveland Museum of Art creator's works, shown in place of the gallery
+/// A creator's works are shown in place of the gallery
 /// that opened it. Back (or Esc) restores that gallery, its scroll position, selection and focus.
 private struct CreatorLevel {
     enum Phase: Equatable { case loading, loaded, failed(String) }
@@ -83,6 +83,11 @@ private struct CreatorLevel {
     var allOpenAccess: Bool { provider != .cma || results.allSatisfy { $0.cma?.isCC0 == true } }
     var isTruncated: Bool { (matchTotal ?? 0) > returnedCount }
     var cacheKey: String { "\(provider.rawValue):\(creatorID)" }
+    var subtitle: String {
+        let source = provider.displayName
+        guard phase == .loaded else { return source }
+        return allOpenAccess ? "\(source) · Open-access works" : "Works at \(source)"
+    }
 }
 
 private struct CreatorSearchResult {
@@ -1386,12 +1391,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         guard let level = creatorLevel else { creatorBar.isHidden = true; return }
         creatorTitleLabel.stringValue = level.name
         creatorTitleLabel.toolTip = level.name
-        switch level.phase {
-        case .loaded:
-            let name = level.provider.displayName
-            creatorSubtitleLabel.stringValue = level.allOpenAccess ? "\(name) · Open-access works" : "Works at \(name)"
-        case .loading, .failed: creatorSubtitleLabel.stringValue = level.provider.displayName
-        }
+        creatorSubtitleLabel.stringValue = level.subtitle
         // The count is of this one bounded search page, not of every work the museum holds; say so.
         let status: String
         if level.phase == .loaded, level.isTruncated, let total = level.matchTotal {
@@ -1402,6 +1402,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         creatorStatusLabel.stringValue = status
         creatorStatusLabel.toolTip = status.isEmpty ? nil : status
         creatorStatusLabel.isHidden = status.isEmpty
+        creatorLinkButton.title = "View starting work on \(level.provider.displayName) ↗"
+        creatorLinkButton.setAccessibilityLabel("View the starting work on \(level.provider.displayName)")
         creatorLinkButton.isHidden = status.isEmpty || level.anchorPageURL == nil
     }
 
@@ -2670,7 +2672,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         guard let window else { return }
         if let level = creatorLevel {
             window.title = level.name
-            window.subtitle = level.phase == .loaded && !level.allOpenAccess ? "Works at Cleveland Museum of Art" : "Cleveland Museum of Art · Open-access works"
+            window.subtitle = level.subtitle
             return
         }
         let count = currentItems.count
@@ -2833,7 +2835,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             moreByButton.isHidden = true
         }
         viewOnMuseumButton.isHidden = selectedReference?.isBrowseOnly != true
-        if let reference = selectedReference, reference.isBrowseOnly { viewOnMuseumButton.title = "View on \(reference.providerName)" }
+        if let reference = selectedReference, reference.isBrowseOnly {
+            viewOnMuseumButton.title = "View on \(reference.providerName) ↗"
+            viewOnMuseumButton.setAccessibilityLabel("View on \(reference.providerName)")
+        }
         favoriteButton.isHidden = selectedReference == nil || selectedReference?.isBrowseOnly == true
         moreButton.isHidden = !hasSelection
         updatePreviewNavigation()
@@ -2894,14 +2899,14 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     // Saved scaling choices are never rewritten: an old saved Fill can't be told from a deliberate one.
     static let helpText = """
-        Discover searches safe-for-work wallpapers on Wallhaven, or openly licensed Wikimedia Commons images on Openverse. \
-        Your folder, Favorites and collections are in the sidebar, and can mix both sources.
+        Choose a Discover source in the sidebar and use the search field to search it. KDE Plasma and Pepper&Carrot \
+        filter smaller published wallpaper collections. Favorites and collections can keep wallpapers from different sources together.
 
         Openverse results are wide, large, non-mature Wikimedia Commons JPEGs reported as CC0 or public domain. Wallpier shows each \
         one's creator, source and reported license; Openverse doesn't verify licenses, so review the source page before reuse.
 
-        Cleveland Museum of Art works are open access (CC0). “More by” a creator shows more of that creator’s works in place; \
-        Esc or ← Gallery goes back. A work without a high-resolution JPEG can be viewed on the museum’s site, but not previewed, set or kept.
+        “More by” opens a creator’s works when the source identifies that creator. Esc or ← Gallery goes back. \
+        Works labeled for browsing open on their source site. The preview shows available credit and rights information.
 
         Select a wallpaper and press Space to preview it on your display’s shape; ← and → browse, Esc returns. \
         Set Wallpaper (Return) downloads only that original and applies it with the display and scaling shown beside it. \

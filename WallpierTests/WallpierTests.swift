@@ -8175,6 +8175,9 @@ extension WallpierTests {
                         c.moreByButton.performClick(nil)
                         let pivot = await eventually(90) { c.isShowingCreatorViewForTesting && !c.visibleItemIdentitiesForTesting.isEmpty }
                         try require(pivot, "creator results did not load")
+                        let subtitle = "\(provider.displayName) · Open-access works"
+                        try require(c.window?.subtitle == subtitle && c.creatorSubtitleLabel.stringValue == subtitle,
+                                    "creator title and gallery header must identify the active source")
                         let creatorID = reference.catalog?.creator?.id
                         try require(c.visibleItemIdentitiesForTesting.allSatisfy { c.creatorWorkForTesting($0)?.catalog?.creator?.id == creatorID }, "creator result ID mismatch")
                         notes.append("  creator results: \(c.visibleItemIdentitiesForTesting.prefix(8))")
