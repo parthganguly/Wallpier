@@ -1,13 +1,11 @@
 import AppKit
 
 /// Wallpier's design tokens: archival warm paper in light, darkroom charcoal in dark, one vermilion accent.
-/// Colors resolve per appearance, including Increase Contrast, so they follow the system without observers.
+/// Colors resolve for the window’s appearance and the system display contrast setting.
 enum Theme {
     private static func traits(_ appearance: NSAppearance) -> (dark: Bool, highContrast: Bool) {
-        let match = appearance.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua])
-        let dark = match == .darkAqua || match == .accessibilityHighContrastDarkAqua
-        let high = match == .accessibilityHighContrastAqua || match == .accessibilityHighContrastDarkAqua
-        return (dark, high)
+        let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return (dark, NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast)
     }
 
     private static func rgb(_ hex: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -37,7 +35,15 @@ enum Theme {
     static let surfaceHover = token("SurfaceHover", light: 0xEAE6DE, dark: 0x2D2C29)
     static let inkPrimary = token("InkPrimary", light: 0x1C1917, dark: 0xF2EFE9)
     /// 6.8:1 on the light canvas and 7.1:1 on the dark one; Increase Contrast promotes it further.
-    static let inkSecondary = token("InkSecondary", light: 0x57534E, dark: 0xA8A29E, lightHigh: 0x3F3B37, darkHigh: 0xD6D3CD)
+    static let inkSecondary = NSColor(name: "WallpierInkSecondary") { appearance in
+        let appearance = traits(appearance)
+        return secondaryInk(dark: appearance.dark, increasedContrast: appearance.highContrast)
+    }
+
+    static func secondaryInk(dark: Bool, increasedContrast: Bool) -> NSColor {
+        if dark { return rgb(increasedContrast ? 0xD6D3CD : 0xA8A29E) }
+        return rgb(increasedContrast ? 0x3F3B37 : 0x57534E)
+    }
     static let inkTertiary = token("InkTertiary", light: 0x6B645E, dark: 0x9A948C, lightHigh: 0x4A4540, darkHigh: 0xC9C5BE)
     // The translucent dark sidebar can be brighter than the opaque gallery canvas.
     static let sidebarHeading = token("SidebarHeading", light: 0x57534E, dark: 0xD6D3CD, lightHigh: 0x3F3B37, darkHigh: 0xF2EFE9)

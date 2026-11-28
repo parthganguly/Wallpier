@@ -4644,17 +4644,16 @@ extension WallpierTests {
     }
 
     func testSecondaryTextMeetsSmallTextContrastOnItsBackgrounds() {
-        let appearances: [(NSAppearance.Name, NSAppearance.Name)] = [
-            (.aqua, .accessibilityHighContrastAqua), (.darkAqua, .accessibilityHighContrastDarkAqua)
-        ]
-        for (standard, increased) in appearances {
+        for (standard, dark) in [(NSAppearance.Name.aqua, false), (.darkAqua, true)] {
+            let normal = Theme.secondaryInk(dark: dark, increasedContrast: false)
+            let increased = Theme.secondaryInk(dark: dark, increasedContrast: true)
             for background in [NSColor.windowBackgroundColor, Theme.canvas, Theme.stageBackdrop] {
-                let normalContrast = contrast(.secondaryText, on: background, in: standard)
+                let normalContrast = contrast(normal, on: background, in: standard)
                 XCTAssertGreaterThanOrEqual(normalContrast, 5, standard.rawValue)
-                XCTAssertGreaterThan(contrast(.secondaryText, on: background, in: increased), normalContrast, increased.rawValue)
+                XCTAssertGreaterThan(contrast(increased, on: background, in: standard), normalContrast, standard.rawValue)
             }
             XCTAssertGreaterThan(contrast(Theme.inkPrimary, on: Theme.canvas, in: standard),
-                                 contrast(.secondaryText, on: Theme.canvas, in: standard) * 1.8, standard.rawValue)
+                                 contrast(normal, on: Theme.canvas, in: standard) * 1.8, standard.rawValue)
             XCTAssertGreaterThanOrEqual(contrast(Theme.statusError, on: .windowBackgroundColor, in: standard), 4.5, standard.rawValue)
             XCTAssertGreaterThanOrEqual(contrast(.white, on: Theme.accentFill, in: standard), 4.5, standard.rawValue)
         }
