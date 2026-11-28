@@ -227,20 +227,21 @@ final class SidebarCell: NSTableCellView {
     }
 }
 
-/// A group title in small tertiary type; the Collections header also carries the `+` that creates a collection.
+/// The Collections header also carries the `+` that creates a collection.
 final class SidebarHeaderCell: NSTableCellView {
+    private let heading = NSTextField(labelWithString: "")
     private let addButton = NSButton()
     private var onAdd: (() -> Void)?
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
         self.identifier = identifier
-        let label = NSTextField(labelWithString: "")
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = Theme.inkTertiary
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
-        textField = label
+        // The source-list textField outlet applies its own muted group-label color.
+        heading.font = .systemFont(ofSize: 11, weight: .semibold)
+        heading.textColor = Theme.inkSecondary
+        heading.setAccessibilityElement(false)
+        heading.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(heading)
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Collection")
         addButton.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
         addButton.isBordered = false
@@ -252,20 +253,20 @@ final class SidebarHeaderCell: NSTableCellView {
         addButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(addButton)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            heading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            heading.centerYAnchor.constraint(equalTo: centerYAnchor),
             addButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             addButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             addButton.widthAnchor.constraint(equalToConstant: 22),
             addButton.heightAnchor.constraint(equalToConstant: 22),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: addButton.leadingAnchor, constant: -4)
+            heading.trailingAnchor.constraint(lessThanOrEqualTo: addButton.leadingAnchor, constant: -4)
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
 
     func configure(_ node: SidebarNode, onAdd: @escaping () -> Void) {
-        textField?.stringValue = node.title
+        heading.stringValue = node.title
         addButton.isHidden = !node.hasAddButton
         self.onAdd = onAdd
         setAccessibilityLabel(node.title)
