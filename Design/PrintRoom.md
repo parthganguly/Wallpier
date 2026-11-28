@@ -74,7 +74,7 @@ Use **New York** via `NSFontDescriptor.preferredFontDescriptor(forTextStyle:).wi
 - **Zero Auto Layout Warnings Rule:** Never collapse `scopeBar`, `discoverBar`, `localBar`, or `creatorBar` with a `heightAnchor == 0` constraint while inner stack views hold required top/bottom `edgeInsets`. Use an `NSStackView` with `detachesHiddenViews = true` (or remove/add the active header subview cleanly) so hidden bars contribute zero competing constraints.
 
 ### 4.2 Sidebar (`SidebarController`)
-- **Width:** Default **`224 pt`** (min `196 pt`, max `280 pt`, collapsible via `⌃⌘S`; never auto-collapses).
+- **Width:** Default **`232 pt`** (min `196 pt`, max `280 pt`, collapsible via `⌃⌘S`; never auto-collapses).
 - **Row metrics:** `26 pt` row height, `10 pt` horizontal inset, `15 pt` SF Symbol (`inkTertiary` at rest; `accentForeground` when selected; `alternateSelectedControlTextColor` if system emphasized), `7 pt` icon-to-label gap, `6 pt` corner radius on selection pill (`accentSoftFill`).
 - **Exact Group Order (all groups start expanded; no new persisted disclosure key):**
   1. **Library:** `Favorites` (`heart`, tabular count), `Folder` (`folder`, path tooltip, rotation glyph if rotating)

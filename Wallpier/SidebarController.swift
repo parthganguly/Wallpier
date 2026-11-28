@@ -83,9 +83,12 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func reload(groups: [SidebarNode], selection: SidebarItem?) {
         isReloading = true
         defer { isReloading = false }
+        let collapsed = Set(self.groups.filter { !outlineView.isItemExpanded($0) }.map(\.title))
         self.groups = groups
         outlineView.reloadData()
-        groups.forEach { outlineView.expandItem($0) }
+        for group in groups where !collapsed.contains(group.title) {
+            outlineView.expandItem(group)
+        }
         select(selection)
     }
 
@@ -117,7 +120,9 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         (item as? SidebarNode)?.item != nil
     }
 
-    func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { false }
+    func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool {
+        (item as? SidebarNode)?.item == nil
+    }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? SidebarNode else { return nil }

@@ -67,7 +67,7 @@ extension NSColor {
 
 /// A label that wraps to the width its container gives it, so titles grow downward instead of truncating.
 final class WrappingLabel: NSTextField {
-    /// The full text is always one hover away, and to VoiceOver, even where the visible lines truncate.
+    /// Provide the complete title as the accessibility label and tooltip.
     override var stringValue: String {
         didSet { toolTip = stringValue; setAccessibilityLabel(stringValue) }
     }

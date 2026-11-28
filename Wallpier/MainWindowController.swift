@@ -476,7 +476,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         contentController.view = makeContentView()
         let split = NSSplitViewController()
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarController)
-        // 224 pt shows "Cleveland Museum of Art" and "Wellcome Collection" whole; at the 196 pt minimum a
+        // 232 pt shows "Cleveland Museum of Art" and "Wellcome Collection" whole; at the 196 pt minimum a
         // truncated row shows its full name in a tooltip. A saved divider position still wins.
         sidebarItem.minimumThickness = 196
         sidebarItem.maximumThickness = 280
@@ -717,12 +717,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     }
 
     private func configureViewer() {
-        // The title is the editorial centerpiece: the serif, wrapping onto a second or third line rather than truncating.
+        // Use the full display title supplied by the provider, even when it needs several lines.
         previewTitleLabel.font = Theme.serif(18, weight: .medium)
         previewTitleLabel.textColor = Theme.inkPrimary
         previewTitleLabel.lineBreakMode = .byWordWrapping
-        previewTitleLabel.maximumNumberOfLines = 2
-        previewTitleLabel.cell?.truncatesLastVisibleLine = true
+        previewTitleLabel.maximumNumberOfLines = 0
+        previewTitleLabel.cell?.truncatesLastVisibleLine = false
         previewTitleLabel.cell?.wraps = true
         previewTitleLabel.cell?.isScrollable = false
         previewMetadataLabel.textColor = .secondaryText
@@ -793,8 +793,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         previewAcknowledgementLabel.lineBreakMode = .byTruncatingTail
         previewAcknowledgementLabel.isHidden = true
         // Caption band under the stage: title and pager, then credit and date, source and license, notices.
-        // Plain constraints, not a stack: the title takes the whole caption span up to the pager, which is pinned
-        // to the trailing edge, so the title reads in one or two lines instead of a narrow column.
+        // Keep the pager at the trailing edge and give the title the rest of the caption width.
         let titleRow = NSView()
         titleRow.translatesAutoresizingMaskIntoConstraints = false
         for view in [previewTitleLabel, pager] {
@@ -931,6 +930,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         optional.setVisibilityPriority(.mustHold, for: viewOnMuseumButton)
         optional.setVisibilityPriority(.mustHold, for: reviewSourceButton)
         optional.setClippingResistancePriority(.required, for: .horizontal)
+        // The optional stack wraps exactly its visible buttons (zero width when none): it neither stretches across spare
+        // width nor yields to the metadata, which instead absorbs all remaining leading space.
+        optional.setHuggingPriority(.required, for: .horizontal)
+        optional.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        leadingStack.setHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        text.setHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         for view in [leadingStack, optional, controls] {
             view.translatesAutoresizingMaskIntoConstraints = false
             applyBar.addSubview(view)
@@ -2274,7 +2279,12 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                 .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
                 .foregroundColor: NSColor.secondaryText]))
         }
+        // Attributed text carries its own paragraph style: without tail truncation it wraps and clips to its first word.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        text.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: text.length))
         selectionLabel.attributedStringValue = text
+        selectionLabel.toolTip = title + (detail.isEmpty ? "" : " — " + detail)
         let isFavorite = selectedReference.map(state.isFavorite) ?? false
         favoriteButton.image = NSImage(systemSymbolName: isFavorite ? "heart.fill" : "heart",
                                        accessibilityDescription: isFavorite ? "Remove from Favorites" : "Add to Favorites")
@@ -3175,7 +3185,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         Openverse results are wide, large, non-mature Wikimedia Commons JPEGs reported as CC0 or public domain. Wallpier shows each \
         one's creator, source and reported license; Openverse doesn't verify licenses, so review the source page before reuse.
 
-        “More by” opens a creator’s works when the source identifies that creator. Esc or ← Gallery goes back. \
+        “More by” opens a creator’s works when the source identifies that creator. Click “Back to” or press Esc to return. \
         Works labeled for browsing open on their source site. The preview shows available credit and rights information.
 
         Select a wallpaper and press Space to preview it on your display’s shape; ← and → browse, Esc returns. \
