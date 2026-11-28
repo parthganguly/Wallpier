@@ -238,7 +238,7 @@ final class SidebarHeaderCell: NSTableCellView {
         self.identifier = identifier
         // The source-list textField outlet applies its own muted group-label color.
         heading.font = .systemFont(ofSize: 11, weight: .semibold)
-        heading.textColor = Theme.inkSecondary
+        heading.textColor = Theme.sidebarHeading
         heading.setAccessibilityElement(false)
         heading.translatesAutoresizingMaskIntoConstraints = false
         addSubview(heading)

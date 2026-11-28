@@ -39,6 +39,8 @@ enum Theme {
     /// 6.8:1 on the light canvas and 7.1:1 on the dark one; Increase Contrast promotes it further.
     static let inkSecondary = token("InkSecondary", light: 0x57534E, dark: 0xA8A29E, lightHigh: 0x3F3B37, darkHigh: 0xD6D3CD)
     static let inkTertiary = token("InkTertiary", light: 0x6B645E, dark: 0x9A948C, lightHigh: 0x4A4540, darkHigh: 0xC9C5BE)
+    // The translucent dark sidebar can be brighter than the opaque gallery canvas.
+    static let sidebarHeading = token("SidebarHeading", light: 0x57534E, dark: 0xD6D3CD, lightHigh: 0x3F3B37, darkHigh: 0xF2EFE9)
     static let hairlineColor = hairline("Hairline", normal: 0.11, high: 0.45)
     /// Fill of the primary command. White on #C24B2C is 4.84:1; the lighter #D45B3B measured 3.92:1 and fails,
     /// so both appearances share this fill and only foreground accents lighten in dark.
