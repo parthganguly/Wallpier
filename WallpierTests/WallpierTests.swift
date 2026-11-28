@@ -1160,6 +1160,10 @@ extension WallpierTests {
         XCTAssertEqual(row("Favorites")?.count, 6)
         XCTAssertEqual(row("Evening Light")?.count, 5)
         XCTAssertEqual(sidebar.selectedItem, .favorites)
+        let museums = try XCTUnwrap(row("Museums & Archives"))
+        XCTAssertTrue(sidebar.outlineView.isItemExpanded(museums))
+        sidebar.outlineView.collapseItem(museums)
+        XCTAssertEqual(sidebar.outlineView.row(forItem: row("Cleveland Museum of Art")), -1)
 
         let quiet = controller.state.collections[1]
         sidebar.outlineView.selectRowIndexes([sidebar.outlineView.row(forItem: row("Quiet Mornings"))], byExtendingSelection: false)
@@ -1167,6 +1171,10 @@ extension WallpierTests {
         XCTAssertEqual(controller.state.selectedCollectionID, quiet.id)
         XCTAssertEqual(window.title, "Quiet Mornings")
         XCTAssertEqual(window.subtitle, "2 wallpapers")
+        let reloadedMuseums = try XCTUnwrap(row("Museums & Archives"))
+        XCTAssertFalse(sidebar.outlineView.isItemExpanded(reloadedMuseums))
+        sidebar.outlineView.expandItem(reloadedMuseums)
+        XCTAssertGreaterThanOrEqual(sidebar.outlineView.row(forItem: row("Cleveland Museum of Art")), 0)
 
         // Dropping a Discover result on a collection adds it once.
         let dropped = controller.remoteResults[11]
@@ -4636,20 +4644,20 @@ extension WallpierTests {
     }
 
     func testSecondaryTextMeetsSmallTextContrastOnItsBackgrounds() {
-        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-            // Bars (apply bar, status, folder bar) sit on the window background; empty states and captions on the content background.
-            XCTAssertGreaterThanOrEqual(contrast(.secondaryText, on: .windowBackgroundColor, in: appearance), 5, "\(appearance.rawValue) bars")
-            XCTAssertGreaterThanOrEqual(contrast(.secondaryText, on: .controlBackgroundColor, in: appearance), 5, "\(appearance.rawValue) content")
-            // Hierarchy: still clearly secondary to the primary label.
-            XCTAssertGreaterThan(contrast(.labelColor, on: .controlBackgroundColor, in: appearance),
-                                 contrast(.secondaryText, on: .controlBackgroundColor, in: appearance) * 1.8, appearance.rawValue)
+        let appearances: [(NSAppearance.Name, NSAppearance.Name)] = [
+            (.aqua, .accessibilityHighContrastAqua), (.darkAqua, .accessibilityHighContrastDarkAqua)
+        ]
+        for (standard, increased) in appearances {
+            for background in [NSColor.windowBackgroundColor, Theme.canvas, Theme.stageBackdrop] {
+                let normalContrast = contrast(.secondaryText, on: background, in: standard)
+                XCTAssertGreaterThanOrEqual(normalContrast, 5, standard.rawValue)
+                XCTAssertGreaterThan(contrast(.secondaryText, on: background, in: increased), normalContrast, increased.rawValue)
+            }
+            XCTAssertGreaterThan(contrast(Theme.inkPrimary, on: Theme.canvas, in: standard),
+                                 contrast(.secondaryText, on: Theme.canvas, in: standard) * 1.8, standard.rawValue)
+            XCTAssertGreaterThanOrEqual(contrast(Theme.statusError, on: .windowBackgroundColor, in: standard), 4.5, standard.rawValue)
+            XCTAssertGreaterThanOrEqual(contrast(.white, on: Theme.accentFill, in: standard), 4.5, standard.rawValue)
         }
-        // Dark keeps the native secondary label.
-        var dark: (NSColor, NSColor)!
-        NSAppearance(named: .darkAqua)!.performAsCurrentDrawingAppearance {
-            dark = (NSColor.secondaryText.usingColorSpace(.sRGB)!, NSColor.secondaryLabelColor.usingColorSpace(.sRGB)!)
-        }
-        XCTAssertEqual(dark.0, dark.1)
     }
 
     @MainActor
@@ -4691,7 +4699,7 @@ extension WallpierTests {
         XCTAssertTrue(c.statusLabel.textColor === NSColor.secondaryText)
         c.setWallpaper(nil)
         XCTAssertEqual(c.statusLabel.stringValue, "Select a wallpaper first.")
-        XCTAssertEqual(c.statusLabel.textColor, .systemRed)
+        XCTAssertEqual(c.statusLabel.textColor, Theme.statusError)
         typeSearch("forest dusk")
         XCTAssertTrue(c.statusLabel.textColor === NSColor.secondaryText, "information after an error")
         typeSearch("")
@@ -4717,11 +4725,11 @@ extension WallpierTests {
             c.statusLabel.stringValue = ""
         }
         // Appearance changes while the views stay open: the same color object resolves to each appearance's value.
-        for (name, expected) in [(NSAppearance.Name.darkAqua, NSColor.secondaryLabelColor), (.aqua, NSColor(white: 0, alpha: 0.62))] {
+        for name in [NSAppearance.Name.darkAqua, .aqua, .accessibilityHighContrastDarkAqua, .accessibilityHighContrastAqua] {
             window.appearance = NSAppearance(named: name)
             var resolved: (NSColor, NSColor)!
             window.effectiveAppearance.performAsCurrentDrawingAppearance {
-                resolved = (c.statusLabel.textColor!.usingColorSpace(.sRGB)!, expected.usingColorSpace(.sRGB)!)
+                resolved = (c.statusLabel.textColor!.usingColorSpace(.sRGB)!, Theme.inkSecondary.usingColorSpace(.sRGB)!)
             }
             XCTAssertEqual(resolved.0, resolved.1, name.rawValue)
         }
