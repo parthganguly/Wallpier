@@ -331,6 +331,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     // Apply bar
     /// A plain view holding three bounded groups (metadata, optional shortcuts, controls); see `configureApplyBar`.
     let applyBar = NSView()
+    private static let dockShortcutHeight: CGFloat = 24
     private var dockShortcutWidth: NSLayoutConstraint?
     private let busyIndicator = NSProgressIndicator()
     let selectionLabel = NSTextField(labelWithString: "")
@@ -915,24 +916,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         controls.setHuggingPriority(.required, for: .horizontal)
         controls.setContentCompressionResistancePriority(.required, for: .horizontal)
         controls.setClippingResistancePriority(.required, for: .horizontal)
-        // Optional shortcuts. More by goes first; a browse-only work's View on … / Review Original Source stays as long
-        // as it can, in a short bounded label (full text in its tooltip). The same actions are always in the ⋯ menu.
-        for button in [viewOnMuseumButton, reviewSourceButton] {
-            button.widthAnchor.constraint(lessThanOrEqualToConstant: 160).isActive = true
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
-            button.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
-        }
-        moreByButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 110).isActive = true
-        moreByButton.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
-        let optional = NSStackView(views: [moreByButton, viewOnMuseumButton, reviewSourceButton])
-        optional.distribution = .fill
-        optional.spacing = 8
-        optional.wantsLayer = true
-        optional.layer?.masksToBounds = true
-        optional.setVisibilityPriority(NSStackView.VisibilityPriority(rawValue: 500), for: moreByButton)
-        optional.setVisibilityPriority(.mustHold, for: viewOnMuseumButton)
-        optional.setVisibilityPriority(.mustHold, for: reviewSourceButton)
-        optional.setClippingResistancePriority(.required, for: .horizontal)
+        // These optional buttons are laid out together when their visibility or title changes.
+        let optional = NSView()
+        for button in [moreByButton, viewOnMuseumButton, reviewSourceButton] { optional.addSubview(button) }
         for view in [leadingStack, optional, controls] {
             view.translatesAutoresizingMaskIntoConstraints = false
             applyBar.addSubview(view)
@@ -947,6 +933,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             controls.centerYAnchor.constraint(equalTo: applyBar.centerYAnchor),
             optional.trailingAnchor.constraint(equalTo: controls.leadingAnchor, constant: -12),
             optional.centerYAnchor.constraint(equalTo: applyBar.centerYAnchor),
+            optional.heightAnchor.constraint(equalToConstant: Self.dockShortcutHeight),
             leadingStack.trailingAnchor.constraint(equalTo: optional.leadingAnchor, constant: -10),
             shortcutWidth
         ])
@@ -960,20 +947,26 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let width = applyBar.bounds.width
         let compact = width > 0 && width < 720
         let hasSourceShortcut = !viewOnMuseumButton.isHidden || !reviewSourceButton.isHidden
-        moreByButton.isHidden = width < (hasSourceShortcut ? 960 : 820) || pivotCreator == nil
+        moreByButton.isHidden = (width > 0 && width < (hasSourceShortcut ? 960 : 820)) || pivotCreator == nil
         if let reference = selectedReference, reference.isBrowseOnly {
             let title = compact ? "View Source ↗" : "View on \(reference.providerName) ↗"
             if viewOnMuseumButton.title != title { viewOnMuseumButton.title = title }
         }
         let reviewTitle = compact ? "Review Source" : "Review Original Source"
         if reviewSourceButton.title != reviewTitle { reviewSourceButton.title = reviewTitle }
-        let shortcuts = [(moreByButton, 110.0, 230.0), (viewOnMuseumButton, 96.0, 160.0), (reviewSourceButton, 96.0, 160.0)]
-        let visible = shortcuts.filter { !$0.0.isHidden }
-        let widthOfButtons = visible.reduce(CGFloat(0)) { sum, shortcut in
-            let (button, minimum, maximum) = shortcut
-            return sum + min(CGFloat(maximum), max(CGFloat(minimum), ceil(button.intrinsicContentSize.width)))
+        let shortcuts: [(NSButton, CGFloat, CGFloat)] = [
+            (moreByButton, 110, 230), (viewOnMuseumButton, 96, 160), (reviewSourceButton, 96, 160)
+        ]
+        var nextX: CGFloat = 0
+        let spacing: CGFloat = 8
+        for (button, minimum, maximum) in shortcuts where !button.isHidden {
+            let size = button.intrinsicContentSize
+            let buttonWidth = min(maximum, max(minimum, ceil(size.width)))
+            button.frame = NSRect(x: nextX, y: (Self.dockShortcutHeight - size.height) / 2,
+                                  width: buttonWidth, height: size.height)
+            nextX += buttonWidth + spacing
         }
-        dockShortcutWidth?.constant = widthOfButtons + CGFloat(max(0, visible.count - 1)) * 8
+        dockShortcutWidth?.constant = max(0, nextX - spacing)
     }
 
     private func makeRotationPopover() -> NSPopover {
@@ -1386,8 +1379,6 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             button.font = small
             button.lineBreakMode = .byTruncatingTail
             button.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
-            // The artist header's link may use the whole row; the dock's buttons stay bounded.
-            if button !== creatorLinkButton { button.widthAnchor.constraint(lessThanOrEqualToConstant: 230).isActive = true }
         }
         moreByButton.target = self; moreByButton.action = #selector(showCreator(_:))
         moreByButton.isHidden = true
