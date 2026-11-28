@@ -331,6 +331,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     // Apply bar
     /// A plain view holding three bounded groups (metadata, optional shortcuts, controls); see `configureApplyBar`.
     let applyBar = NSView()
+    private var dockShortcutWidth: NSLayoutConstraint?
     private let busyIndicator = NSProgressIndicator()
     let selectionLabel = NSTextField(labelWithString: "")
     let statusLabel = NSTextField(labelWithString: "")
@@ -897,15 +898,16 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             popup.controlSize = .small
             popup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         }
-        // Reasonable, bounded popup widths: long names truncate inside the popup instead of overlapping its neighbor.
-        displayPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 116).isActive = true
-        displayPopUp.widthAnchor.constraint(lessThanOrEqualToConstant: 170).isActive = true
-        scalingPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
-        scalingPopUp.widthAnchor.constraint(lessThanOrEqualToConstant: 130).isActive = true
-        setWallpaperButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 118).isActive = true
+        // Keep these controls together at every width. Long display names are available in the menu and tooltip.
+        displayPopUp.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        scalingPopUp.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        setWallpaperButton.widthAnchor.constraint(equalToConstant: 120).isActive = true
         let displayGroup = labeled("Display", displayPopUp), scalingGroup = labeled("Scaling", scalingPopUp)
+        displayGroup.widthAnchor.constraint(equalTo: displayPopUp.widthAnchor).isActive = true
+        scalingGroup.widthAnchor.constraint(equalTo: scalingPopUp.widthAnchor).isActive = true
         // Favorite, Collection and ⋯ keep one place whatever the selection, then the three controls that apply.
         let controls = NSStackView(views: [favoriteButton, collectionButton, moreButton, displayGroup, scalingGroup, setWallpaperButton])
+        controls.distribution = .fill
         controls.spacing = 8
         controls.setCustomSpacing(2, after: favoriteButton)
         controls.setCustomSpacing(2, after: collectionButton)
@@ -923,6 +925,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         moreByButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 110).isActive = true
         moreByButton.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
         let optional = NSStackView(views: [moreByButton, viewOnMuseumButton, reviewSourceButton])
+        optional.distribution = .fill
         optional.spacing = 8
         optional.wantsLayer = true
         optional.layer?.masksToBounds = true
@@ -930,19 +933,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         optional.setVisibilityPriority(.mustHold, for: viewOnMuseumButton)
         optional.setVisibilityPriority(.mustHold, for: reviewSourceButton)
         optional.setClippingResistancePriority(.required, for: .horizontal)
-        // The optional stack wraps exactly its visible buttons (zero width when none): it neither stretches across spare
-        // width nor yields to the metadata, which instead absorbs all remaining leading space.
-        optional.setHuggingPriority(.required, for: .horizontal)
-        optional.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        leadingStack.setHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        text.setHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         for view in [leadingStack, optional, controls] {
             view.translatesAutoresizingMaskIntoConstraints = false
             applyBar.addSubview(view)
         }
-        // Metadata may shrink to little more than its ellipsis before an optional shortcut is withdrawn.
-        let minimumMetadata = optional.leadingAnchor.constraint(greaterThanOrEqualTo: leadingStack.leadingAnchor, constant: 48)
-        minimumMetadata.priority = NSLayoutConstraint.Priority(999)
+        // Optional controls occupy their measured widths, leaving the dock's surplus space to selection and status.
+        let shortcutWidth = optional.widthAnchor.constraint(equalToConstant: 0)
+        dockShortcutWidth = shortcutWidth
         NSLayoutConstraint.activate([
             leadingStack.leadingAnchor.constraint(equalTo: applyBar.leadingAnchor, constant: 16),
             leadingStack.centerYAnchor.constraint(equalTo: applyBar.centerYAnchor),
@@ -951,7 +948,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             optional.trailingAnchor.constraint(equalTo: controls.leadingAnchor, constant: -12),
             optional.centerYAnchor.constraint(equalTo: applyBar.centerYAnchor),
             leadingStack.trailingAnchor.constraint(equalTo: optional.leadingAnchor, constant: -10),
-            minimumMetadata
+            shortcutWidth
         ])
         applyBar.setAccessibilityLabel("Selected wallpaper")
         applyBar.postsFrameChangedNotifications = true
@@ -962,13 +959,21 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     @objc private func updateDockShortcutsForWidth() {
         let width = applyBar.bounds.width
         let compact = width > 0 && width < 720
-        moreByButton.isHidden = compact || pivotCreator == nil
+        let hasSourceShortcut = !viewOnMuseumButton.isHidden || !reviewSourceButton.isHidden
+        moreByButton.isHidden = width < (hasSourceShortcut ? 960 : 820) || pivotCreator == nil
         if let reference = selectedReference, reference.isBrowseOnly {
             let title = compact ? "View Source ↗" : "View on \(reference.providerName) ↗"
             if viewOnMuseumButton.title != title { viewOnMuseumButton.title = title }
         }
         let reviewTitle = compact ? "Review Source" : "Review Original Source"
         if reviewSourceButton.title != reviewTitle { reviewSourceButton.title = reviewTitle }
+        let shortcuts = [(moreByButton, 110.0, 230.0), (viewOnMuseumButton, 96.0, 160.0), (reviewSourceButton, 96.0, 160.0)]
+        let visible = shortcuts.filter { !$0.0.isHidden }
+        let widthOfButtons = visible.reduce(CGFloat(0)) { sum, shortcut in
+            let (button, minimum, maximum) = shortcut
+            return sum + min(CGFloat(maximum), max(CGFloat(minimum), ceil(button.intrinsicContentSize.width)))
+        }
+        dockShortcutWidth?.constant = widthOfButtons + CGFloat(max(0, visible.count - 1)) * 8
     }
 
     private func makeRotationPopover() -> NSPopover {
