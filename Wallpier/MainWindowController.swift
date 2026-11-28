@@ -3082,7 +3082,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                                     message: "Drag wallpapers onto this collection in the sidebar, or choose Add to Collection.")
             } else {
                 emptyStateView.show(symbolName: "rectangle.stack", title: "No Collections",
-                                    message: "Collections keep wallpapers from Wallhaven and Openverse together, and can be used for automatic rotation.",
+                                    message: "Keep wallpapers from different sources together. You can use a collection for automatic rotation.",
                                     action: ("New Collection…", #selector(createCollection(_:)), self))
             }
         }
