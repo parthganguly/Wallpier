@@ -1,9 +1,10 @@
 # Wallpier — Final Native Design Specification (Authority Spec)
 
-**Status:** Authorized for Implementation (per [opus/decision.md](file:///Users/parth/Projects/Wallpier-redesign-evidence/opus/decision.md))  
-**Owner:** Gemini 4 Neon (Visual Direction, Tokens, Copy & Final Editorial Review)  
-**Target:** Native Swift / AppKit on macOS 12+ (Xcode 15.2 / Swift 5.9, Universal Intel & Apple Silicon)  
-**Verification Note:** All contrast, layout, and Intel performance targets below are implementation specifications; none are claimed as measured or passed until verified in rendered QA on the running app.
+Opus 5.5 selected the Print Room direction. Gemini 4 Neon leads visual design, copy, and editorial review.
+
+Wallpier uses native Swift and AppKit on macOS 12 and later. The build targets Xcode 15.2 and Swift 5.9 for Intel and Apple Silicon.
+
+The contrast, layout, and performance figures below specify targets for verification on the running app.
 
 ---
 
