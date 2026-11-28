@@ -1,12 +1,25 @@
 import AppKit
 import os.log
 
-/// Neutral backdrop the wallpapers sit on, following appearance changes.
+/// Archival paper (light) or darkroom charcoal (dark) the wallpapers sit on, following appearance changes.
 private final class BackdropView: NSView {
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.controlBackgroundColor.setFill()
+        Theme.canvas.setFill()
         dirtyRect.fill()
     }
+}
+
+/// A small caption above a control, so Display and Scaling are named on screen and not only to VoiceOver.
+private func labeled(_ caption: String, _ control: NSView) -> NSStackView {
+    let label = NSTextField(labelWithString: caption)
+    label.font = .systemFont(ofSize: 10, weight: .medium)
+    label.textColor = Theme.inkSecondary
+    label.setAccessibilityElement(false)
+    let stack = NSStackView(views: [label, control])
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = 1
+    return stack
 }
 
 private extension NSToolbarItem.Identifier {
@@ -72,6 +85,9 @@ private struct CreatorLevel {
     let anchorIdentity: String
     let anchorPageURL: URL?
     let parentScrollY: CGFloat
+    /// The starting work's real title, and what the Back button returns to (a query, Favorites or a collection name).
+    var anchorTitle = ""
+    var originName = "Gallery"
     var results: [WallpaperReference] = []
     var selectedIdentity: String?
     var scrollY: CGFloat = 0
@@ -234,7 +250,6 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     // Window structure
     private var splitViewController: NSSplitViewController?
     private let sidebar = SidebarController()
-    private let newCollectionButton = NSButton(title: "New Collection", target: nil, action: nil)
 
     // Search and filters
     let searchField: NSSearchField = SearchField()
@@ -264,13 +279,25 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     let creatorTitleLabel = NSTextField(labelWithString: "")
     let creatorSubtitleLabel = NSTextField(labelWithString: "")
     let creatorStatusLabel = NSTextField(labelWithString: "")
+    /// The "·" between the provenance line and the count line, shown only with a count.
+    private let creatorSeparatorLabel = NSTextField(labelWithString: "·")
     /// Opens the artwork page the creator view started from; the museum's record, not a catalog of the creator.
     let creatorLinkButton = NSButton(title: "View starting work on Cleveland Museum of Art ↗", target: nil, action: nil)
     private let scopeBar = NSStackView()
-    private lazy var scopeBarCollapsed = scopeBar.heightAnchor.constraint(equalToConstant: 0)
+    /// The gallery area sits under the scope bar when one is shown, else directly under the titlebar. Swapping two
+    /// anchors removes the bar from layout; pinning a bar with internal insets to zero height fights those insets.
+    private lazy var galleryBelowScopeBar = galleryArea.topAnchor.constraint(equalTo: scopeBar.bottomAnchor)
+    private lazy var galleryAtTop = galleryArea.topAnchor.constraint(equalTo: contentRoot.safeAreaLayoutGuide.topAnchor)
+    private let galleryArea = BackdropView()
+    private let contentRoot = NSView()
+    private let barSeparator = NSBox()
+    private lazy var galleryAboveDock = galleryArea.bottomAnchor.constraint(equalTo: barSeparator.topAnchor)
+    private lazy var galleryToBottom = galleryArea.bottomAnchor.constraint(equalTo: contentRoot.bottomAnchor)
+    private lazy var stageAboveCaption = stageView.bottomAnchor.constraint(equalTo: previewCaptionBand.topAnchor, constant: -12)
+    private lazy var stageToBottom = stageView.bottomAnchor.constraint(equalTo: viewerView.bottomAnchor, constant: -16)
     private var statusClearTask: Task<Void, Never>?
-    private let discoverBar = NSStackView()
-    private let localBar = NSStackView()
+    private let discoverBar = SplitBar(spacing: 8)
+    private let localBar = SplitBar(spacing: 6)
     private let folderPathLabel = NSTextField(labelWithString: "")
     /// Shown when the visible results no longer match the search text, filters or display size.
     let pendingSearchLabel = NSTextField(labelWithString: "")
@@ -282,7 +309,11 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     let emptyStateView = EmptyStateView()
     let viewerView = ViewerView()
     let stageView = DesktopPreviewView()
-    let previewTitleLabel = NSTextField(labelWithString: "No Wallpaper Selected")
+    /// A true wrapping cell (not a single-line label): two lines at its concrete width, the last truncating with an ellipsis.
+    let previewTitleLabel = WrappingLabel(wrappingLabelWithString: "No Wallpaper Selected")
+    /// The caption band and control row, which focus mode (F in the preview) hides until Esc.
+    private let previewCaptionBand = NSStackView()
+    private(set) var isFocusMode = false
     /// Pointer navigation for the preview, beside the position in the browsable items. Same commands as ←/→ and ⌘[ ⌘].
     let previewPreviousButton = NSButton()
     let previewNextButton = NSButton()
@@ -298,15 +329,19 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     private let previewNoticeLabel = NSTextField(labelWithString: "")
 
     // Apply bar
-    let applyBar = NSStackView()
+    /// A plain view holding three bounded groups (metadata, optional shortcuts, controls); see `configureApplyBar`.
+    let applyBar = NSView()
+    private static let dockShortcutHeight: CGFloat = 24
+    private var dockShortcutWidth: NSLayoutConstraint?
     private let busyIndicator = NSProgressIndicator()
     let selectionLabel = NSTextField(labelWithString: "")
     let statusLabel = NSTextField(labelWithString: "")
     let favoriteButton = NSButton()
+    private let collectionButton = NSButton()
     private let moreButton = NSButton()
     let displayPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     let scalingPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    let setWallpaperButton = NSButton(title: "Set Wallpaper", target: nil, action: nil)
+    let setWallpaperButton = PrimaryButton(title: "Set Wallpaper", target: nil, action: nil)
 
     // Toolbar, rotation and undo
     let viewModeControl = NSSegmentedControl()
@@ -399,7 +434,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                   provider: WallhavenProvider(), originalCache: RemoteWallpaperCache(),
                   historyStore: WallpaperHistoryStore(), remoteThumbnailProvider: RemoteThumbnailProvider(),
                   availableScreens: { NSScreen.screens })
+        collectionView.dataSource = nil
         configureUI()
+        setInitialSidebarWidth()
+        collectionView.dataSource = self
         // Only the real window remembers its frame and sidebar width; test windows never write defaults.
         if !window.setFrameUsingName("WallpierMainWindow") { window.center() }
         window.setFrameAutosaveName("WallpierMainWindow")
@@ -440,7 +478,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         contentController.view = makeContentView()
         let split = NSSplitViewController()
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarController)
-        sidebarItem.minimumThickness = 180
+        // 232 pt shows "Cleveland Museum of Art" and "Wellcome Collection" whole; at the 196 pt minimum a
+        // truncated row shows its full name in a tooltip. A saved divider position still wins.
+        sidebarItem.minimumThickness = 196
         sidebarItem.maximumThickness = 280
         sidebarItem.canCollapse = true
         let contentItem = NSSplitViewItem(viewController: contentController)
@@ -452,15 +492,24 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let frame = window.frame
         window.contentViewController = split
         window.setFrame(frame, display: false)
-
         let toolbar = NSToolbar(identifier: "WallpierMainToolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
+        window.defaultButtonCell = setWallpaperButton.cell as? NSButtonCell
         window.initialFirstResponder = collectionView
         galleryScroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(galleryDidScroll), name: NSView.boundsDidChangeNotification, object: galleryScroll.contentView)
+    }
+
+    /// Give the first window enough room for provider names. Restoring an autosaved divider still takes precedence.
+    @objc private func setInitialSidebarWidth() {
+        guard let split = splitViewController else { return }
+        let defaultWidth: CGFloat = 232
+        guard split.view.bounds.width - defaultWidth >= split.splitViewItems[1].minimumThickness else { return }
+        split.view.layoutSubtreeIfNeeded()
+        split.splitView.setPosition(defaultWidth, ofDividerAt: 0)
     }
 
     private func configureControls() {
@@ -489,6 +538,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         setWallpaperButton.target = self; setWallpaperButton.action = #selector(setWallpaper(_:)); setWallpaperButton.keyEquivalent = "\r"
         setWallpaperButton.setAccessibilityHelp("Downloads the original if needed and sets it on the selected display")
         configureSymbolButton(favoriteButton, symbol: "heart", label: "Favorite", action: #selector(toggleFavorite(_:)))
+        configureSymbolButton(collectionButton, symbol: "rectangle.stack.badge.plus", label: "Add to Collection", action: #selector(showCollectionMenu(_:)))
         configureSymbolButton(moreButton, symbol: "ellipsis.circle", label: "More Actions", action: #selector(showMoreMenu(_:)))
         configureCreatorControls()
 
@@ -503,8 +553,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         viewModeControl.trackingMode = .selectOne
         for (index, (symbol, label)) in [("square.grid.2x2", "Gallery"), ("display", "Desktop Preview")].enumerated() {
             viewModeControl.setImage(NSImage(systemSymbolName: symbol, accessibilityDescription: label), forSegment: index)
-            viewModeControl.setToolTip(label, forSegment: index)
+            viewModeControl.setToolTip(index == 0 ? "Gallery" : "Desktop Preview (Space)", forSegment: index)
+            viewModeControl.setLabel("", forSegment: index)
         }
+        viewModeControl.setAccessibilityLabel("View mode")
         viewModeControl.selectedSegment = 0
         viewModeControl.target = self; viewModeControl.action = #selector(viewModeChanged(_:))
         configureToolbarButton(rotationButton, symbol: "arrow.triangle.2.circlepath", label: "Automatic Rotation", action: #selector(showRotationSettings(_:)))
@@ -520,7 +572,10 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         button.isBordered = false
         button.imagePosition = .imageOnly
         button.symbolConfiguration = .init(pointSize: 15, weight: .regular)
-        button.contentTintColor = .secondaryLabelColor
+        button.contentTintColor = Theme.inkSecondary
+        button.focusRingType = .exterior
+        button.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 28).isActive = true
         button.target = self; button.action = action
         button.toolTip = label
         button.setAccessibilityLabel(label)
@@ -539,24 +594,16 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         sidebar.onSelect = { [weak self] item in self?.activate(item) }
         sidebar.onDrop = { [weak self] target, identities in self?.collect(identities, into: target) ?? false }
         sidebar.outlineView.menuProvider = { [weak self] item in self?.sidebarMenu(for: item) }
-        newCollectionButton.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)
-        newCollectionButton.imagePosition = .imageLeading
-        newCollectionButton.isBordered = false
-        newCollectionButton.contentTintColor = .secondaryLabelColor
-        newCollectionButton.font = .systemFont(ofSize: NSFont.systemFontSize)
-        newCollectionButton.target = self; newCollectionButton.action = #selector(createCollection(_:))
+        // New Collection is the `+` in the Collections group header.
+        sidebar.onAddCollection = { [weak self] in self?.createCollection(nil) }
         let view = NSView()
-        for subview in [sidebar.scrollView, newCollectionButton] {
-            subview.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(subview)
-        }
+        sidebar.scrollView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(sidebar.scrollView)
         NSLayoutConstraint.activate([
             sidebar.scrollView.topAnchor.constraint(equalTo: view.topAnchor),
             sidebar.scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             sidebar.scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            sidebar.scrollView.bottomAnchor.constraint(equalTo: newCollectionButton.topAnchor, constant: -8),
-            newCollectionButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-            newCollectionButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14)
+            sidebar.scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
         return view
     }
@@ -568,25 +615,30 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         openverseNoticeLabel.lineBreakMode = .byTruncatingTail
         openverseNoticeLabel.toolTip = "Wide, large, non-mature Wikimedia Commons JPEGs reported as CC0 or public domain. Openverse doesn’t verify licenses: review the source before reuse."
         // The acknowledgement stays whole at the minimum window width; the pending-search note gives way first.
-        openverseNoticeLabel.setContentCompressionResistancePriority(.defaultHigh + 1, for: .horizontal)
+        // It truncates (full text in its tooltip) only after every control around it has its room.
+        openverseNoticeLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(400), for: .horizontal)
+        cmaNoticeLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(400), for: .horizontal)
         loadMoreButton.controlSize = .small
         loadMoreButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         loadMoreButton.target = self; loadMoreButton.action = #selector(loadMoreResults(_:))
         loadMoreButton.toolTip = "Load the next page of Openverse results"
         reviewSourceButton.toolTip = selectedReference?.useRestriction?.errorDescription
         loadMoreButton.isHidden = true
-        discoverBar.setViews([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp, openverseLicensePopUp, openverseNoticeLabel, cmaNoticeLabel], in: .leading)
+        discoverBar.leadingGroup.setViews([categoryPopUp, resolutionPopUp, aspectPopUp, sortingPopUp, openverseLicensePopUp, openverseNoticeLabel, cmaNoticeLabel], in: .leading)
         pendingSearchLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         pendingSearchLabel.textColor = .secondaryLabelColor
         pendingSearchLabel.lineBreakMode = .byTruncatingTail
         // Shown whole or not at all: a truncated “Showing “…” says nothing. The button and its tooltip remain.
-        pendingSearchLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        pendingSearchLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        pendingSearchLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 148).isActive = true
         updateResultsButton.controlSize = .small
         updateResultsButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         updateResultsButton.target = self; updateResultsButton.action = #selector(search(_:))
-        discoverBar.setViews([pendingSearchLabel, updateResultsButton, loadMoreButton], in: .trailing)
-        discoverBar.setVisibilityPriority(.detachOnlyIfNecessary, for: pendingSearchLabel)
-        discoverBar.spacing = 8
+        // Right-aligned, with the bar's own trailing padding: the note gives way first, Update Results and Load More stay.
+        discoverBar.trailingGroup.setViews([pendingSearchLabel, updateResultsButton, loadMoreButton], in: .leading)
+        discoverBar.trailingGroup.setVisibilityPriority(.detachOnlyIfNecessary, for: pendingSearchLabel)
+        discoverBar.trailingGroup.setVisibilityPriority(.mustHold, for: updateResultsButton)
+        discoverBar.trailingGroup.setVisibilityPriority(.mustHold, for: loadMoreButton)
         let folderIcon = NSImageView(image: NSImage(systemSymbolName: "folder", accessibilityDescription: nil) ?? NSImage())
         folderIcon.contentTintColor = .secondaryLabelColor
         folderPathLabel.lineBreakMode = .byTruncatingMiddle
@@ -598,9 +650,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let changeFolder = NSButton(title: "Change Folder…", target: self, action: #selector(chooseFolder(_:)))
         changeFolder.controlSize = .small
         changeFolder.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        localBar.setViews([folderIcon, folderPathLabel], in: .leading)
-        localBar.setViews([changeFolder], in: .trailing)
-        localBar.spacing = 6
+        folderPathLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
+        localBar.leadingGroup.setViews([folderIcon, folderPathLabel], in: .leading)
+        localBar.trailingGroup.setViews([changeFolder], in: .leading)
         let scopeSeparator = NSBox(); scopeSeparator.boxType = .separator
         let scopeRows = NSStackView(views: [discoverBar, localBar, creatorBar])
         scopeRows.orientation = .vertical
@@ -617,7 +669,6 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         galleryScroll.autohidesScrollers = true
         galleryScroll.drawsBackground = false
         galleryScroll.automaticallyAdjustsContentInsets = false
-        let galleryArea = BackdropView()
         configureViewer()
         for subview in [galleryScroll, viewerView, emptyStateView] {
             subview.translatesAutoresizingMaskIntoConstraints = false
@@ -631,34 +682,57 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         emptyStateView.isHidden = true
 
         configureApplyBar()
-        let barSeparator = NSBox(); barSeparator.boxType = .separator
-        let view = NSView()
+        barSeparator.boxType = .separator
+        let view = contentRoot
         for subview in [scopeBar, galleryArea, barSeparator, applyBar] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(subview)
             subview.leadingAnchor.constraint(equalTo: view.leadingAnchor).isActive = true
             subview.trailingAnchor.constraint(equalTo: view.trailingAnchor).isActive = true
         }
+        let galleryMinimum = galleryArea.heightAnchor.constraint(greaterThanOrEqualToConstant: 200)
+        galleryMinimum.priority = .defaultHigh
         NSLayoutConstraint.activate([
             scopeBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            galleryArea.topAnchor.constraint(equalTo: scopeBar.bottomAnchor),
-            galleryArea.bottomAnchor.constraint(equalTo: barSeparator.topAnchor),
+            galleryBelowScopeBar,
+            galleryAboveDock,
             barSeparator.bottomAnchor.constraint(equalTo: applyBar.topAnchor),
             applyBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            applyBar.heightAnchor.constraint(equalToConstant: 52),
-            galleryArea.heightAnchor.constraint(greaterThanOrEqualToConstant: 240)
+            applyBar.heightAnchor.constraint(equalToConstant: 56),
+            galleryMinimum
         ])
+        // The window's minimum width must come from the split (sidebar 196 + content 620), not from the widest row of
+        // controls. Stacks default to a required clipping resistance, so their arranged views' widths summed into the
+        // minimum content size (detachOnlyIfNecessary never got to act: the stack was never narrower than its contents).
+        // With a low clipping resistance each stack takes the width its container gives it: optional views detach
+        // (More by, View on…), labels truncate, and Display, Scaling, Set and the icon buttons keep their sizes.
+        relaxHorizontalMinimums(in: view)
         return view
     }
 
+    /// The dock and the scope bars bound their own groups explicitly (see `configureApplyBar` and `SplitBar`), so a
+    /// blanket low clipping resistance would only let their fixed-size controls overflow; everything else relaxes.
+    private func relaxHorizontalMinimums(in view: NSView) {
+        if view === applyBar || view is SplitBar { return }
+        if let stack = view as? NSStackView { stack.setClippingResistancePriority(.defaultLow, for: .horizontal) }
+        view.subviews.forEach(relaxHorizontalMinimums(in:))
+    }
+
     private func configureViewer() {
-        previewTitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        // Use the full display title supplied by the provider, even when it needs several lines.
+        previewTitleLabel.font = Theme.serif(18, weight: .medium)
+        previewTitleLabel.textColor = Theme.inkPrimary
+        previewTitleLabel.lineBreakMode = .byWordWrapping
+        previewTitleLabel.maximumNumberOfLines = 0
+        previewTitleLabel.cell?.truncatesLastVisibleLine = false
+        previewTitleLabel.cell?.wraps = true
+        previewTitleLabel.cell?.isScrollable = false
         previewMetadataLabel.textColor = .secondaryText
         previewTagsLabel.textColor = .secondaryText
         previewTagsLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         for label in [previewTitleLabel, previewMetadataLabel, previewTagsLabel] {
-            label.alignment = .center
-            label.lineBreakMode = .byTruncatingTail
+            label.alignment = .left
+            if label !== previewTitleLabel { label.lineBreakMode = .byTruncatingTail }
             label.allowsExpansionToolTips = true
             label.isSelectable = true
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -694,7 +768,20 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         previewPositionLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
         previewPositionLabel.textColor = .secondaryText
         previewPositionLabel.alignment = .center
-        let pager = NSStackView(views: [previewPreviousButton, previewPositionLabel, previewNextButton])
+        // A visible way into focus mode (also F); Esc brings the caption and controls back.
+        let focusButton = NSButton()
+        focusButton.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Focus Mode")
+        focusButton.isBordered = false
+        focusButton.imagePosition = .imageOnly
+        focusButton.symbolConfiguration = .init(pointSize: 12, weight: .semibold)
+        focusButton.contentTintColor = Theme.accentText
+        focusButton.refusesFirstResponder = true
+        focusButton.target = self; focusButton.action = #selector(focusButtonClicked(_:))
+        focusButton.toolTip = "Focus Mode: hide the caption and controls (F). Esc brings them back."
+        focusButton.setAccessibilityLabel("Focus Mode")
+        focusButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        focusButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        let pager = NSStackView(views: [previewPreviousButton, previewPositionLabel, previewNextButton, focusButton])
         pager.spacing = 4
         // Links must be clickable: selectable, with attributes.
         previewAttributionLabel.isSelectable = true
@@ -704,41 +791,80 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         previewAttributionLabel.isHidden = true
         previewAcknowledgementLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         previewAcknowledgementLabel.textColor = .secondaryText
-        previewAcknowledgementLabel.alignment = .center
+        previewAcknowledgementLabel.alignment = .left
         previewAcknowledgementLabel.lineBreakMode = .byTruncatingTail
         previewAcknowledgementLabel.isHidden = true
-        let caption = NSStackView(views: [pager, previewTitleLabel, previewMetadataLabel, previewTagsLabel, previewAttributionLabel, previewAcknowledgementLabel, approximatePreviewNotice])
+        // Caption band under the stage: title and pager, then credit and date, source and license, notices.
+        // Keep the pager at the trailing edge and give the title the rest of the caption width.
+        let titleRow = NSView()
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+        for view in [previewTitleLabel, pager] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            titleRow.addSubview(view)
+        }
+        pager.setContentHuggingPriority(.required, for: .horizontal)
+        pager.setContentCompressionResistancePriority(.required, for: .horizontal)
+        NSLayoutConstraint.activate([
+            previewTitleLabel.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
+            previewTitleLabel.topAnchor.constraint(equalTo: titleRow.topAnchor),
+            previewTitleLabel.bottomAnchor.constraint(equalTo: titleRow.bottomAnchor),
+            previewTitleLabel.trailingAnchor.constraint(equalTo: pager.leadingAnchor, constant: -12),
+            pager.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
+            pager.topAnchor.constraint(equalTo: titleRow.topAnchor, constant: 2)
+        ])
+        let caption = previewCaptionBand
+        for view in [titleRow, previewMetadataLabel, previewTagsLabel, previewAttributionLabel, previewAcknowledgementLabel, approximatePreviewNotice] {
+            caption.addArrangedSubview(view)
+        }
         caption.orientation = .vertical
+        caption.alignment = .leading
         caption.spacing = 3
         caption.setHuggingPriority(.required, for: .vertical)
-        caption.setCustomSpacing(4, after: pager)
-        caption.setCustomSpacing(5, after: previewTitleLabel)
+        caption.setCustomSpacing(6, after: titleRow)
+        for view in [titleRow, previewMetadataLabel, previewTagsLabel, previewAttributionLabel, previewAcknowledgementLabel] {
+            view.widthAnchor.constraint(equalTo: caption.widthAnchor).isActive = true
+        }
         for subview in [stageView, caption] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             viewerView.addSubview(subview)
         }
+        let stageMinimum = stageView.heightAnchor.constraint(greaterThanOrEqualToConstant: 140)
+        stageMinimum.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            stageView.topAnchor.constraint(equalTo: viewerView.topAnchor, constant: 20),
+            stageView.topAnchor.constraint(equalTo: viewerView.topAnchor, constant: 16),
             stageView.leadingAnchor.constraint(equalTo: viewerView.leadingAnchor, constant: 28),
             stageView.trailingAnchor.constraint(equalTo: viewerView.trailingAnchor, constant: -28),
-            caption.topAnchor.constraint(equalTo: stageView.bottomAnchor, constant: 8),
-            caption.centerXAnchor.constraint(equalTo: viewerView.centerXAnchor),
-            caption.leadingAnchor.constraint(greaterThanOrEqualTo: viewerView.leadingAnchor, constant: 28),
-            caption.bottomAnchor.constraint(equalTo: viewerView.bottomAnchor, constant: -16)
+            stageMinimum,
+            caption.leadingAnchor.constraint(equalTo: viewerView.leadingAnchor, constant: 28),
+            caption.trailingAnchor.constraint(equalTo: viewerView.trailingAnchor, constant: -28),
+            caption.bottomAnchor.constraint(equalTo: viewerView.bottomAnchor, constant: -14),
+            stageAboveCaption
         ])
         viewerView.setAccessibilityElement(true)
         viewerView.setAccessibilityRole(.group)
         viewerView.setAccessibilityLabel("Desktop preview")
         viewerView.onNavigate = { [weak self] direction in self?.moveSelection(direction: direction) }
         viewerView.onClose = { [weak self] in self?.setViewerVisible(false) }
+        viewerView.onToggleFocus = { [weak self] in self?.setFocusMode(!(self?.isFocusMode ?? false)) }
+        viewerView.onEscape = { [weak self] in
+            guard let self, isFocusMode else { return false }
+            setFocusMode(false)
+            return true
+        }
     }
 
     private func configureApplyBar() {
         busyIndicator.style = .spinning
         busyIndicator.controlSize = .small
         busyIndicator.isDisplayedWhenStopped = false
+        // The dock is strictly two lines: this one (title and detail, never wrapping) and, under it, the status
+        // when there is one. Status takes the place of the dock's second line; it never adds a third.
         selectionLabel.lineBreakMode = .byTruncatingTail
+        selectionLabel.maximumNumberOfLines = 1
+        selectionLabel.usesSingleLineMode = true
         selectionLabel.allowsExpansionToolTips = true
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.usesSingleLineMode = true
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.allowsExpansionToolTips = true
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -748,36 +874,105 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 1
+        for label in [selectionLabel, statusLabel] {
+            label.widthAnchor.constraint(equalTo: text.widthAnchor).isActive = true
+        }
+        // Labels truncate before anything else gives: below the leading group's clipping resistance (500).
         for view in [text, selectionLabel, statusLabel] {
-            view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            view.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
             view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         }
-        displayPopUp.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
-        displayPopUp.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
-        displayPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
-        setWallpaperButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 118).isActive = true
-        // The heart and ⋯ keep one place whatever the selection's name or status line, so they never
-        // shift while browsing; a wider gap separates them from the three controls that apply.
-        applyBar.setViews([busyIndicator, text, statusUndoButton], in: .leading)
+        // The dock is three explicitly bounded parts, left to right: metadata (flexible), optional shortcuts (they
+        // detach, lowest priority first, when there isn't room) and the controls group, pinned to the trailing edge
+        // with required sizes. Display, Scaling and Set are therefore always present and never overlap anything.
+        let leadingStack = NSStackView(views: [busyIndicator, text, statusUndoButton])
+        leadingStack.spacing = 8
+        leadingStack.distribution = .fill
+        leadingStack.setClippingResistancePriority(NSLayoutConstraint.Priority(500), for: .horizontal)
         reviewSourceButton.target = self; reviewSourceButton.action = #selector(openSourcePage(_:))
         reviewSourceButton.controlSize = .small
         reviewSourceButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         reviewSourceButton.toolTip = "Openverse’s reported license for this image is missing or doesn’t match its license link. Review the original source; Wallpier won’t set it."
         reviewSourceButton.isHidden = true
-        applyBar.setViews([moreByButton, viewOnMuseumButton, reviewSourceButton, favoriteButton, moreButton, displayPopUp, scalingPopUp, setWallpaperButton], in: .trailing)
-        // Between the two, a narrow window gives up these shortcuts first; the same actions are in the ⋯ menu.
-        applyBar.setVisibilityPriority(.detachOnlyIfNecessary, for: moreByButton)
-        applyBar.setVisibilityPriority(.detachOnlyIfNecessary, for: viewOnMuseumButton)
-        applyBar.setCustomSpacing(4, after: favoriteButton)
-        applyBar.setCustomSpacing(14, after: moreButton)
-        applyBar.spacing = 8
-        applyBar.edgeInsets = NSEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
+        // Display and Scaling are named on screen, above their popups. They shrink before anything else is lost.
+        for popup in [displayPopUp, scalingPopUp] {
+            popup.controlSize = .small
+            popup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        }
+        // Keep these controls together at every width. Long display names are available in the menu and tooltip.
+        displayPopUp.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        scalingPopUp.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        setWallpaperButton.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        let displayGroup = labeled("Display", displayPopUp), scalingGroup = labeled("Scaling", scalingPopUp)
+        displayGroup.widthAnchor.constraint(equalTo: displayPopUp.widthAnchor).isActive = true
+        scalingGroup.widthAnchor.constraint(equalTo: scalingPopUp.widthAnchor).isActive = true
+        // Favorite, Collection and ⋯ keep one place whatever the selection, then the three controls that apply.
+        let controls = NSStackView(views: [favoriteButton, collectionButton, moreButton, displayGroup, scalingGroup, setWallpaperButton])
+        controls.distribution = .fill
+        controls.spacing = 8
+        controls.setCustomSpacing(2, after: favoriteButton)
+        controls.setCustomSpacing(2, after: collectionButton)
+        controls.setCustomSpacing(12, after: moreButton)
+        controls.setHuggingPriority(.required, for: .horizontal)
+        controls.setContentCompressionResistancePriority(.required, for: .horizontal)
+        controls.setClippingResistancePriority(.required, for: .horizontal)
+        // These optional buttons are laid out together when their visibility or title changes.
+        let optional = NSView()
+        for button in [moreByButton, viewOnMuseumButton, reviewSourceButton] { optional.addSubview(button) }
+        for view in [leadingStack, optional, controls] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            applyBar.addSubview(view)
+        }
+        // Optional controls occupy their measured widths, leaving the dock's surplus space to selection and status.
+        let shortcutWidth = optional.widthAnchor.constraint(equalToConstant: 0)
+        dockShortcutWidth = shortcutWidth
+        NSLayoutConstraint.activate([
+            leadingStack.leadingAnchor.constraint(equalTo: applyBar.leadingAnchor, constant: 16),
+            leadingStack.centerYAnchor.constraint(equalTo: applyBar.centerYAnchor),
+            controls.trailingAnchor.constraint(equalTo: applyBar.trailingAnchor, constant: -16),
+            controls.centerYAnchor.constraint(equalTo: applyBar.centerYAnchor),
+            optional.trailingAnchor.constraint(equalTo: controls.leadingAnchor, constant: -12),
+            optional.centerYAnchor.constraint(equalTo: applyBar.centerYAnchor),
+            optional.heightAnchor.constraint(equalToConstant: Self.dockShortcutHeight),
+            leadingStack.trailingAnchor.constraint(equalTo: optional.leadingAnchor, constant: -10),
+            shortcutWidth
+        ])
         applyBar.setAccessibilityLabel("Selected wallpaper")
+        applyBar.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(updateDockShortcutsForWidth),
+                                               name: NSView.frameDidChangeNotification, object: applyBar)
+    }
+
+    @objc private func updateDockShortcutsForWidth() {
+        let width = applyBar.bounds.width
+        let compact = width > 0 && width < 720
+        let hasSourceShortcut = !viewOnMuseumButton.isHidden || !reviewSourceButton.isHidden
+        moreByButton.isHidden = (width > 0 && width < (hasSourceShortcut ? 960 : 820)) || pivotCreator == nil
+        if let reference = selectedReference, reference.isBrowseOnly {
+            let title = compact ? "View Source ↗" : "View on \(reference.providerName) ↗"
+            if viewOnMuseumButton.title != title { viewOnMuseumButton.title = title }
+        }
+        let reviewTitle = compact ? "Review Source" : "Review Original Source"
+        if reviewSourceButton.title != reviewTitle { reviewSourceButton.title = reviewTitle }
+        let shortcuts: [(NSButton, CGFloat, CGFloat)] = [
+            (moreByButton, 110, 230), (viewOnMuseumButton, 96, 160), (reviewSourceButton, 96, 160)
+        ]
+        var nextX: CGFloat = 0
+        let spacing: CGFloat = 8
+        for (button, minimum, maximum) in shortcuts where !button.isHidden {
+            let size = button.intrinsicContentSize
+            let buttonWidth = min(maximum, max(minimum, ceil(size.width)))
+            button.frame = NSRect(x: nextX, y: (Self.dockShortcutHeight - size.height) / 2,
+                                  width: buttonWidth, height: size.height)
+            nextX += buttonWidth + spacing
+        }
+        dockShortcutWidth?.constant = max(0, nextX - spacing)
     }
 
     private func makeRotationPopover() -> NSPopover {
         let title = NSTextField(labelWithString: "Automatic Rotation")
-        title.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        title.font = Theme.serif(17)
+        title.textColor = Theme.inkPrimary
         let grid = NSGridView(views: [
             [NSTextField(labelWithString: "Change wallpaper:"), rotationPopUp],
             [NSTextField(labelWithString: "Choose from:"), rotationSourcePopUp],
@@ -790,7 +985,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         rotationPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
         rotationSourcePopUp.widthAnchor.constraint(equalTo: rotationPopUp.widthAnchor).isActive = true
         rotationSummaryLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        rotationSummaryLabel.textColor = .secondaryLabelColor
+        rotationSummaryLabel.textColor = Theme.inkSecondary
         rotationSummaryLabel.preferredMaxLayoutWidth = 290
         let stack = NSStackView(views: [title, grid, rotationSummaryLabel])
         stack.orientation = .vertical
@@ -1062,6 +1257,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let generation = UUID()
         searchGeneration = generation
         searchErrorText = nil
+        if !appending, statusLabel.textColor == Theme.statusError {
+            showStatus("", isError: false)
+        }
         if !appending { pendingAdvance = nil }
         if !appending && !state.discoverProvider.isCatalog {
             remoteThumbnailProvider.reset()
@@ -1181,7 +1379,6 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             button.font = small
             button.lineBreakMode = .byTruncatingTail
             button.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
-            button.widthAnchor.constraint(lessThanOrEqualToConstant: 230).isActive = true
         }
         moreByButton.target = self; moreByButton.action = #selector(showCreator(_:))
         moreByButton.isHidden = true
@@ -1196,18 +1393,28 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
         statusUndoButton.isBordered = false
         statusUndoButton.font = small
-        statusUndoButton.contentTintColor = .controlAccentColor
+        statusUndoButton.contentTintColor = Theme.accentText
         statusUndoButton.target = self; statusUndoButton.action = #selector(undoWallpaperChange(_:))
         statusUndoButton.setAccessibilityLabel("Undo Wallpaper Change")
         statusUndoButton.isHidden = true
 
+        // The artist header, in the content area: Back, the creator's name in the editorial serif, a truthful
+        // count line, and a link to the starting work by its real title. The toolbar names the source instead.
         creatorBackButton.controlSize = .small
         creatorBackButton.font = small
-        creatorBackButton.bezelStyle = .rounded
+        creatorBackButton.bezelStyle = .inline
+        creatorBackButton.isBordered = false
+        creatorBackButton.contentTintColor = Theme.accentText
+        creatorBackButton.imagePosition = .imageLeading
+        creatorBackButton.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: nil)
+        creatorBackButton.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        creatorBackButton.lineBreakMode = .byTruncatingTail
+        creatorBackButton.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
         creatorBackButton.target = self; creatorBackButton.action = #selector(closeCreator(_:))
-        creatorBackButton.toolTip = "Back to Gallery (Esc)"
-        creatorBackButton.setAccessibilityLabel("Back to Gallery")
-        creatorTitleLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        creatorBackButton.toolTip = "Back (Esc)"
+        creatorBackButton.setAccessibilityLabel("Back")
+        creatorTitleLabel.font = Theme.serif(22)
+        creatorTitleLabel.textColor = Theme.inkPrimary
         creatorTitleLabel.lineBreakMode = .byTruncatingTail
         creatorTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         creatorSubtitleLabel.font = small
@@ -1219,9 +1426,34 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         creatorStatusLabel.lineBreakMode = .byTruncatingTail
         creatorStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         creatorStatusLabel.isHidden = true
-        creatorBar.setViews([creatorBackButton, creatorTitleLabel, creatorSubtitleLabel], in: .leading)
-        creatorBar.setViews([creatorStatusLabel, creatorLinkButton], in: .trailing)
-        creatorBar.spacing = 8
+        creatorLinkButton.isBordered = false
+        creatorLinkButton.contentTintColor = Theme.accentText
+        // Back at the leading edge, the starting-work link at the trailing edge, with the row spanning the header.
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let backRow = NSStackView(views: [creatorBackButton, spacer, creatorLinkButton])
+        backRow.spacing = 12
+        backRow.distribution = .fill
+        // The link fits whole when there is room and otherwise visibly truncates inside its own bounds (full title in
+        // its tooltip and accessibility label); it yields (below the stack's 250 clipping) before Back does.
+        creatorLinkButton.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        creatorLinkButton.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(200), for: .horizontal)
+        creatorLinkButton.lineBreakMode = .byTruncatingTail
+        creatorLinkButton.cell?.lineBreakMode = .byTruncatingTail
+        creatorLinkButton.cell?.truncatesLastVisibleLine = true
+        creatorBackButton.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        creatorSeparatorLabel.font = small
+        creatorSeparatorLabel.textColor = .secondaryText
+        creatorSeparatorLabel.isHidden = true
+        creatorSeparatorLabel.setAccessibilityElement(false)
+        let countRow = NSStackView(views: [creatorSubtitleLabel, creatorSeparatorLabel, creatorStatusLabel])
+        countRow.spacing = 6
+        creatorBar.setViews([backRow, creatorTitleLabel, countRow], in: .top)
+        creatorBar.orientation = .vertical
+        creatorBar.alignment = .leading
+        creatorBar.spacing = 2
+        backRow.widthAnchor.constraint(equalTo: creatorBar.widthAnchor).isActive = true
         creatorBar.setAccessibilityLabel("Creator")
         creatorBar.isHidden = true
     }
@@ -1245,6 +1477,19 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         }
     }
 
+    /// What Back returns to, in the user's terms: the search they ran, Favorites, a collection or the folder.
+    private var currentOriginName: String {
+        switch state.currentSource {
+        case .discover:
+            let query = draftQuery.trimmedQuery
+            let applied = resultOptions?.trimmedQuery ?? query
+            return applied.isEmpty ? discoverName : "“\(applied)”"
+        case .local: return state.folderPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Folder"
+        case .favorites: return "Favorites"
+        case .collections: return selectedCollection.map { "“\($0.name)”" } ?? "Collection"
+        }
+    }
+
     @objc func showCreator(_ sender: Any?) {
         guard let reference = selectedReference, let creator = pivotCreator else { NSSound.beep(); return }
         openCreator(id: creator.id, name: creator.name, from: reference)
@@ -1259,6 +1504,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         searchTask?.cancel(); searchGeneration = UUID(); searchTask = nil; isSearching = false; pendingAdvance = nil
         var level = CreatorLevel(originKey: originKey, provider: provider, creatorID: id, name: name, anchorIdentity: anchor.identityKey,
                                  anchorPageURL: browsableSourceURL(anchor), parentScrollY: galleryScroll.contentView.bounds.origin.y)
+        level.anchorTitle = anchor.displayTitle
+        level.originName = currentOriginName
         if let cached = creatorCache[level.cacheKey] { apply(cached, to: &level) }
         creatorLevel = level
         state.selectedRemoteIdentity = level.results.first?.identityKey
@@ -1392,19 +1639,26 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         creatorTitleLabel.stringValue = level.name
         creatorTitleLabel.toolTip = level.name
         creatorSubtitleLabel.stringValue = level.subtitle
-        // The count is of this one bounded search page, not of every work the museum holds; say so.
+        creatorBackButton.title = "Back to \(level.originName)"
+        creatorBackButton.setAccessibilityLabel("Back to \(level.originName)")
+        // The count describes what is on screen, and for a bounded search page says so; it never invents a total.
         let status: String
         if level.phase == .loaded, level.isTruncated, let total = level.matchTotal {
             status = "Showing \(level.results.count.formatted()) works from the first \(level.returnedCount.formatted()) of \(total.formatted()) matches"
+        } else if level.phase == .loaded {
+            status = level.results.count == 1 ? "1 work shown" : "\(level.results.count.formatted()) works shown"
         } else {
             status = ""
         }
         creatorStatusLabel.stringValue = status
         creatorStatusLabel.toolTip = status.isEmpty ? nil : status
         creatorStatusLabel.isHidden = status.isEmpty
-        creatorLinkButton.title = "View starting work on \(level.provider.displayName) ↗"
-        creatorLinkButton.setAccessibilityLabel("View the starting work on \(level.provider.displayName)")
-        creatorLinkButton.isHidden = status.isEmpty || level.anchorPageURL == nil
+        creatorSeparatorLabel.isHidden = status.isEmpty
+        let starting = level.anchorTitle.isEmpty ? "the starting work" : "“\(level.anchorTitle)”"
+        creatorLinkButton.title = "View \(starting) on \(level.provider.displayName) ↗"
+        creatorLinkButton.toolTip = "Open \(starting) on \(level.provider.displayName)"
+        creatorLinkButton.setAccessibilityLabel("View \(starting) on \(level.provider.displayName)")
+        creatorLinkButton.isHidden = level.anchorPageURL == nil
     }
 
 #if DEBUG
@@ -1704,6 +1958,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         cancelLocalPreview()
         pendingAdvance = nil
         stageView.placeholder = .none
+        if isFocusMode { setFocusMode(false) }
     }
 
     private func updatePreviewNavigation() {
@@ -1915,12 +2170,17 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
     /// Never fills in a license the source didn't report.
     static func attribution(for reference: WallpaperReference, creatorID: Int? = nil) -> NSAttributedString? {
         guard reference.provider == .openverse || reference.provider == .cma || reference.provider?.isCatalog == true else { return nil }
-        let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center; paragraph.lineBreakMode = .byTruncatingTail
+        let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .left; paragraph.lineBreakMode = .byTruncatingTail
         let text = NSMutableAttributedString()
         func add(_ string: String, link: URL? = nil) {
             var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
                                                              .foregroundColor: NSColor.secondaryText, .paragraphStyle: paragraph]
-            if let link { attributes[.link] = link }
+            // Links use the accent foreground (vermilion), underlined so they don't rely on color alone, not system blue.
+            if let link {
+                attributes[.link] = link
+                attributes[.foregroundColor] = Theme.accentText
+                attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            }
             text.append(NSAttributedString(string: string, attributes: attributes))
         }
         if reference.provider == .cma {
@@ -2009,17 +2269,22 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         }
         let text = NSMutableAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium),
-            .foregroundColor: selectedItem == nil ? NSColor.secondaryLabelColor : NSColor.labelColor])
+            .foregroundColor: selectedItem == nil ? Theme.inkSecondary : Theme.inkPrimary])
         if !detail.isEmpty {
             text.append(NSAttributedString(string: "  " + detail, attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
                 .foregroundColor: NSColor.secondaryText]))
         }
+        // Attributed text carries its own paragraph style: without tail truncation it wraps and clips to its first word.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        text.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: text.length))
         selectionLabel.attributedStringValue = text
+        selectionLabel.toolTip = title + (detail.isEmpty ? "" : " — " + detail)
         let isFavorite = selectedReference.map(state.isFavorite) ?? false
         favoriteButton.image = NSImage(systemSymbolName: isFavorite ? "heart.fill" : "heart",
                                        accessibilityDescription: isFavorite ? "Remove from Favorites" : "Add to Favorites")
-        favoriteButton.contentTintColor = isFavorite ? .systemPink : .secondaryLabelColor
+        favoriteButton.contentTintColor = isFavorite ? Theme.accentText : Theme.inkSecondary
         favoriteButton.toolTip = isFavorite ? "Remove from Favorites (⌘D)" : "Add to Favorites (⌘D)"
         favoriteButton.setAccessibilityLabel(isFavorite ? "Remove from Favorites" : "Add to Favorites")
     }
@@ -2061,6 +2326,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         let target: NSView = showViewer ? viewerView : galleryScroll
         let changed = target.isHidden
         viewerView.isHidden = !showViewer
+        // The preview's caption band names the work, so the control row doesn't repeat it.
+        selectionLabel.isHidden = showViewer
         galleryScroll.isHidden = showViewer || !hasItems
         updateScopeBar()
         viewModeControl.selectedSegment = showViewer ? 1 : 0
@@ -2314,36 +2581,37 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         func catalog(_ id: RemoteProviderID, _ symbol: String) -> SidebarNode {
             SidebarNode(.catalog(id), title: id.displayName, symbolName: symbol)
         }
+        // All nine sources, each in exactly one group.
         let wallpapers = [
             SidebarNode(.discover, title: RemoteProviderID.wallhaven.displayName, symbolName: "globe"),
             catalog(.plasma, "desktopcomputer"), catalog(.pepper, "paintbrush")
         ]
-        let fineArt = [
+        let museums = [
             SidebarNode(.cma, title: RemoteProviderID.cma.displayName, symbolName: "building.columns"),
-            catalog(.met, "building.columns"), catalog(.wellcome, "photo.on.rectangle")
+            catalog(.met, "building.columns"), catalog(.wellcome, "books.vertical")
         ]
         let photography = [
             SidebarNode(.openverse, title: RemoteProviderID.openverse.displayName, symbolName: "camera"),
-            catalog(.inaturalist, "leaf")
+            catalog(.inaturalist, "leaf"), catalog(.nasa, "sparkles")
         ]
         let library = [
+            SidebarNode(.favorites, title: "Favorites", symbolName: "heart", count: state.favorites.count),
             SidebarNode(.local, title: folderName ?? "Folder", symbolName: "folder",
                         count: state.folderPath == nil || isLoadingFolder ? nil : localURLs.count,
-                        isRotating: rotating && state.activeRotationCollectionID == nil),
-            SidebarNode(.favorites, title: "Favorites", symbolName: "heart", count: state.favorites.count)
+                        isRotating: rotating && state.activeRotationCollectionID == nil)
         ]
         let collections = state.collections.map {
             SidebarNode(.collection($0.id), title: $0.name, symbolName: "rectangle.stack", count: $0.wallpapers.count,
                         isRotating: rotating && state.activeRotationCollectionID == $0.id)
         }
-        var groups = [
-            SidebarNode(group: "Wallpapers & Digital Art", children: wallpapers),
-            SidebarNode(group: "Fine Art & Illustration", children: fineArt),
-            SidebarNode(group: "Photography & Nature", children: photography),
-            SidebarNode(group: "Space", children: [catalog(.nasa, "sparkles")]),
-            SidebarNode(group: "Library", children: library)
+        // The user's own library first, with `+` in the Collections header; then the sources, grouped.
+        let groups = [
+            SidebarNode(group: "Library", children: library),
+            SidebarNode(group: "Collections", children: collections, hasAddButton: true),
+            SidebarNode(group: "Museums & Archives", children: museums),
+            SidebarNode(group: "Photography & Space", children: photography),
+            SidebarNode(group: "Wallpapers & Digital", children: wallpapers)
         ]
-        if !collections.isEmpty { groups.append(SidebarNode(group: "Collections", children: collections)) }
         sidebar.reload(groups: groups, selection: currentSidebarItem)
     }
 
@@ -2643,6 +2911,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         cmaNoticeLabel.stringValue = state.cmaSearch.trimmedQuery.isEmpty
             ? "Open-access (CC0) works with images from the Cleveland Museum of Art."
             : "Public records from the Cleveland Museum of Art. Only open-access works with images can be previewed or set."
+        // The notice may truncate in a narrow bar; its whole text is the tooltip (and the accessibility value).
+        cmaNoticeLabel.toolTip = cmaNoticeLabel.stringValue
         // The creator view's header stands in for the bar of whatever it covers.
         updateCreatorBar()
         let creatorShown = creatorLevel != nil
@@ -2650,7 +2920,13 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         localBar.isHidden = state.currentSource != .local || state.folderPath == nil || creatorShown
         creatorBar.isHidden = !creatorShown
         scopeBar.isHidden = (discoverBar.isHidden && localBar.isHidden && creatorBar.isHidden) || !viewerView.isHidden
-        scopeBarCollapsed.isActive = scopeBar.isHidden
+        // Hidden bars leave layout by anchoring the gallery to the titlebar instead, never by pinning a zero height.
+        guard galleryArea.superview === contentRoot else { return }
+        if scopeBar.isHidden {
+            galleryBelowScopeBar.isActive = false; galleryAtTop.isActive = true
+        } else {
+            galleryAtTop.isActive = false; galleryBelowScopeBar.isActive = true
+        }
     }
 
     private func updateSourceUI() {
@@ -2671,8 +2947,9 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         updatePendingSearch()
         guard let window else { return }
         if let level = creatorLevel {
-            window.title = level.name
-            window.subtitle = level.subtitle
+            // The header in the content names the creator; the toolbar keeps naming the source.
+            window.title = level.provider.displayName
+            window.subtitle = level.phase == .loaded ? (level.allOpenAccess ? "Open-access works" : "Works on record") : ""
             return
         }
         let count = currentItems.count
@@ -2805,7 +3082,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
                                     message: "Drag wallpapers onto this collection in the sidebar, or choose Add to Collection.")
             } else {
                 emptyStateView.show(symbolName: "rectangle.stack", title: "No Collections",
-                                    message: "Collections keep wallpapers from Wallhaven and Openverse together, and can be used for automatic rotation.",
+                                    message: "Keep wallpapers from different sources together. You can use a collection for automatic rotation.",
                                     action: ("New Collection…", #selector(createCollection(_:)), self))
             }
         }
@@ -2830,16 +3107,15 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
             moreByButton.title = "More by \(creator.name)"
             moreByButton.setAccessibilityLabel("More by \(creator.name)")
             moreByButton.toolTip = "Show works from \(selectedReference?.providerName ?? discoverName) credited to \(creator.name)"
-            moreByButton.isHidden = false
-        } else {
-            moreByButton.isHidden = true
         }
         viewOnMuseumButton.isHidden = selectedReference?.isBrowseOnly != true
         if let reference = selectedReference, reference.isBrowseOnly {
-            viewOnMuseumButton.title = "View on \(reference.providerName) ↗"
             viewOnMuseumButton.setAccessibilityLabel("View on \(reference.providerName)")
+            viewOnMuseumButton.toolTip = "View on \(reference.providerName)"   // The label truncates in a narrow dock.
         }
+        updateDockShortcutsForWidth()
         favoriteButton.isHidden = selectedReference == nil || selectedReference?.isBrowseOnly == true
+        collectionButton.isHidden = favoriteButton.isHidden   // Browse-only works can't be collected either.
         moreButton.isHidden = !hasSelection
         updatePreviewNavigation()
         // An empty gallery shows its own spinner; the bar's is for work behind visible content.
@@ -2853,7 +3129,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         rotationPopUp.isEnabled = rotationCount > 0 || state.rotationInterval != .off
         shuffleButton.isEnabled = rotationCount > 0 && state.rotationInterval != .off
         let rotating = state.rotationInterval != .off
-        rotationButton.contentTintColor = rotating ? .controlAccentColor : nil
+        rotationButton.contentTintColor = rotating ? Theme.accentText : nil
         rotationButton.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath",
                                        accessibilityDescription: rotating ? "Automatic Rotation On" : "Automatic Rotation")
         rotationButton.toolTip = rotating ? "Automatic rotation: \(rotationTitle(state.rotationInterval).lowercased()) from \(rotationSourceName)" : "Automatic Rotation"
@@ -2885,7 +3161,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         }
         statusUndoButton.isHidden = !offersUndo || text.isEmpty
         statusLabel.stringValue = text
-        statusLabel.textColor = isError ? .systemRed : .secondaryText
+        statusLabel.textColor = isError ? Theme.statusError : .secondaryText
         statusLabel.toolTip = text
         statusLabel.isHidden = text.isEmpty
         statusLabel.setAccessibilityLabel(text)
@@ -2905,7 +3181,7 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         Openverse results are wide, large, non-mature Wikimedia Commons JPEGs reported as CC0 or public domain. Wallpier shows each \
         one's creator, source and reported license; Openverse doesn't verify licenses, so review the source page before reuse.
 
-        “More by” opens a creator’s works when the source identifies that creator. Esc or ← Gallery goes back. \
+        “More by” opens a creator’s works when the source identifies that creator. Click “Back to” or press Esc to return. \
         Works labeled for browsing open on their source site. The preview shows available credit and rights information.
 
         Select a wallpaper and press Space to preview it on your display’s shape; ← and → browse, Esc returns. \
@@ -2919,11 +3195,78 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         Drag wallpapers onto Favorites or a collection to keep them. The rotation button in the toolbar changes the wallpaper on a schedule while Wallpier is open.
         """
 
+    static let shortcutsText = """
+        Space — Preview on Desktop, or back to the gallery
+        ← → — previous or next wallpaper (also ⌘[ and ⌘])
+        Return — Set Wallpaper
+        ⌘D — Add to or Remove from Favorites
+        F — focus mode in the preview; Esc brings the details back
+        Esc — leave the preview or an artist's works
+        ⌘F — search the current source
+        ⌘+ and ⌘− — larger or smaller thumbnails
+        ⌃⌘S — show or hide the sidebar
+        ⌥⌘R — Automatic Rotation settings
+        ⇧⌘N — New Collection
+        """
+
+    @objc private func closeHelp(_ sender: NSButton) {
+        guard let sheet = sender.window else { return }
+        if let parent = sheet.sheetParent { parent.endSheet(sheet) } else { sheet.close() }
+    }
+
+    /// A scrollable help sheet: the same guidance as before, in the editorial type, with the keyboard shortcuts after it.
     @objc func showHelp(_ sender: Any?) {
-        let alert = NSAlert(); alert.messageText = "Wallpier Help"
-        alert.informativeText = Self.helpText
-        alert.addButton(withTitle: "OK")
-        if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 520), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        panel.title = "Wallpier Help"
+        let text = NSMutableAttributedString()
+        func add(_ string: String, font: NSFont, color: NSColor = Theme.inkPrimary, spacing: CGFloat = 8, before: CGFloat = 0,
+                 tab: CGFloat? = nil) {
+            let paragraph = NSMutableParagraphStyle(); paragraph.paragraphSpacing = spacing; paragraph.paragraphSpacingBefore = before
+            paragraph.lineSpacing = 2
+            if let tab {   // A hanging indent: keys in the first column, wrapped actions aligned under their own column.
+                paragraph.tabStops = [NSTextTab(textAlignment: .left, location: tab)]
+                paragraph.headIndent = tab
+            }
+            text.append(NSAttributedString(string: string + "\n", attributes: [.font: font, .foregroundColor: color, .paragraphStyle: paragraph]))
+        }
+        // The same guidance as helpText, under four clear headings, then a compact shortcut table.
+        let paragraphs = Self.helpText.components(separatedBy: "\n\n").map { $0.replacingOccurrences(of: "\n", with: " ") }
+        let sections: [(String, [Int])] = [("Discover & Sources", [0, 1]), ("Artist Exploration", [2]),
+                                           ("Desktop Preview & Fit", [3, 4]), ("Library & Rotation", [5])]
+        add("Wallpier Help", font: Theme.serif(24), spacing: 4)
+        for (heading, indices) in sections {
+            add(heading, font: Theme.serif(17), spacing: 4, before: 10)
+            for index in indices where paragraphs.indices.contains(index) { add(paragraphs[index], font: .systemFont(ofSize: 13)) }
+        }
+        add("Keyboard Shortcuts", font: Theme.serif(17), spacing: 4, before: 10)
+        for line in Self.shortcutsText.components(separatedBy: "\n") {
+            let parts = line.components(separatedBy: " — ")
+            guard parts.count == 2 else { continue }
+            add(parts[0] + "\t" + parts[1], font: .systemFont(ofSize: 13), spacing: 3, tab: 96)
+        }
+        let scroll = NSTextView.scrollableTextView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        if let textView = scroll.documentView as? NSTextView {
+            textView.isEditable = false
+            textView.textContainerInset = NSSize(width: 20, height: 18)
+            textView.drawsBackground = true
+            textView.backgroundColor = Theme.canvas
+            textView.textStorage?.setAttributedString(text)
+        }
+        let done = NSButton(title: "Done", target: self, action: #selector(closeHelp(_:)))
+        done.keyEquivalent = "\r"
+        done.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        content.addSubview(scroll); content.addSubview(done)
+        // A fixed, fully visible sheet: the scroll area fills it above the Done button, so nothing is clipped.
+        NSLayoutConstraint.activate([
+            content.widthAnchor.constraint(equalToConstant: 540), content.heightAnchor.constraint(equalToConstant: 580),
+            scroll.topAnchor.constraint(equalTo: content.topAnchor), scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: done.topAnchor, constant: -12),
+            done.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16), done.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14)
+        ])
+        panel.contentView = content
+        if let window { window.beginSheet(panel) } else { panel.center(); panel.makeKeyAndOrderFront(nil) }
     }
 
     // MARK: - Menus
@@ -2984,6 +3327,36 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     @objc private func showMoreMenu(_ sender: NSButton) {
         itemMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    @objc private func focusButtonClicked(_ sender: Any?) {
+        window?.makeFirstResponder(viewerView)   // So Esc, which leaves focus mode, reaches the preview.
+        setFocusMode(true)
+    }
+
+    /// The same Add to Collection choices as the Wallpaper menu, from the control row.
+    @objc private func showCollectionMenu(_ sender: NSButton) {
+        let menu = NSMenu(title: "Add to Collection")
+        populateCollectionMenu(menu)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    /// Focus mode (F in the preview) hides the caption band and the control row so the stage has the whole window; Esc restores them.
+    /// Hidden areas leave layout by swapping anchors, never by pinning a zero height.
+    private func setFocusMode(_ focused: Bool) {
+        guard focused == false || isViewerVisible else { return }
+        isFocusMode = focused
+        previewCaptionBand.isHidden = focused
+        applyBar.isHidden = focused
+        barSeparator.isHidden = focused
+        guard galleryArea.superview === contentRoot else { return }
+        if focused {
+            stageAboveCaption.isActive = false; stageToBottom.isActive = true
+            galleryAboveDock.isActive = false; galleryToBottom.isActive = true
+        } else {
+            stageToBottom.isActive = false; stageAboveCaption.isActive = true
+            galleryToBottom.isActive = false; galleryAboveDock.isActive = true
+        }
     }
 
     private func sidebarMenu(for item: SidebarItem) -> NSMenu? {
@@ -3096,7 +3469,8 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
         guard let item = reusable as? WallpaperCollectionViewItem, currentItems.indices.contains(indexPath.item) else { return reusable }
         let represented = currentItems[indexPath.item]
         item.isEmphasized = self.collectionView.isSelectionEmphasized
-        item.configure(identifier: represented.identifier, title: represented.title, toolTip: represented.toolTip)
+        item.configure(identifier: represented.identifier, title: represented.title, toolTip: represented.toolTip,
+                       subtitle: cellSubtitle(for: represented))
         // Decode at the cell's pixel size; switch to Wallhaven's larger thumbnail only when cells need it.
         let pixels = galleryLayout.fittedItemSize.width * (window?.backingScaleFactor ?? 2)
         let maximumPixelSize = Int(min(max(pixels, 360), 720))
@@ -3125,6 +3499,23 @@ final class MainWindowController: NSWindowController, NSCollectionViewDataSource
 
     func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
                         sizeForItemAt indexPath: IndexPath) -> NSSize { galleryLayout.fittedItemSize }
+
+    /// Leftover pixels from the whole-number column count go into the outer margins.
+    func collectionView(_ collectionView: NSCollectionView, layout collectionViewLayout: NSCollectionViewLayout,
+                        insetForSectionAt section: Int) -> NSEdgeInsets { galleryLayout.fittedSectionInset }
+
+    /// The cell's second line: maker · date, or maker · source where a list mixes sources. Only what the record reports.
+    private func cellSubtitle(for item: BrowserItem) -> String {
+        switch item {
+        case .local(let url): return url.pathExtension.uppercased()
+        case .remote(let ref):
+            let maker = ref.provider == .cma ? ref.cmaCredit(preferring: creatorLevel?.cmaCreatorID) : ref.displayCreator
+            let mixed = (state.currentSource == .favorites || state.currentSource == .collections) && creatorLevel == nil
+            let tail = mixed ? ref.providerName : ref.cmaDateText
+            let parts = [maker, tail].compactMap { $0 }.filter { !$0.isEmpty }
+            return parts.isEmpty ? ref.providerName : parts.joined(separator: " · ")
+        }
+    }
 
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
         guard let index = indexPaths.first?.item, currentItems.indices.contains(index) else { return }

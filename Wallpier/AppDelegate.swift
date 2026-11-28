@@ -21,6 +21,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainWindowController != nil
     }
 
+    /// The standard About panel with the app icon, and credits that name the sources and keep Openverse's acknowledgement.
+    @objc func showAboutPanel(_ sender: Any?) {
+        let sources = RemoteProviderID.allCases.map(\.displayName).joined(separator: ", ")
+        let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center; paragraph.paragraphSpacing = 6
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]
+        let credits = NSAttributedString(string: "Browses \(sources). Each work shows its credit and license as its source reports them.\n"
+                                         + "Powered by Openverse; not endorsed by Openverse.", attributes: attributes)
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Wallpier", .credits: credits])
+    }
+
     // Internal so activated-app tests dispatch keys through the production menu bar.
     func configureMainMenu(for controller: MainWindowController) {
         let mainMenu = NSMenu()
@@ -29,11 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenuItem = NSMenuItem()
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
-        appMenu.addItem(
-            withTitle: "About Wallpier",
-            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
-            keyEquivalent: ""
-        )
+        appMenu.addItem(withTitle: "About Wallpier", action: #selector(showAboutPanel(_:)), keyEquivalent: "").target = self
         appMenu.addItem(.separator())
         let servicesMenu = NSMenu(title: "Services")
         let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
@@ -91,15 +97,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(viewMenu, "Hide Sidebar", #selector(MainWindowController.toggleSidebar(_:)), "s", [.command, .control])
         viewMenu.addItem(.separator())
         add(viewMenu, "Discover", #selector(MainWindowController.showDiscover(_:)), "1")
-        add(viewMenu, "Wallhaven", #selector(MainWindowController.showWallhaven(_:)))
-        add(viewMenu, "Openverse", #selector(MainWindowController.showOpenverse(_:)))
-        add(viewMenu, "Cleveland Museum of Art", #selector(MainWindowController.showCMA(_:)))
-        let moreSources = NSMenu(title: "More Discover Sources")
-        let sourceItem = NSMenuItem(title: moreSources.title, action: nil, keyEquivalent: "")
-        sourceItem.submenu = moreSources
+        // All nine sources, grouped as in the sidebar, each by its full name.
+        let sources = NSMenu(title: "Discover Sources")
+        let sourceItem = NSMenuItem(title: sources.title, action: nil, keyEquivalent: "")
+        sourceItem.submenu = sources
         viewMenu.addItem(sourceItem)
-        for source in RemoteProviderID.allCases where source.isCatalog {
-            add(moreSources, source.displayName, #selector(MainWindowController.showCatalog(_:))).representedObject = source.rawValue
+        let groups: [(String, [RemoteProviderID])] = [
+            ("Museums & Archives", [.cma, .met, .wellcome]),
+            ("Photography & Space", [.openverse, .inaturalist, .nasa]),
+            ("Wallpapers & Digital", [.wallhaven, .plasma, .pepper])
+        ]
+        for (index, group) in groups.enumerated() {
+            if index > 0 { sources.addItem(.separator()) }
+            sources.addItem(NSMenuItem(title: group.0, action: nil, keyEquivalent: ""))   // A heading: no action, so it stays disabled.
+            for source in group.1 {
+                switch source {
+                case .wallhaven: add(sources, source.displayName, #selector(MainWindowController.showWallhaven(_:)))
+                case .openverse: add(sources, source.displayName, #selector(MainWindowController.showOpenverse(_:)))
+                case .cma: add(sources, source.displayName, #selector(MainWindowController.showCMA(_:)))
+                default: add(sources, source.displayName, #selector(MainWindowController.showCatalog(_:))).representedObject = source.rawValue
+                }
+            }
         }
         add(viewMenu, "Folder", #selector(MainWindowController.showLocal(_:)), "2")
         add(viewMenu, "Favorites", #selector(MainWindowController.showFavorites(_:)), "3")
