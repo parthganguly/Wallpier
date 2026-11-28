@@ -160,7 +160,7 @@ actor WallhavenProvider: RemoteWallpaperProvider {
 
     private func validate(_ response: HTTPURLResponse, origin: Origin = .api) throws {
         if response.statusCode == 429 {
-            let delay = max(1, Self.retryAfter(from: response) ?? 60)
+            let delay = max(1, ProviderThrottle.retryAfter(from: response) ?? 60)
             retryNotBefore[origin] = Date().addingTimeInterval(delay)
             throw RemoteProviderError.rateLimited(retryAfter: delay)
         }
@@ -186,43 +186,8 @@ actor WallhavenProvider: RemoteWallpaperProvider {
         ProviderRateLimit(
             limit: integerHeader("x-ratelimit-limit", response: response),
             remaining: integerHeader("x-ratelimit-remaining", response: response),
-            resetDate: resetDate(from: response)
+            resetDate: ProviderThrottle.resetDate(from: response)
         )
-    }
-
-    private static func retryAfter(from response: HTTPURLResponse) -> TimeInterval? {
-        guard let value = response.value(forHTTPHeaderField: "Retry-After") else {
-            if let reset = resetDate(from: response) {
-                return max(0, reset.timeIntervalSinceNow)
-            }
-            return nil
-        }
-        if let seconds = TimeInterval(value) {
-            return validDelay(seconds)
-        }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
-        return formatter.date(from: value).flatMap { validDelay(max(0, $0.timeIntervalSinceNow)) }
-    }
-
-    /// nil for a malformed wait (NaN, infinite, negative or beyond the maximum), so callers use their default.
-    private static func validDelay(_ seconds: TimeInterval) -> TimeInterval? {
-        seconds.isFinite && seconds >= 0 && seconds <= RemoteProviderError.maximumRetryDelay ? seconds : nil
-    }
-
-    private static func resetDate(from response: HTTPURLResponse) -> Date? {
-        let names = ["x-ratelimit-reset", "ratelimit-reset"]
-        for name in names {
-            // A past reset is harmless; a non-finite or far-future one would suppress requests indefinitely.
-            if let value = response.value(forHTTPHeaderField: name),
-               let timestamp = TimeInterval(value), timestamp.isFinite,
-               timestamp - Date().timeIntervalSince1970 <= RemoteProviderError.maximumRetryDelay {
-                return Date(timeIntervalSince1970: timestamp)
-            }
-        }
-        return nil
     }
 
     private static func integerHeader(_ name: String, response: HTTPURLResponse) -> Int? {

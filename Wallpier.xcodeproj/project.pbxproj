@@ -20,11 +20,24 @@
 		B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */; };
 		B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */; };
 		B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */; };
+		C3AE91A03041EC41004BF2F2 /* OpenverseProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3AE91A13041EC41004BF2F2 /* OpenverseProvider.swift */; };
+		C4AE91B03041EC41004BF2F2 /* DisplayText.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4AE91B13041EC41004BF2F2 /* DisplayText.swift */; };
+		B7721100FAAA00000000000A /* CatalogLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7721100FAB000000000000A /* CatalogLibrary.swift */; };
+		B7721100FAAA00000000000B /* MetCatalogAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7721100FAB000000000000B /* MetCatalogAdapter.swift */; };
+		B7721100FAAA00000000000C /* WellcomeCatalogAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7721100FAB000000000000C /* WellcomeCatalogAdapter.swift */; };
+		B7721100FAAA00000000000D /* NASACatalogAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7721100FAB000000000000D /* NASACatalogAdapter.swift */; };
+		B7721100FAAA00000000000E /* PlasmaCatalogAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7721100FAB000000000000E /* PlasmaCatalogAdapter.swift */; };
+		B7721100FAAA00000000000F /* PepperCatalogAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7721100FAB000000000000F /* PepperCatalogAdapter.swift */; };
+		B7721100FAAA000000000010 /* INaturalistCatalogAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7721100FAB0000000000010 /* INaturalistCatalogAdapter.swift */; };
+		C4AE91B23041EC41004BF2F2 /* CMAProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4AE91B33041EC41004BF2F2 /* CMAProvider.swift */; };
 		B2AE91943041EC41004BF2F2 /* RemoteWallpaperCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */; };
 		B2AE91963041EC41004BF2F2 /* RemoteThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */; };
 		B2AE91983041EC41004BF2F2 /* wallhaven-search.json in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91993041EC41004BF2F2 /* wallhaven-search.json */; };
 		B2AE919A3041EC41004BF2F2 /* wallhaven-detail.json in Resources */ = {isa = PBXBuildFile; fileRef = B2AE919B3041EC41004BF2F2 /* wallhaven-detail.json */; };
+		C3AE91A23041EC41004BF2F2 /* openverse-search.json in Resources */ = {isa = PBXBuildFile; fileRef = C3AE91A33041EC41004BF2F2 /* openverse-search.json */; };
+		C3AE91A43041EC41004BF2F2 /* openverse-detail.json in Resources */ = {isa = PBXBuildFile; fileRef = C3AE91A53041EC41004BF2F2 /* openverse-detail.json */; };
 		B2AE91553041EC40004BF2F2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B2AE91543041EC40004BF2F2 /* Assets.xcassets */; };
+		B7721100FAAA000000000017 /* CatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7721100FAB0000000000017 /* CatalogTests.swift */; };
 		B2AE91633041EC41004BF2F2 /* WallpierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE91623041EC41004BF2F2 /* WallpierTests.swift */; };
 		B2AE916D3041EC41004BF2F2 /* WallpierUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE916C3041EC41004BF2F2 /* WallpierUITests.swift */; };
 		B2AE916F3041EC41004BF2F2 /* WallpierUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2AE916E3041EC41004BF2F2 /* WallpierUITestsLaunchTests.swift */; };
@@ -62,13 +75,26 @@
 		B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperCollectionViewItem.swift; sourceTree = "<group>"; };
 		B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWallpaperProvider.swift; sourceTree = "<group>"; };
 		B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallhavenProvider.swift; sourceTree = "<group>"; };
+		C3AE91A13041EC41004BF2F2 /* OpenverseProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenverseProvider.swift; sourceTree = "<group>"; };
+		C4AE91B13041EC41004BF2F2 /* DisplayText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayText.swift; sourceTree = "<group>"; };
+		B7721100FAB000000000000A /* CatalogLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogLibrary.swift; sourceTree = "<group>"; };
+		B7721100FAB000000000000B /* MetCatalogAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetCatalogAdapter.swift; sourceTree = "<group>"; };
+		B7721100FAB000000000000C /* WellcomeCatalogAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WellcomeCatalogAdapter.swift; sourceTree = "<group>"; };
+		B7721100FAB000000000000D /* NASACatalogAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NASACatalogAdapter.swift; sourceTree = "<group>"; };
+		B7721100FAB000000000000E /* PlasmaCatalogAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlasmaCatalogAdapter.swift; sourceTree = "<group>"; };
+		B7721100FAB000000000000F /* PepperCatalogAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PepperCatalogAdapter.swift; sourceTree = "<group>"; };
+		B7721100FAB0000000000010 /* INaturalistCatalogAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = INaturalistCatalogAdapter.swift; sourceTree = "<group>"; };
+		C4AE91B33041EC41004BF2F2 /* CMAProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CMAProvider.swift; sourceTree = "<group>"; };
 		B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWallpaperCache.swift; sourceTree = "<group>"; };
 		B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteThumbnailProvider.swift; sourceTree = "<group>"; };
 		B2AE91993041EC41004BF2F2 /* wallhaven-search.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "wallhaven-search.json"; sourceTree = "<group>"; };
 		B2AE919B3041EC41004BF2F2 /* wallhaven-detail.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "wallhaven-detail.json"; sourceTree = "<group>"; };
+		C3AE91A33041EC41004BF2F2 /* openverse-search.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "openverse-search.json"; sourceTree = "<group>"; };
+		C3AE91A53041EC41004BF2F2 /* openverse-detail.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "openverse-detail.json"; sourceTree = "<group>"; };
 		B2AE91543041EC40004BF2F2 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B2AE91563041EC40004BF2F2 /* Wallpier.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Wallpier.entitlements; sourceTree = "<group>"; };
 		B2AE915E3041EC41004BF2F2 /* WallpierTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WallpierTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B7721100FAB0000000000017 /* CatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogTests.swift; sourceTree = "<group>"; };
 		B2AE91623041EC41004BF2F2 /* WallpierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpierTests.swift; sourceTree = "<group>"; };
 		B2AE91683041EC41004BF2F2 /* WallpierUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WallpierUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2AE916C3041EC41004BF2F2 /* WallpierUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpierUITests.swift; sourceTree = "<group>"; };
@@ -136,6 +162,16 @@
 				B2AE91883041EC41004BF2F2 /* WallpaperCollectionViewItem.swift */,
 				B2AE91913041EC41004BF2F2 /* RemoteWallpaperProvider.swift */,
 				B2AE91933041EC41004BF2F2 /* WallhavenProvider.swift */,
+				C3AE91A13041EC41004BF2F2 /* OpenverseProvider.swift */,
+				B7721100FAB000000000000A /* CatalogLibrary.swift */,
+				B7721100FAB000000000000B /* MetCatalogAdapter.swift */,
+				B7721100FAB000000000000C /* WellcomeCatalogAdapter.swift */,
+				B7721100FAB000000000000D /* NASACatalogAdapter.swift */,
+				B7721100FAB000000000000E /* PlasmaCatalogAdapter.swift */,
+				B7721100FAB000000000000F /* PepperCatalogAdapter.swift */,
+				B7721100FAB0000000000010 /* INaturalistCatalogAdapter.swift */,
+				C4AE91B33041EC41004BF2F2 /* CMAProvider.swift */,
+				C4AE91B13041EC41004BF2F2 /* DisplayText.swift */,
 				B2AE91953041EC41004BF2F2 /* RemoteWallpaperCache.swift */,
 				B2AE91973041EC41004BF2F2 /* RemoteThumbnailProvider.swift */,
 				B2AE91543041EC40004BF2F2 /* Assets.xcassets */,
@@ -147,6 +183,7 @@
 		B2AE91613041EC41004BF2F2 /* WallpierTests */ = {
 			isa = PBXGroup;
 			children = (
+				B7721100FAB0000000000017 /* CatalogTests.swift */,
 				B2AE91623041EC41004BF2F2 /* WallpierTests.swift */,
 				B2AE919C3041EC41004BF2F2 /* Fixtures */,
 			);
@@ -158,6 +195,8 @@
 			children = (
 				B2AE91993041EC41004BF2F2 /* wallhaven-search.json */,
 				B2AE919B3041EC41004BF2F2 /* wallhaven-detail.json */,
+				C3AE91A33041EC41004BF2F2 /* openverse-search.json */,
+				C3AE91A53041EC41004BF2F2 /* openverse-detail.json */,
 			);
 			path = Fixtures;
 			sourceTree = "<group>";
@@ -285,6 +324,8 @@
 			files = (
 				B2AE91983041EC41004BF2F2 /* wallhaven-search.json in Resources */,
 				B2AE919A3041EC41004BF2F2 /* wallhaven-detail.json in Resources */,
+				C3AE91A23041EC41004BF2F2 /* openverse-search.json in Resources */,
+				C3AE91A43041EC41004BF2F2 /* openverse-detail.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -315,6 +356,16 @@
 				B2AE91893041EC41004BF2F2 /* WallpaperCollectionViewItem.swift in Sources */,
 				B2AE91903041EC41004BF2F2 /* RemoteWallpaperProvider.swift in Sources */,
 				B2AE91923041EC41004BF2F2 /* WallhavenProvider.swift in Sources */,
+				C3AE91A03041EC41004BF2F2 /* OpenverseProvider.swift in Sources */,
+				B7721100FAAA00000000000A /* CatalogLibrary.swift in Sources */,
+				B7721100FAAA00000000000B /* MetCatalogAdapter.swift in Sources */,
+				B7721100FAAA00000000000C /* WellcomeCatalogAdapter.swift in Sources */,
+				B7721100FAAA00000000000D /* NASACatalogAdapter.swift in Sources */,
+				B7721100FAAA00000000000E /* PlasmaCatalogAdapter.swift in Sources */,
+				B7721100FAAA00000000000F /* PepperCatalogAdapter.swift in Sources */,
+				B7721100FAAA000000000010 /* INaturalistCatalogAdapter.swift in Sources */,
+				C4AE91B23041EC41004BF2F2 /* CMAProvider.swift in Sources */,
+				C4AE91B03041EC41004BF2F2 /* DisplayText.swift in Sources */,
 				B2AE91943041EC41004BF2F2 /* RemoteWallpaperCache.swift in Sources */,
 				B2AE91963041EC41004BF2F2 /* RemoteThumbnailProvider.swift in Sources */,
 			);
@@ -324,6 +375,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B7721100FAAA000000000017 /* CatalogTests.swift in Sources */,
 				B2AE91633041EC41004BF2F2 /* WallpierTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -477,6 +529,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Parth";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				MARKETING_VERSION = 1.0;
@@ -494,11 +548,17 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_COVERAGE_MAPPING = NO;
 				CODE_SIGN_ENTITLEMENTS = Wallpier/Wallpier.entitlements;
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = NO;
+				ENABLE_CODE_COVERAGE = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Parth";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				MARKETING_VERSION = 1.0;

@@ -1,0 +1,58 @@
+# macOS and per-user Xcode state
+.DS_Store
+xcuserdata/
+*.xcuserstate
+
+# Generated builds, packages, and test output
+/build/
+/Build/
+/.build/
+/DerivedData/
+/dist/
+/release-builds/
+*.app/
+*.dSYM/
+*.xcarchive/
+*.xcresult/
+*.xcactivitylog
+*.profraw
+*.profdata
+/default.profraw
+/release-build.log
+/Wallpier-*-universal-adhoc.zip
+/Wallpier-*-universal-adhoc.zip.sha256
+
+# Local audit packets, personal recovery material, and temporary evidence
+/.github-preflight-local/
+/visual-evidence/
+/Wallpier-rc1-evidence/
+/Wallpier-rc1-preservation/
+/recovery-backups/
+/backups/
+*.tracked.patch
+*.untracked.tgz
+*.untracked.txt
+
+# Runtime data copied into the repository during debugging
+/Library/
+/Caches/
+/Originals/
+/Rollback/
+/state.json
+
+# Signing material and local credentials; keep the app's .entitlements source
+*.p12
+*.pfx
+*.pem
+*.key
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+AuthKey_*.p8
+.env
+.env.*
+!.env.example
+!.env.sample

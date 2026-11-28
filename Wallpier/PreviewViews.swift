@@ -6,17 +6,68 @@ import ImageIO
 /// geometry always comes from the original's pixel size, never the preview bitmap's; the
 /// preview must therefore hold the whole original (see `WallpaperReference.remotePreview`).
 final class DesktopPreviewView: NSView {
-    static let desktopColor = NSColor(calibratedWhite: 0.11, alpha: 1)
+    static let desktopColor = Theme.desktopMat
+    /// The display's edge, which shows how much of the screen Fit and Center leave empty. In dark
+    /// appearances the desktop fill is within 1.1:1 of the backdrop, so the rim alone carries the
+    /// boundary: a neutral mid-gray hairline at ≥ 3:1 against both. In light the dark fill already does.
+    static let rimColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.42) : NSColor(white: 0, alpha: 0.16)
+    }
 
-    var image: NSImage? { didSet { needsDisplay = true } }
+    var image: NSImage? { didSet { needsDisplay = true; if image != nil { placeholder = .none } } }
     var imagePixelSize: CGSize = .zero { didSet { needsDisplay = true } }
-    var displayPixelSize = CGSize(width: 2880, height: 1800) { didSet { needsDisplay = true } }
+    var displayPixelSize = CGSize(width: 2880, height: 1800) { didSet { needsDisplay = true; needsLayout = true } }
     var scaling: ScalingMode = .fill { didSet { needsDisplay = true } }
+
+    /// What the empty stage says while it has no picture. Never a substitute image: a spinner once loading
+    /// has taken a moment (cached pictures arrive first, so browsing them never flickers), or a note that
+    /// the preview couldn't be loaded, so an empty display isn't mistaken for a dark wallpaper.
+    enum Placeholder { case none, loading, unavailable }
+    static let loadingIndicatorDelay: TimeInterval = 0.2
+    var placeholder: Placeholder = .none { didSet { if placeholder != oldValue { updatePlaceholder() } } }
+    private let spinner = NSProgressIndicator()
+    private let unavailableLabel = NSTextField(labelWithString: "Preview Unavailable")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         setAccessibilityElement(true)
         setAccessibilityRole(.image)
+        // Both sit on the desktop fill, which is dark in either appearance.
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.appearance = NSAppearance(named: .darkAqua)
+        unavailableLabel.appearance = NSAppearance(named: .darkAqua)
+        unavailableLabel.textColor = .secondaryLabelColor
+        unavailableLabel.isHidden = true
+        addSubview(spinner)
+        addSubview(unavailableLabel)
+    }
+
+    private(set) var isShowingLoadingIndicator = false
+
+    private func updatePlaceholder() {
+        NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(startSpinner), object: nil)
+        spinner.stopAnimation(nil); isShowingLoadingIndicator = false
+        unavailableLabel.isHidden = placeholder != .unavailable
+        setAccessibilityValue(placeholder == .unavailable ? "Preview unavailable" : nil)
+        // Common modes, so the spinner still appears while the run loop tracks a drag, a live resize or a menu.
+        if placeholder == .loading { perform(#selector(startSpinner), with: nil, afterDelay: Self.loadingIndicatorDelay, inModes: [.common]) }
+    }
+
+    @objc private func startSpinner() {
+        guard placeholder == .loading else { return }
+        spinner.startAnimation(nil); isShowingLoadingIndicator = true
+    }
+
+    override func layout() {
+        super.layout()
+        let stage = stageRect
+        spinner.sizeToFit()
+        spinner.setFrameOrigin(NSPoint(x: stage.midX - spinner.frame.width / 2, y: stage.midY - spinner.frame.height / 2))
+        unavailableLabel.sizeToFit()
+        unavailableLabel.setFrameOrigin(NSPoint(x: (stage.midX - unavailableLabel.frame.width / 2).rounded(),
+                                                y: (stage.midY - unavailableLabel.frame.height / 2).rounded()))
     }
 
     required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
@@ -62,9 +113,11 @@ final class DesktopPreviewView: NSView {
             image.draw(in: target, from: Self.cropRect(of: image.size, toAspectOf: target.size), operation: .sourceOver, fraction: 1)
             NSGraphicsContext.restoreGraphicsState()
         }
-        NSColor.separatorColor.setStroke()
-        outline.lineWidth = 1
-        outline.stroke()
+        let scale = window?.backingScaleFactor ?? 2
+        let rim = NSBezierPath(roundedRect: stage.insetBy(dx: -0.5 / scale, dy: -0.5 / scale), xRadius: 6, yRadius: 6)
+        Self.rimColor.setStroke()
+        rim.lineWidth = 1 / scale
+        rim.stroke()
     }
 
     /// Trims a preview's rounding difference from the original's shape. A thumbnail that was cropped
@@ -91,12 +144,26 @@ final class DesktopPreviewView: NSView {
     }
 }
 
-/// Container for the single-wallpaper preview. Owns its keyboard: ←/→ browse, Space or Esc return.
+/// Container for the single-wallpaper preview, on the studio mat. Owns its keyboard: ←/→ browse, Space or Esc
+/// return, F toggles focus mode (Esc leaves focus mode first).
 final class ViewerView: NSView {
     var onNavigate: ((Int) -> Void)?
     var onClose: (() -> Void)?
+    var onToggleFocus: (() -> Void)?
+    /// Esc while focus mode hides the caption and controls: returns whether it was consumed.
+    var onEscape: (() -> Bool)?
 
     override var acceptsFirstResponder: Bool { true }
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = Theme.stageBackdrop.cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
 
     override func keyDown(with event: NSEvent) {
         guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return super.keyDown(with: event) }
@@ -104,11 +171,26 @@ final class ViewerView: NSView {
         case .leftArrow?, .upArrow?: onNavigate?(-1)
         case .rightArrow?, .downArrow?: onNavigate?(1)
         default:
-            if event.charactersIgnoringModifiers == " " || event.keyCode == 53 { onClose?() } else { super.keyDown(with: event) }
+            if event.keyCode == 53 {
+                if onEscape?() != true { onClose?() }
+            } else if event.charactersIgnoringModifiers == " " {
+                onClose?()
+            } else if event.charactersIgnoringModifiers?.lowercased() == "f", event.modifierFlags.intersection([.shift]).isEmpty {
+                onToggleFocus?()
+            } else {
+                super.keyDown(with: event)
+            }
         }
     }
 
-    override func cancelOperation(_ sender: Any?) { onClose?() }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
+
+    override func cancelOperation(_ sender: Any?) { if onEscape?() != true { onClose?() } }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)

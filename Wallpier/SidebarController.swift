@@ -1,12 +1,14 @@
 import AppKit
 
 enum SidebarItem: Equatable {
-    case discover, local, favorites
+    /// `discover` is Wallhaven's Discover; `openverse` is Openverse's; `cma` is the Cleveland Museum of Art's.
+    case discover, openverse, cma, local, favorites
     case collection(UUID)
+    case catalog(RemoteProviderID)
 }
 
 extension NSPasteboard.PasteboardType {
-    /// A Wallhaven reference's identity key, for drags within Wallpier.
+    /// A remote reference's provider-qualified identity key, for drags within Wallpier.
     static let wallpierReference = NSPasteboard.PasteboardType("com.parth.Wallpier.reference")
 }
 
@@ -17,6 +19,8 @@ final class SidebarNode: NSObject {
     let count: Int?
     let isRotating: Bool
     let children: [SidebarNode]
+    /// A group header that carries a `+` button (Collections: New Collection).
+    var hasAddButton = false
 
     /// A selectable row.
     init(_ item: SidebarItem, title: String, symbolName: String, count: Int? = nil, isRotating: Bool = false) {
@@ -25,8 +29,9 @@ final class SidebarNode: NSObject {
     }
 
     /// A group header.
-    init(group title: String, children: [SidebarNode]) {
+    init(group title: String, children: [SidebarNode], hasAddButton: Bool = false) {
         item = nil; self.title = title; symbolName = nil; count = nil; isRotating = false; self.children = children
+        self.hasAddButton = hasAddButton
     }
 }
 
@@ -40,11 +45,13 @@ final class SidebarOutlineView: NSOutlineView {
     }
 }
 
-/// Source list: Library (Discover, Folder, Favorites) and one row per collection.
+/// Source list: Library (Favorites, Folder, Collections) and the Discover sources in three groups.
 final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     let outlineView = SidebarOutlineView()
     let scrollView = NSScrollView()
     var onSelect: ((SidebarItem) -> Void)?
+    /// The `+` in the Collections header.
+    var onAddCollection: (() -> Void)?
     /// Called when wallpapers are dropped on Favorites or a collection; returns whether they were accepted.
     var onDrop: ((SidebarItem, [String]) -> Bool)?
     private var groups: [SidebarNode] = []
@@ -76,9 +83,12 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     func reload(groups: [SidebarNode], selection: SidebarItem?) {
         isReloading = true
         defer { isReloading = false }
+        let collapsed = Set(self.groups.filter { !outlineView.isItemExpanded($0) }.map(\.title))
         self.groups = groups
         outlineView.reloadData()
-        groups.forEach { outlineView.expandItem($0) }
+        for group in groups where !collapsed.contains(group.title) {
+            outlineView.expandItem(group)
+        }
         select(selection)
     }
 
@@ -110,26 +120,16 @@ final class SidebarController: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         (item as? SidebarNode)?.item != nil
     }
 
-    func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool { false }
+    func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool {
+        (item as? SidebarNode)?.item == nil
+    }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? SidebarNode else { return nil }
         if node.item == nil {
             let id = NSUserInterfaceItemIdentifier("SidebarHeader")
-            let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
-                let cell = NSTableCellView()
-                cell.identifier = id
-                let label = NSTextField(labelWithString: "")
-                label.translatesAutoresizingMaskIntoConstraints = false
-                cell.addSubview(label)
-                cell.textField = label
-                NSLayoutConstraint.activate([
-                    label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-                    label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-                ])
-                return cell
-            }()
-            cell.textField?.stringValue = node.title
+            let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? SidebarHeaderCell ?? SidebarHeaderCell(identifier: id)
+            cell.configure(node, onAdd: { [weak self] in self?.onAddCollection?() })
             return cell
         }
         let id = NSUserInterfaceItemIdentifier("SidebarRow")
@@ -176,14 +176,17 @@ final class SidebarCell: NSTableCellView {
         super.init(frame: .zero)
         self.identifier = identifier
         let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 12.5)
         label.lineBreakMode = .byTruncatingTail
+        label.allowsExpansionToolTips = true
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        countLabel.textColor = .tertiaryLabelColor
+        countLabel.textColor = Theme.inkSecondary
         countLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
         rotationBadge.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Rotating")
         rotationBadge.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
-        icon.contentTintColor = .controlAccentColor
-        rotationBadge.contentTintColor = .controlAccentColor
+        icon.symbolConfiguration = .init(pointSize: 13, weight: .medium)
+        icon.contentTintColor = Theme.inkSecondary
+        rotationBadge.contentTintColor = Theme.accentText
         rotationBadge.toolTip = "Automatic rotation uses this source"
         let stack = NSStackView(views: [icon, label, rotationBadge, countLabel])
         stack.spacing = 6
@@ -197,7 +200,7 @@ final class SidebarCell: NSTableCellView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 18)
+            icon.widthAnchor.constraint(equalToConstant: 16)
         ])
     }
 
@@ -205,19 +208,69 @@ final class SidebarCell: NSTableCellView {
 
     override var backgroundStyle: NSView.BackgroundStyle {
         didSet {
-            let tint: NSColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .controlAccentColor
-            icon.contentTintColor = tint
-            rotationBadge.contentTintColor = tint
+            let selected = backgroundStyle == .emphasized
+            icon.contentTintColor = selected ? .alternateSelectedControlTextColor : Theme.inkSecondary
+            rotationBadge.contentTintColor = selected ? .alternateSelectedControlTextColor : Theme.accentText
+            countLabel.textColor = selected ? .alternateSelectedControlTextColor : Theme.inkSecondary
         }
     }
 
     func configure(_ node: SidebarNode) {
         icon.image = node.symbolName.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
         textField?.stringValue = node.title
+        textField?.toolTip = node.title
         countLabel.stringValue = node.count.map(String.init) ?? ""
         countLabel.isHidden = node.count == nil
         rotationBadge.isHidden = !node.isRotating
         let count = node.count.map { ", \($0) wallpaper\($0 == 1 ? "" : "s")" } ?? ""
         setAccessibilityLabel(node.title + count + (node.isRotating ? ", used for automatic rotation" : ""))
     }
+}
+
+/// The Collections header also carries the `+` that creates a collection.
+final class SidebarHeaderCell: NSTableCellView {
+    private let heading = NSTextField(labelWithString: "")
+    private let addButton = NSButton()
+    private var onAdd: (() -> Void)?
+
+    init(identifier: NSUserInterfaceItemIdentifier) {
+        super.init(frame: .zero)
+        self.identifier = identifier
+        // The source-list textField outlet applies its own muted group-label color.
+        heading.font = .systemFont(ofSize: 11, weight: .semibold)
+        heading.textColor = Theme.sidebarHeading
+        heading.setAccessibilityElement(false)
+        heading.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(heading)
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Collection")
+        addButton.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        addButton.isBordered = false
+        addButton.imagePosition = .imageOnly
+        addButton.contentTintColor = Theme.inkSecondary
+        addButton.toolTip = "New Collection (⇧⌘N)"
+        addButton.setAccessibilityLabel("New Collection")
+        addButton.target = self; addButton.action = #selector(addClicked)
+        addButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(addButton)
+        NSLayoutConstraint.activate([
+            heading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            heading.centerYAnchor.constraint(equalTo: centerYAnchor),
+            addButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            addButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            addButton.widthAnchor.constraint(equalToConstant: 22),
+            addButton.heightAnchor.constraint(equalToConstant: 22),
+            heading.trailingAnchor.constraint(lessThanOrEqualTo: addButton.leadingAnchor, constant: -4)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("Use programmatic initialization") }
+
+    func configure(_ node: SidebarNode, onAdd: @escaping () -> Void) {
+        heading.stringValue = node.title
+        addButton.isHidden = !node.hasAddButton
+        self.onAdd = onAdd
+        setAccessibilityLabel(node.title)
+    }
+
+    @objc private func addClicked() { onAdd?() }
 }
